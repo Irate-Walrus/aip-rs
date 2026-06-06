@@ -52,7 +52,7 @@ wired up.
 | Method            | aip-rs primitive(s)                          | Issue        | Status      |
 | ----------------- | -------------------------------------------- | ------------ | ----------- |
 | `GetShipper`      | `resourcename` (validate name)               | #4           | wired       |
-| `ListShippers`    | `pagination`                                 | #6, #7       | wired¹      |
+| `ListShippers`    | `pagination` (offset page-token codec)       | #6, #7       | wired²      |
 | `CreateShipper`   | `resourceid` (generate), `resourcename` (format) | #5, #3   | wired       |
 | `UpdateShipper`   | `fieldmask` (apply `update_mask`)            | #8           | wired¹      |
 | `DeleteShipper`   | `resourcename` (validate name)               | #4           | wired       |
@@ -60,6 +60,10 @@ wired up.
 
 ¹ Functional with naive placeholders today; the `TODO(aip #N)` seam swaps in the
 real primitive when its issue lands.
+
+² Real offset pagination through the `pagination` page-token codec (#6); the
+request-checksum guard that rejects a token when the filter/order changes
+mid-pagination lands in #7.
 
 ## How the proto types are built
 
