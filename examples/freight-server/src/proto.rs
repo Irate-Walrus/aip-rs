@@ -7,6 +7,24 @@
 //! is referenced by the generated freight field types, so neither is mounted.
 #![allow(clippy::all, missing_docs, rustdoc::all)]
 
+use std::sync::LazyLock;
+
+use prost_reflect::DescriptorPool;
+
+/// The freight `FileDescriptorSet` emitted by `build.rs`, embedded for runtime
+/// reflection (the reflective `aip::pagination::request_checksum` needs a
+/// descriptor pool).
+static FILE_DESCRIPTOR_SET: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/freight_descriptor_set.bin"));
+
+/// Shared [`DescriptorPool`] over the freight protos. Used to transcode a
+/// concrete generated request into a `DynamicMessage` for reflective AIP
+/// primitives; cheaply cloned (it is reference-counted internally).
+pub static DESCRIPTOR_POOL: LazyLock<DescriptorPool> = LazyLock::new(|| {
+    DescriptorPool::decode(FILE_DESCRIPTOR_SET)
+        .expect("the embedded freight descriptor set is well-formed")
+});
+
 pub mod einride {
     pub mod example {
         pub mod freight {

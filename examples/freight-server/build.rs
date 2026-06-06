@@ -9,8 +9,15 @@
 //! The example vendors its own copy of the freight protos and their googleapis
 //! imports under `proto/`, so it builds standalone without reaching into another
 //! crate's source.
+//!
+//! The descriptor set is also written to `OUT_DIR` so `proto.rs` can build a
+//! runtime [`prost_reflect::DescriptorPool`] — needed to transcode a concrete
+//! request into a `DynamicMessage` for the reflective
+//! `aip::pagination::request_checksum`.
 
 use std::{env, path::PathBuf};
+
+use prost::Message as _;
 
 /// The freight `.proto` files to serve, relative to this crate's `proto/` root.
 /// Their imports (sibling freight protos, vendored `google/api` + `google/type`,
@@ -34,6 +41,15 @@ fn main() {
         [&proto_root],
     )
     .expect("protox failed to compile the freight protos");
+
+    // Persist the descriptor set so `proto.rs` can build a runtime reflection
+    // pool. Written before `compile_fds` consumes the set.
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is set by cargo"));
+    std::fs::write(
+        out_dir.join("freight_descriptor_set.bin"),
+        file_descriptor_set.encode_to_vec(),
+    )
+    .expect("write the freight descriptor set for runtime reflection");
 
     // Server-only: we implement the service, we don't call it.
     tonic_prost_build::configure()
