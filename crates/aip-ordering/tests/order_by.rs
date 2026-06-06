@@ -97,6 +97,72 @@ fn parse_extra_word_is_error() {
     );
 }
 
+#[test]
+fn parse_dot_only_path_is_error() {
+    let err = ".".parse::<OrderBy>().unwrap_err();
+    assert!(
+        matches!(err, Error::Syntax(_)),
+        "expected Syntax error for \".\", got {err:?}"
+    );
+}
+
+#[test]
+fn parse_consecutive_dots_is_error() {
+    let err = "foo..bar".parse::<OrderBy>().unwrap_err();
+    assert!(
+        matches!(err, Error::Syntax(_)),
+        "expected Syntax error for \"foo..bar\", got {err:?}"
+    );
+}
+
+#[test]
+fn parse_leading_dot_is_error() {
+    let err = ".foo".parse::<OrderBy>().unwrap_err();
+    assert!(
+        matches!(err, Error::Syntax(_)),
+        "expected Syntax error for \".foo\", got {err:?}"
+    );
+}
+
+#[test]
+fn parse_trailing_dot_is_error() {
+    let err = "foo.".parse::<OrderBy>().unwrap_err();
+    assert!(
+        matches!(err, Error::Syntax(_)),
+        "expected Syntax error for \"foo.\", got {err:?}"
+    );
+}
+
+#[test]
+fn parse_non_ascii_letter_is_error() {
+    // Protobuf field names are ASCII-only; non-ASCII letters must be rejected.
+    let err = "café".parse::<OrderBy>().unwrap_err();
+    assert!(
+        matches!(err, Error::Syntax(_)),
+        "expected Syntax error for non-ASCII input, got {err:?}"
+    );
+}
+
+#[test]
+fn parse_non_ascii_digit_is_error() {
+    // Unicode numeric chars like '²' (U+00B2) are not ASCII digits.
+    let err = "foo²".parse::<OrderBy>().unwrap_err();
+    assert!(
+        matches!(err, Error::Syntax(_)),
+        "expected Syntax error for non-ASCII digit, got {err:?}"
+    );
+}
+
+#[test]
+fn parse_whitespace_only_is_error() {
+    // Whitespace-only input is not a valid field name; expect a Syntax error.
+    let err = "   ".parse::<OrderBy>().unwrap_err();
+    assert!(
+        matches!(err, Error::Syntax(_)),
+        "expected Syntax error for whitespace-only input, got {err:?}"
+    );
+}
+
 // ---- OrderBy::validate_for_paths ----
 
 #[test]

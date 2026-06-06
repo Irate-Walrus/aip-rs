@@ -55,15 +55,20 @@ impl FromStr for OrderBy {
     ///
     /// - An empty string is valid and yields an empty [`OrderBy`].
     /// - Fields are comma-separated; each field is `<path>` or `<path> asc|desc`.
-    /// - Paths may contain letters, digits, `_`, and `.` (for subfields).
+    /// - Paths are ASCII identifiers optionally joined by `.` for subfields.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s.is_empty() {
             return Ok(OrderBy::default());
         }
 
-        // Validate characters up front: only letters, digits, '_', space, ',', '.'
+        // Validate characters up front: only ASCII letters, digits, '_', space, ',', '.'
         for c in s.chars() {
-            if !c.is_alphabetic() && !c.is_numeric() && c != '_' && c != ' ' && c != ',' && c != '.'
+            if !c.is_ascii_alphabetic()
+                && !c.is_ascii_digit()
+                && c != '_'
+                && c != ' '
+                && c != ','
+                && c != '.'
             {
                 return Err(Error::Syntax(format!(
                     "invalid character {}",
@@ -74,20 +79,25 @@ impl FromStr for OrderBy {
 
         let mut fields = Vec::new();
         for raw in s.split(',') {
-            let parts: Vec<&str> = raw.split_whitespace().collect();
-            match parts.as_slice() {
-                [path] => fields.push(OrderByField {
-                    path: (*path).to_owned(),
-                    desc: false,
-                }),
-                [path, direction] => {
-                    let desc = match *direction {
+            let mut parts = raw.split_whitespace();
+            match (parts.next(), parts.next(), parts.next()) {
+                (None, _, _) => return Err(Error::Syntax(format!("invalid format for '{raw}'"))),
+                (Some(path), None, _) => {
+                    validate_path_segments(path)?;
+                    fields.push(OrderByField {
+                        path: path.to_owned(),
+                        desc: false,
+                    });
+                }
+                (Some(path), Some(direction), None) => {
+                    let desc = match direction {
                         "asc" => false,
                         "desc" => true,
                         _ => return Err(Error::Syntax(format!("invalid format for '{raw}'"))),
                     };
+                    validate_path_segments(path)?;
                     fields.push(OrderByField {
-                        path: (*path).to_owned(),
+                        path: path.to_owned(),
                         desc,
                     });
                 }
@@ -98,8 +108,23 @@ impl FromStr for OrderBy {
     }
 }
 
+/// Validates that every `.`-separated segment of `path` is non-empty.
+///
+/// This rejects leading/trailing dots and consecutive dots (e.g. `"."`,
+/// `".foo"`, `"foo."`, `"foo..bar"`), which the character allowlist permits
+/// but which would produce empty segments when iterated by [`OrderByField::sub_fields`].
+fn validate_path_segments(path: &str) -> Result<(), Error> {
+    if path.split('.').any(|seg| seg.is_empty()) {
+        return Err(Error::Syntax(format!("invalid path: '{path}'")));
+    }
+    Ok(())
+}
+
 impl OrderBy {
     /// Validates every field path against an explicit allow-list.
+    ///
+    /// Each entry in `allowed` must be the complete dot-notation path (e.g.
+    /// `"book.name"`), not individual segments. Matching is exact string equality.
     pub fn validate_for_paths(&self, allowed: &[&str]) -> Result<(), Error> {
         for field in &self.fields {
             if !allowed.contains(&field.path.as_str()) {
