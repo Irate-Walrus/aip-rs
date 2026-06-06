@@ -1,0 +1,26 @@
+# test-fixtures — test-only fixture harness for aip-rs's reflective crates.
+#
+# Compiles the vendored einride example protos (freight + syntax) with `protox`
+# at build time — no `protoc` — embeds the resulting `FileDescriptorSet`, and
+# exposes a shared `DescriptorPool` plus a JSON -> `DynamicMessage` helper.
+#
+# This crate is never published; it is a `dev-dependency` of the reflective
+# crates (`aip-fieldmask`, `aip-pagination`, `aip-ordering`, `aip-filtering`).
+[package]
+name = "test-fixtures"
+description = "Test-only fixtures: einride example protos compiled via protox into a shared DescriptorPool, with JSON -> DynamicMessage helpers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+prost-reflect = { workspace = true, features = ["serde"] }
+serde_json.workspace = true
+thiserror.workspace = true
+
+[build-dependencies]
+protox.workspace = true
+prost.workspace = true
