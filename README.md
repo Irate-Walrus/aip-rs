@@ -19,6 +19,17 @@ Rust port of [einride/aip-go](https://github.com/einride/aip-go).
 aip = "0.1"
 ```
 
+## Reference
+
+The [`reference/`](reference) directory contains the upstream projects as git
+submodules for easy consultation while porting:
+
+- [`aip-go`](https://github.com/einride/aip-go) — the Go SDK this port is based on.
+- [`google.aip.dev`](https://github.com/aip-dev/google.aip.dev) — the AIP specifications.
+
+Clone with submodules via `git clone --recurse-submodules`, or run
+`git submodule update --init` in an existing checkout.
+
 ## License
 
 Licensed under the MIT License.

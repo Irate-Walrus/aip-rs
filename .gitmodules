@@ -1,0 +1,6 @@
+[submodule "reference/aip-go"]
+	path = reference/aip-go
+	url = https://github.com/einride/aip-go
+[submodule "reference/google.aip.dev"]
+	path = reference/google.aip.dev
+	url = https://github.com/aip-dev/google.aip.dev
