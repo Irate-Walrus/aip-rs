@@ -1,0 +1,170 @@
+# aip-rs
+
+A Rust SDK for Google's API Improvement Proposals (AIP). This glossary fixes the
+domain language shared across the crates so the same word never means two things.
+
+## Language
+
+### Resource names
+
+**Resource name**:
+A `/`-separated identifier for a single resource, e.g. `shippers/123/shipments/456`.
+_Avoid_: path, URI, key.
+
+**Pattern**:
+A resource-name template whose identifier positions are **Variables**, e.g.
+`shippers/{shipper}/shipments/{shipment}`. A **Pattern** is matched against a
+**Resource name**; a **Resource name** is concrete.
+_Avoid_: template, format string, schema.
+
+**Segment**:
+One `/`-separated component of a **Resource name** or **Pattern**. Every segment
+is a **Literal**, a **Variable**, or a **Wildcard**.
+
+**Literal**:
+A segment with a fixed value — either a **Collection ID** or a **Resource ID**,
+e.g. `shippers` or `123`.
+_Avoid_: constant, token.
+
+**Variable**:
+A `{name}` placeholder segment that appears only in a **Pattern** and binds the
+value matched in that position.
+_Avoid_: parameter, placeholder, capture group.
+
+**Wildcard**:
+The `-` segment that stands for "any resource ID" inside a **Resource name**,
+used to refer to all resources in a collection (e.g. `shippers/-/shipments/-`).
+Distinct from a **Variable**: a Wildcard lives in a name and matches anything; a
+Variable lives in a Pattern and binds a value.
+_Avoid_: star, glob, any.
+
+**Collection ID**:
+A **Literal** naming a collection — the plural nouns that alternate with
+**Resource IDs**, e.g. `shippers`, `shipments`.
+
+**Resource ID**:
+The identifier of a resource within its collection — a **Literal** with any
+**Revision ID** stripped.
+_Avoid_: uid, primary key.
+
+**Revision ID**:
+The portion of a **Literal** after the `@` separator, e.g. `1.0.0` in
+`books/les-miserables@1.0.0`.
+_Avoid_: version, tag.
+
+**Full resource name**:
+A **Resource name** prefixed with a **Service name**, e.g.
+`//library.googleapis.com/shelves/1`.
+_Avoid_: absolute name, URL.
+
+**Service name**:
+The DNS-style host that prefixes a **Full resource name**, e.g.
+`library.googleapis.com`.
+
+### Pagination
+
+**Page token**:
+An opaque string returned by a list method that, when passed back, fetches the
+next page of results. Carries enough state to resume and to detect that the rest
+of the request changed.
+_Avoid_: cursor (that's one *kind* of page token), continuation, offset.
+
+**Offset page token**:
+A **Page token** whose state is a numeric offset into the result set.
+
+**Cursor page token**:
+A **Page token** whose state is an arbitrary, caller-defined payload (e.g. the
+last-seen key) rather than an offset.
+
+**Page size**:
+The maximum number of results a single page may contain, requested by the client.
+
+**Skip**:
+A count of leading results to discard before the page begins (AIP-158 skip),
+applied on top of a **Page token**'s position.
+
+### Field masks
+
+**Field mask**:
+A list of field paths (e.g. `display_name`, `book.author`) naming a subset of a
+message's fields. The umbrella term; its meaning depends on whether it is used to
+write (**Update mask**) or read (**Read mask**).
+_Avoid_: projection, selection.
+
+**Update mask**:
+A **Field mask** on a write that names exactly which fields to change. A path
+absent from the mask is left untouched; a masked path absent from the source is
+cleared.
+
+**Read mask**:
+A **Field mask** on a read that names which fields to return. (Recognised as a
+distinct concept; response projection is deferred beyond v0.1.)
+
+**Full replacement**:
+The special **Update mask** `*`, meaning "replace every field" rather than a
+selective update.
+
+### Ordering
+
+**Order by**:
+An AIP-132 directive listing the fields, each ascending or descending, by which a
+list method's results are sorted. Parsed and validated here; the sort itself is
+performed by the datastore.
+_Avoid_: sort, sort order.
+
+**Ordering field**:
+One field path plus its direction (ascending/descending) within an **Order by**.
+A path may address a **Subfield** with `.` (e.g. `author.name`).
+
+### Filtering
+
+**Filter**:
+An AIP-160 expression over a resource's fields. Parsed and type-checked into an
+AST here; evaluation/translation is left to the caller.
+_Avoid_: query, predicate, where clause.
+
+**Declaration**:
+The typed schema — the filterable **Identifiers**, functions, and enums — that a
+**Filter** is checked against. Acts as an allowlist of what may be filtered.
+_Avoid_: schema, environment.
+
+**Identifier**:
+A name **Declared** as filterable, paired with a **Type**.
+
+**Has operator**:
+The `:` operator in a **Filter**, testing presence/membership (e.g. a key in a
+map, a value in a list).
+
+## Relationships
+
+- An **Order by** is an ordered list of **Ordering fields**.
+- A **Filter** is checked against a **Declaration**; every **Identifier** it
+  references must be declared.
+- A **Field mask** is interpreted as either an **Update mask** or a **Read mask**.
+- A **Page token** is either an **Offset page token** or a **Cursor page token**.
+- A **Resource name** is an ordered sequence of **Segments** joined by `/`.
+- A **Segment** is exactly one of: **Literal**, **Variable**, **Wildcard**.
+- A **Pattern** is matched against a **Resource name** to bind each **Variable**
+  to the **Resource ID** in that position.
+- A **Literal** carries a **Resource ID** and may carry a **Revision ID** after `@`.
+- **Collection IDs** and **Resource IDs** alternate within a well-formed
+  **Resource name**.
+- A **Full resource name** is a **Service name** plus a **Resource name**.
+
+## Example dialogue
+
+> **Dev:** "Does `Match` take two **Resource names**?"
+> **Domain expert:** "No — the first argument is a **Pattern** (it has
+> **Variables** like `{shipper}`), the second is a concrete **Resource name**.
+> Matching binds each **Variable** to the **Resource ID** in that position."
+> **Dev:** "And `shippers/-/shipments/-`?"
+> **Domain expert:** "That's a **Resource name** with **Wildcards**, not a
+> **Pattern**. `-` means 'any resource ID'; it binds nothing."
+
+## Flagged ambiguities
+
+- "name" was used for both a concrete **Resource name** and a **Pattern** —
+  resolved: a Pattern has **Variables**; a Resource name is concrete.
+- "wildcard" vs "variable" — resolved: a **Wildcard** (`-`) appears in a
+  **Resource name** and matches any value; a **Variable** (`{x}`) appears in a
+  **Pattern** and binds a value.

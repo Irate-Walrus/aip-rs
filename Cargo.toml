@@ -1,0 +1,42 @@
+# aip-rs — Cargo workspace.
+#
+# Architecture: per-feature crates re-exported by the umbrella `aip` crate.
+# `prost-reflect` is a hard dependency only of the crates that reflect; the
+# pure-syntax crates (`aip-resourcename`, `aip-resourceid`) stay proto-free.
+# See docs/adr/0001-prost-reflect-and-workspace.md.
+
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/irate-walrus/aip-rs"
+authors = ["irate-walrus"]
+
+[workspace.dependencies]
+# Internal crates (version + path so they can be published independently).
+aip-resourcename = { version = "0.1.0", path = "crates/aip-resourcename" }
+aip-resourceid   = { version = "0.1.0", path = "crates/aip-resourceid" }
+aip-pagination   = { version = "0.1.0", path = "crates/aip-pagination" }
+aip-fieldmask    = { version = "0.1.0", path = "crates/aip-fieldmask" }
+aip-ordering     = { version = "0.1.0", path = "crates/aip-ordering" }
+aip-filtering    = { version = "0.1.0", path = "crates/aip-filtering" }
+
+# Protobuf runtime + reflection (reflective crates only).
+prost         = "0.14"
+prost-types   = "0.14"
+prost-reflect = "0.16"
+
+# Shared building blocks.
+thiserror = "2"
+serde     = { version = "1", features = ["derive"] }
+postcard  = "1"
+base64    = "0.22"
+crc32fast = "1"
+uuid      = { version = "1", features = ["v4"] }
+
+# Optional gRPC status mapping (behind each crate's `tonic` feature).
+tonic = { version = "0.14", default-features = false }
