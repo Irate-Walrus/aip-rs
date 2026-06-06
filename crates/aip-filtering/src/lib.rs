@@ -9,7 +9,14 @@
 //!
 //! See <https://google.aip.dev/160>.
 
+use std::collections::HashMap;
+
 use prost_reflect::EnumDescriptor;
+
+mod checker;
+mod lexer;
+mod parser;
+mod token;
 
 /// Errors produced when parsing or type-checking a filter.
 #[derive(Debug, thiserror::Error)]
@@ -75,54 +82,73 @@ pub struct Filter {
 /// The typed schema a [`Filter`] is checked against: an allowlist of filterable
 /// identifiers, plus declared functions and enums.
 #[derive(Debug, Clone, Default)]
-pub struct Declarations {}
+pub struct Declarations {
+    /// Declared filterable identifiers, keyed by their (possibly dotted) name.
+    idents: HashMap<String, Type>,
+}
 
 impl Declarations {
     /// Start building a set of declarations.
     pub fn builder() -> DeclarationsBuilder {
         DeclarationsBuilder::default()
     }
+
+    /// Look up a declared identifier's type by name.
+    pub(crate) fn lookup_ident(&self, name: &str) -> Option<&Type> {
+        self.idents.get(name)
+    }
 }
 
 /// Builder for [`Declarations`] (replaces `aip-go`'s functional options).
 #[derive(Debug, Default)]
-pub struct DeclarationsBuilder {}
+pub struct DeclarationsBuilder {
+    idents: HashMap<String, Type>,
+}
 
 impl DeclarationsBuilder {
     /// Declare the standard AIP-160 function and operator set.
     pub fn standard_functions(self) -> Self {
-        todo!()
+        todo!("standard function declarations land with the full-operator slice")
     }
 
-    /// Declare a filterable identifier with a type.
-    pub fn ident(self, _name: &str, _ty: Type) -> Self {
-        todo!()
+    /// Declare a filterable identifier with a type. A repeated name replaces the
+    /// earlier declaration.
+    pub fn ident(mut self, name: &str, ty: Type) -> Self {
+        self.idents.insert(name.to_string(), ty);
+        self
     }
 
     /// Declare an enum-typed identifier (the one reflective declaration).
     pub fn enum_ident(self, _name: &str, _descriptor: EnumDescriptor) -> Self {
-        todo!()
+        todo!("enum identifiers land with the enum/well-known-type slice")
     }
 
     /// Declare a custom function (overloads added via the returned builder).
     pub fn function(self, _name: &str) -> Self {
-        todo!()
+        todo!("custom functions land with the full-operator slice")
     }
 
     /// Finalize the declarations.
     pub fn build(self) -> Result<Declarations, Error> {
-        todo!()
+        Ok(Declarations {
+            idents: self.idents,
+        })
     }
 }
 
 /// Parses a filter string into an AST without type-checking.
-pub fn parse(_filter: &str) -> Result<Expr, Error> {
-    todo!("lex + parse the AIP-160 grammar")
+pub fn parse(filter: &str) -> Result<Expr, Error> {
+    parser::parse_filter(filter)
 }
 
 /// Parses and type-checks a filter against `declarations`.
-pub fn check(_filter: &str, _declarations: &Declarations) -> Result<Filter, Error> {
-    todo!("parse, then resolve idents/overloads and assign types")
+///
+/// An empty (or whitespace-only) filter is a syntax error: callers treating an
+/// empty `filter` field as "no filter" should skip this call entirely.
+pub fn check(filter: &str, declarations: &Declarations) -> Result<Filter, Error> {
+    let expr = parser::parse_filter(filter)?;
+    checker::check(&expr, declarations)?;
+    Ok(Filter { expr })
 }
 
 /// A request carrying an AIP-160 `filter` string.

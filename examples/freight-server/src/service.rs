@@ -192,6 +192,13 @@ impl FreightService for FreightServer {
         &self,
         _: Request<ListSitesRequest>,
     ) -> Result<Response<ListSitesResponse>, Status> {
+        // TODO(aip #11): apply the AIP-160 filter here once ListSites is wired.
+        // The comparison pipeline (`aip::filtering`: a Declarations allowlist →
+        // `check` → a native AST to walk) is ready; this seam is blocked on
+        // implementing the method (Site storage + AIP-132 ordering, #9/#10) and
+        // on `ListSitesRequest` gaining a `filter` field — the vendored einride
+        // proto carries none yet. Operator/function/enum coverage grows with
+        // #12–#15.
         Err(unimplemented("ListSites"))
     }
 
@@ -227,6 +234,9 @@ impl FreightService for FreightServer {
         &self,
         _: Request<ListShipmentsRequest>,
     ) -> Result<Response<ListShipmentsResponse>, Status> {
+        // TODO(aip #11): apply the AIP-160 filter here once ListShipments is
+        // wired — the same `aip::filtering` seam as ListSites, blocked on the
+        // method and on `ListShipmentsRequest` gaining a `filter` field.
         Err(unimplemented("ListShipments"))
     }
 
