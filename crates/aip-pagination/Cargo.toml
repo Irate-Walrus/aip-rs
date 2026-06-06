@@ -10,7 +10,8 @@ authors.workspace = true
 [dependencies]
 thiserror.workspace = true
 serde.workspace = true
-postcard.workspace = true
+# `alloc` provides `to_allocvec`, which encodes a token to an owned byte buffer.
+postcard = { workspace = true, features = ["alloc"] }
 base64.workspace = true
 crc32fast.workspace = true
 prost.workspace = true

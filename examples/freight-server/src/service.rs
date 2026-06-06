@@ -8,6 +8,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use aip::pagination::{decode_page_token, PageRequest, PageToken};
 use tonic::{Request, Response, Status};
 
 use crate::proto::einride::example::freight::v1::{
@@ -22,6 +23,14 @@ use crate::storage::Storage;
 
 /// The shipper collection ID — the root segment of every shipper resource name.
 const SHIPPERS_COLLECTION: &str = "shippers";
+
+/// Default page size when a `ListShippers` request leaves `page_size` unset —
+/// AIP-158 says the server picks an appropriate default.
+const DEFAULT_PAGE_SIZE: usize = 50;
+
+/// Upper bound on a single page, so a client can't pull the whole store in one
+/// request — AIP-158 allows the server to return fewer results than requested.
+const MAX_PAGE_SIZE: usize = 1000;
 
 /// Serves `FreightService` over an in-memory [`Storage`].
 #[derive(Default)]
@@ -56,14 +65,40 @@ impl FreightService for FreightServer {
 
     async fn list_shippers(
         &self,
-        _request: Request<ListShippersRequest>,
+        request: Request<ListShippersRequest>,
     ) -> Result<Response<ListShippersResponse>, Status> {
-        // TODO(aip #6/#7): honour `page_size`/`page_token` with `aip::pagination`
-        // instead of returning every shipper in a single unpaged response.
-        let shippers = self.storage.list_shippers();
+        let req = request.into_inner();
+        // Offset pagination (AIP-158) over the stable shipper listing. An empty
+        // token starts at offset 0; otherwise we decode the offset the previous
+        // page handed back.
+        //
+        // TODO(aip #7): verify `request_checksum` (via `PageToken::parse` +
+        // `request_checksum`) so a token is rejected when the filter/order
+        // changes mid-pagination. Until then the offset is taken on trust.
+        let current = if req.page_token().is_empty() {
+            PageToken {
+                offset: 0,
+                request_checksum: 0,
+            }
+        } else {
+            decode_page_token::<PageToken>(req.page_token())
+                .map_err(|e| Status::invalid_argument(format!("invalid page_token: {e}")))?
+        };
+        let page_size = effective_page_size(req.page_size());
+        let mut shippers = self.storage.list_shippers();
+        let total = shippers.len();
+        let start = usize::try_from(current.offset).unwrap_or(0).min(total);
+        let end = start.saturating_add(page_size).min(total);
+        // Only hand back a `next_page_token` when results remain past this page.
+        let next_page_token = if end < total {
+            current.next(page_size as i32).encode()
+        } else {
+            String::new()
+        };
+        let shippers = shippers.drain(start..end).collect();
         Ok(Response::new(ListShippersResponse {
             shippers,
-            next_page_token: String::new(),
+            next_page_token,
         }))
     }
 
@@ -203,6 +238,27 @@ impl FreightService for FreightServer {
         _: Request<DeleteShipmentRequest>,
     ) -> Result<Response<Shipment>, Status> {
         Err(unimplemented("DeleteShipment"))
+    }
+}
+
+/// Lets `aip::pagination` read the AIP-158 pagination fields off the generated
+/// request without reflection.
+impl PageRequest for ListShippersRequest {
+    fn page_token(&self) -> &str {
+        &self.page_token
+    }
+    fn page_size(&self) -> i32 {
+        self.page_size
+    }
+}
+
+/// Resolves the effective page size from a request's `page_size`, applying the
+/// AIP-158 default (when unset or non-positive) and the [`MAX_PAGE_SIZE`] cap.
+fn effective_page_size(requested: i32) -> usize {
+    if requested <= 0 {
+        DEFAULT_PAGE_SIZE
+    } else {
+        (requested as usize).min(MAX_PAGE_SIZE)
     }
 }
 
