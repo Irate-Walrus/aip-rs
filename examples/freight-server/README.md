@@ -54,12 +54,9 @@ wired up.
 | `GetShipper`      | `resourcename` (validate name)               | #4           | wired       |
 | `ListShippers`    | `pagination` (offset page-token codec + request-checksum guard) | #6, #7 | wired² |
 | `CreateShipper`   | `resourceid` (generate), `resourcename` (format) | #5, #3   | wired       |
-| `UpdateShipper`   | `fieldmask` (apply `update_mask`)            | #8           | wired¹      |
+| `UpdateShipper`   | `fieldmask` (apply `update_mask`)            | #8           | wired       |
 | `DeleteShipper`   | `resourcename` (validate name)               | #4           | wired       |
 | `*Site` / `*Shipment`, `BatchGetSites` | all of the above + `filtering`, `ordering` | #9–#15 | `Unimplemented` |
-
-¹ Functional with naive placeholders today; the `TODO(aip #N)` seam swaps in the
-real primitive when its issue lands.
 
 ² Real offset pagination through the `pagination` page-token codec (#6), with the
 request-checksum guard (#7) that rejects a token when a non-pagination field
@@ -74,7 +71,11 @@ against a varying `parent`/`skip`. The checksum is computed reflectively, via a
 a pure-Rust protobuf compiler, so **no `protoc` is required** (matching
 [ADR-0001](../../docs/adr/0001-prost-reflect-and-workspace.md)) — and feeds the
 resulting `FileDescriptorSet` to `tonic-prost-build` for the message + service
-codegen.
+codegen. The same set is embedded raw so the server can build a
+`prost_reflect::DescriptorPool` at runtime; that pool transcodes a generated
+message to a `DynamicMessage` for the reflective primitives — `ListShippers`'
+`request_checksum` (#7) and `UpdateShipper`'s `fieldmask` apply
+([`src/reflect.rs`](src/reflect.rs)).
 
 The freight protos and their vendored googleapis imports live under
 [`proto/`](proto), so the example builds standalone. They are a copy of the same

@@ -9,7 +9,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aip::pagination::{PageRequest, PageToken};
-use prost_reflect::DynamicMessage;
 use tonic::{Request, Response, Status};
 
 use crate::proto::einride::example::freight::v1::{
@@ -20,10 +19,15 @@ use crate::proto::einride::example::freight::v1::{
     ListSitesRequest, ListSitesResponse, Shipment, Shipper, Site, UpdateShipmentRequest,
     UpdateShipperRequest, UpdateSiteRequest,
 };
+use crate::reflect;
 use crate::storage::Storage;
 
 /// The shipper collection ID — the root segment of every shipper resource name.
 const SHIPPERS_COLLECTION: &str = "shippers";
+
+/// The fully-qualified `Shipper` message type, used to look up its reflective
+/// descriptor for field-mask validation and application.
+const SHIPPER_TYPE: &str = "einride.example.freight.v1.Shipper";
 
 /// Default page size when a `ListShippers` request leaves `page_size` unset —
 /// AIP-158 says the server picks an appropriate default.
@@ -132,17 +136,32 @@ impl FreightService for FreightServer {
         request: Request<UpdateShipperRequest>,
     ) -> Result<Response<Shipper>, Status> {
         let req = request.into_inner();
-        let mut shipper = req
+        let incoming = req
             .shipper
             .ok_or_else(|| Status::invalid_argument("shipper is required"))?;
         let existing = self
             .storage
-            .get_shipper(&shipper.name)
-            .ok_or_else(|| Status::not_found(format!("shipper `{}` not found", shipper.name)))?;
-        // TODO(aip #8): apply `req.update_mask` with `aip::fieldmask::update` so a
-        // partial mask touches only the named fields. For now this is a full
-        // replacement that preserves the server-owned `create_time`.
-        let _ = &req.update_mask;
+            .get_shipper(&incoming.name)
+            .ok_or_else(|| Status::not_found(format!("shipper `{}` not found", incoming.name)))?;
+
+        // Apply the AIP-134 update mask via the field-mask primitive. The mask is
+        // validated against the `Shipper` descriptor, then the request's shipper
+        // is merged into the stored one: an empty mask copies the populated
+        // fields, `*` is a full replacement, and a named path absent from the
+        // request clears that field. The crate is reflective, so we transcode the
+        // generated `Shipper`s to `DynamicMessage` and back.
+        let descriptor = reflect::descriptor(SHIPPER_TYPE);
+        let mask = req.update_mask.unwrap_or_default();
+        aip::fieldmask::validate(&mask, &descriptor)
+            .map_err(|e| Status::invalid_argument(format!("invalid update_mask: {e}")))?;
+        let mut merged = reflect::to_dynamic(&descriptor, &existing);
+        let incoming = reflect::to_dynamic(&descriptor, &incoming);
+        aip::fieldmask::update(&mask, &mut merged, &incoming)
+            .map_err(|e| Status::invalid_argument(format!("update_mask: {e}")))?;
+        let mut shipper: Shipper = reflect::from_dynamic(&merged);
+
+        // The OUTPUT_ONLY timestamps are server-owned: a client mask must not move
+        // `create_time`/`delete_time`, and every update stamps `update_time`.
         shipper.create_time = existing.create_time;
         shipper.update_time = Some(now());
         shipper.delete_time = existing.delete_time;
@@ -247,18 +266,11 @@ impl PageRequest for ListShippersRequest {
 /// Computes [`aip::pagination::request_checksum`] for a concrete request.
 ///
 /// The library's reflective surface is `DynamicMessage`-based (ADR-0001), but the
-/// generated request types carry no reflection. We round-trip the request
-/// through the proto wire format and the server's [`DESCRIPTOR_POOL`] to obtain a
-/// `DynamicMessage`, then checksum it. `full_name` is the request's
-/// fully-qualified message name.
-///
-/// [`DESCRIPTOR_POOL`]: crate::proto::DESCRIPTOR_POOL
+/// generated request types carry no reflection. We transcode the request to a
+/// `DynamicMessage` via the [`reflect`] bridge, then checksum it. `full_name` is
+/// the request's fully-qualified message name.
 fn request_checksum_of<M: prost::Message>(full_name: &str, request: &M) -> Result<u32, Status> {
-    let descriptor = crate::proto::DESCRIPTOR_POOL
-        .get_message_by_name(full_name)
-        .expect("the request type is present in the freight descriptor pool");
-    let dynamic = DynamicMessage::decode(descriptor, request.encode_to_vec().as_slice())
-        .expect("a freshly-encoded request re-decodes as a DynamicMessage");
+    let dynamic = reflect::to_dynamic(&reflect::descriptor(full_name), request);
     aip::pagination::request_checksum(&dynamic)
         .map_err(|e| Status::internal(format!("compute request checksum: {e}")))
 }
