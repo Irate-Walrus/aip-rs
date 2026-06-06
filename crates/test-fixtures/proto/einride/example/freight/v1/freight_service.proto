@@ -269,6 +269,12 @@ message ListSitesRequest {
   //   first 50 results were returned on the first page) and a skip value of 30
   //   returns a single page of results starting with the 81st result.
   int32 skip = 4;
+
+  // The fields to order the sites by, as a comma-separated list of field paths
+  // each with an optional ` asc`/` desc` suffix (ascending by default), e.g.
+  // `display_name desc, name`. See: https://google.aip.dev/132#ordering.
+  // An unset value returns sites in their default (resource-name) order.
+  string order_by = 5;
 }
 
 // Response message for FreightService.ListSites.

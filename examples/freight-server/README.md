@@ -43,6 +43,21 @@ gc -d '{"shipper":{"name":"shippers/$ID","display_name":"Acme Corp"}}' \
 gc -d '{"name":"shippers/$ID"}'             127.0.0.1:50051 $SVC/DeleteShipper
 ```
 
+Sites live under a shipper, and `ListSites` honors an AIP-132 `order_by`.
+`CreateSite` also mints a system-assigned id, returning a name like
+`shippers/$ID/sites/$SITE_ID`:
+
+```sh
+# Seed a couple of sites under the shipper, then list them ordered by name.
+gc -d '{"parent":"shippers/$ID","site":{"display_name":"Bravo"}}' 127.0.0.1:50051 $SVC/CreateSite
+gc -d '{"parent":"shippers/$ID","site":{"display_name":"Alpha"}}' 127.0.0.1:50051 $SVC/CreateSite
+gc -d '{"parent":"shippers/$ID","orderBy":"display_name"}'        127.0.0.1:50051 $SVC/ListSites
+gc -d '{"parent":"shippers/$ID","orderBy":"display_name desc"}'   127.0.0.1:50051 $SVC/ListSites
+
+# Bad syntax or an unknown ordering field is rejected with InvalidArgument:
+gc -d '{"parent":"shippers/$ID","orderBy":"bogus_field"}'         127.0.0.1:50051 $SVC/ListSites
+```
+
 ## What it exercises (and where it's headed)
 
 The freight methods map onto the aip-rs primitives. Shipper is the worked
@@ -56,18 +71,24 @@ wired up.
 | `CreateShipper`   | `resourceid` (generate), `resourcename` (format) | #5, #3   | wired       |
 | `UpdateShipper`   | `fieldmask` (apply `update_mask`)            | #8           | wired       |
 | `DeleteShipper`   | `resourcename` (validate name)               | #4           | wired       |
-| `*Site` / `*Shipment`, `BatchGetSites` | all of the above + `ordering` (parse/validate)³ + `filtering` | #10–#15 | `Unimplemented` |
+| `CreateSite`      | `resourceid` (generate), `resourcename` (parse parent + format) | #5, #3 | wired       |
+| `ListSites`       | `ordering` (parse/validate/sort) + `pagination` (offset + checksum guard) | #9, #6, #7 | wired³ |
+| `GetSite` / `UpdateSite` / `DeleteSite`, `BatchGetSites`, `*Shipment` | the same primitives + `filtering` | #11–#15 | `Unimplemented` |
 
-³ `ordering` parse and path-validation (#9) are library-ready; wiring them into
-`ListSites` — an `order_by` request field, Site storage, and the sort itself — is
-tracked by #28. The handlers also await the `filtering` crate (#11–#15) before
-they drop `Unimplemented` entirely.
+³ `ListSites` parses the `order_by` (`aip::ordering::parse_order_by`), validates
+it against an allow-list of sortable Site paths (`validate_for_paths`, #9 — not
+the descriptor-based `validate_for_message` of #10), then applies the sort before
+paginating. Ordering composes with pagination: because `order_by` is a
+non-pagination field, changing it mid-pagination flips the request checksum and
+the now-stale page token is rejected. The remaining Site/Shipment handlers await
+the `filtering` crate (#11–#15) and a `filter` request field before they drop
+`Unimplemented`.
 
 ² Real offset pagination through the `pagination` page-token codec (#6), with the
 request-checksum guard (#7) that rejects a token when a non-pagination field
 changes mid-pagination. `ListShippersRequest` carries only the pagination fields,
-so its checksum is constant — `ListSites` (when wired) exercises the guard
-against a varying `parent`/`skip`. The checksum is computed reflectively, via a
+so its checksum is constant — `ListSites` exercises the guard against a varying
+`parent`/`order_by`. The checksum is computed reflectively, via a
 `DynamicMessage` built from the server's descriptor pool.
 
 ## How the proto types are built
