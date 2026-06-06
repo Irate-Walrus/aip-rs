@@ -48,11 +48,11 @@ wired up.
 
 | Method            | aip-rs primitive(s)                          | Issue        | Status      |
 | ----------------- | -------------------------------------------- | ------------ | ----------- |
-| `GetShipper`      | `resourcename` (validate name)               | #4           | wired¹      |
+| `GetShipper`      | `resourcename` (validate name)               | #4           | wired       |
 | `ListShippers`    | `pagination`                                 | #6, #7       | wired¹      |
 | `CreateShipper`   | `resourceid` (generate), `resourcename` (format) | #5, #3   | #3 wired; #5 pending¹ |
 | `UpdateShipper`   | `fieldmask` (apply `update_mask`)            | #8           | wired¹      |
-| `DeleteShipper`   | `resourcename`                               | #4           | wired       |
+| `DeleteShipper`   | `resourcename` (validate name)               | #4           | wired       |
 | `*Site` / `*Shipment`, `BatchGetSites` | all of the above + `filtering`, `ordering` | #9–#15 | `Unimplemented` |
 
 ¹ Functional with naive placeholders today; the `TODO(aip #N)` seam swaps in the
