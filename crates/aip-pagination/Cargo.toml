@@ -19,3 +19,7 @@ tonic = { workspace = true, optional = true }
 
 [features]
 tonic = ["dep:tonic"]
+
+[dev-dependencies]
+# Shared DescriptorPool + JSON -> DynamicMessage fixtures for reflective tests.
+test-fixtures.workspace = true
