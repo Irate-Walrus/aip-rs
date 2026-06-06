@@ -1,19 +1,16 @@
 //! Generate the `FreightService` server stubs and message types at build time.
 //!
 //! Like `test-fixtures`, the protos are compiled with [`protox`] — a pure-Rust
-//! protobuf compiler, so **no `protoc` is required** (ADR-0001). The difference
-//! is the sink: `test-fixtures` embeds the raw `FileDescriptorSet` for
-//! reflection, whereas here the set is handed to [`tonic_prost_build`] to emit
-//! concrete prost message types plus the async `FreightService` trait.
+//! protobuf compiler, so **no `protoc` is required** (ADR-0001). The set is
+//! handed to [`tonic_prost_build`] to emit concrete prost message types plus the
+//! async `FreightService` trait, and is *also* written to `OUT_DIR` so `proto.rs`
+//! can build a runtime [`prost_reflect::DescriptorPool`] — needed to transcode a
+//! concrete request/message into a `DynamicMessage` for the reflective primitives
+//! (`aip::pagination::request_checksum`, `aip::fieldmask`).
 //!
 //! The example vendors its own copy of the freight protos and their googleapis
 //! imports under `proto/`, so it builds standalone without reaching into another
 //! crate's source.
-//!
-//! The descriptor set is also written to `OUT_DIR` so `proto.rs` can build a
-//! runtime [`prost_reflect::DescriptorPool`] — needed to transcode a concrete
-//! request into a `DynamicMessage` for the reflective
-//! `aip::pagination::request_checksum`.
 
 use std::{env, path::PathBuf};
 

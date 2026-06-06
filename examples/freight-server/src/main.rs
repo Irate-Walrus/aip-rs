@@ -7,6 +7,7 @@
 //! Run with `cargo run -p freight-server`; it listens on `127.0.0.1:50051`.
 
 mod proto;
+mod reflect;
 mod service;
 mod storage;
 

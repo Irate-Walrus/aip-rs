@@ -29,14 +29,15 @@ tonic       = { workspace = true, features = ["server", "transport", "router", "
 tonic-prost = { workspace = true }
 prost       = { workspace = true }
 prost-types = { workspace = true }
-# Reflection: transcodes a concrete request into a `DynamicMessage` so the
-# reflective `aip::pagination::request_checksum` (ADR-0001) can read it.
+# Reflection (ADR-0001): a DescriptorPool + DynamicMessage transcode bridge so
+# the reflective `aip::pagination::request_checksum` and `aip::fieldmask` can
+# read a concrete request/message.
 prost-reflect = { workspace = true }
 tokio       = { workspace = true }
 
 [build-dependencies]
 # Pure-Rust .proto compiler (no `protoc`) + tonic codegen fed its descriptor set.
+# `prost` re-encodes that set so it can be embedded for the runtime pool.
 protox            = { workspace = true }
-tonic-prost-build = { workspace = true }
-# Re-encode the protox descriptor set to bytes for the runtime reflection pool.
 prost             = { workspace = true }
+tonic-prost-build = { workspace = true }
