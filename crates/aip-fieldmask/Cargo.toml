@@ -1,0 +1,17 @@
+[package]
+name = "aip-fieldmask"
+description = "AIP-161 field masks: apply update masks and validate paths"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+prost-types.workspace = true
+prost-reflect.workspace = true
+tonic = { workspace = true, optional = true }
+
+[features]
+tonic = ["dep:tonic"]

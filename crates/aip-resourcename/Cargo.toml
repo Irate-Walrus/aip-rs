@@ -1,0 +1,16 @@
+[package]
+name = "aip-resourcename"
+description = "AIP-122 resource name parsing, formatting, and matching"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tonic = { workspace = true, optional = true }
+
+[features]
+# Adds `From<Error> for tonic::Status` (INVALID_ARGUMENT) per AIP-193.
+tonic = ["dep:tonic"]

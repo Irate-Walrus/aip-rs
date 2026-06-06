@@ -1,0 +1,20 @@
+[package]
+name = "aip-filtering"
+description = "AIP-160 filter parsing and type-checking into a native AST"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+prost-reflect.workspace = true
+# `cel-proto` enables conversion to/from google.api.expr.v1alpha1 CEL protos.
+prost = { workspace = true, optional = true }
+prost-types = { workspace = true, optional = true }
+tonic = { workspace = true, optional = true }
+
+[features]
+cel-proto = ["dep:prost", "dep:prost-types"]
+tonic = ["dep:tonic"]

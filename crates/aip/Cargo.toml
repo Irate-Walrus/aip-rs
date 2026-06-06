@@ -1,0 +1,37 @@
+[package]
+name = "aip"
+description = "Rust SDK for Google's API Improvement Proposals (AIP)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+aip-resourcename = { workspace = true, optional = true }
+aip-resourceid   = { workspace = true, optional = true }
+aip-pagination   = { workspace = true, optional = true }
+aip-fieldmask    = { workspace = true, optional = true }
+aip-ordering     = { workspace = true, optional = true }
+aip-filtering    = { workspace = true, optional = true }
+
+[features]
+default = ["resourcename", "resourceid", "pagination", "fieldmask", "ordering", "filtering"]
+
+resourcename = ["dep:aip-resourcename"]
+resourceid   = ["dep:aip-resourceid"]
+pagination   = ["dep:aip-pagination"]
+fieldmask    = ["dep:aip-fieldmask"]
+ordering     = ["dep:aip-ordering"]
+filtering    = ["dep:aip-filtering"]
+
+# Forward the optional integrations to whichever sub-crates are enabled.
+tonic = [
+    "aip-resourcename?/tonic",
+    "aip-resourceid?/tonic",
+    "aip-pagination?/tonic",
+    "aip-fieldmask?/tonic",
+    "aip-ordering?/tonic",
+    "aip-filtering?/tonic",
+]
+cel-proto = ["aip-filtering?/cel-proto"]
