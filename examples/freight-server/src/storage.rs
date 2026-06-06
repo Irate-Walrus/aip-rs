@@ -17,9 +17,6 @@ use crate::proto::einride::example::freight::v1::Shipper;
 #[derive(Default)]
 pub struct Storage {
     shippers: Mutex<BTreeMap<String, Shipper>>,
-    /// Monotonic source of system-assigned resource IDs, standing in until
-    /// `aip-resourceid` (issue #5) generates them.
-    next_id: Mutex<u64>,
 }
 
 impl Storage {
@@ -49,12 +46,5 @@ impl Storage {
     /// Remove a shipper by name, returning it if it existed.
     pub fn remove_shipper(&self, name: &str) -> Option<Shipper> {
         self.shippers.lock().unwrap().remove(name)
-    }
-
-    /// The next system-assigned resource ID. Placeholder for `aip-resourceid`.
-    pub fn next_id(&self) -> u64 {
-        let mut n = self.next_id.lock().unwrap();
-        *n += 1;
-        *n
     }
 }

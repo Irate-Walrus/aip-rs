@@ -32,12 +32,15 @@ gc() { grpcurl -import-path "$PROTO" \
   -proto einride/example/freight/v1/freight_service.proto \
   -plaintext "$@"; }
 
+# CreateShipper mints a system-assigned id (a UUIDv4, per AIP-148), so it
+# returns a name like `shippers/daf1cb3e-f33b-43f1-81cc-e65fda51efa5`. Copy that
+# name from the response into the calls below (shown here as `shippers/$ID`).
 gc -d '{"shipper":{"display_name":"Acme"}}' 127.0.0.1:50051 $SVC/CreateShipper
 gc -d '{}'                                  127.0.0.1:50051 $SVC/ListShippers
-gc -d '{"name":"shippers/1"}'               127.0.0.1:50051 $SVC/GetShipper
-gc -d '{"shipper":{"name":"shippers/1","display_name":"Acme Corp"}}' \
+gc -d '{"name":"shippers/$ID"}'             127.0.0.1:50051 $SVC/GetShipper
+gc -d '{"shipper":{"name":"shippers/$ID","display_name":"Acme Corp"}}' \
                                             127.0.0.1:50051 $SVC/UpdateShipper
-gc -d '{"name":"shippers/1"}'               127.0.0.1:50051 $SVC/DeleteShipper
+gc -d '{"name":"shippers/$ID"}'             127.0.0.1:50051 $SVC/DeleteShipper
 ```
 
 ## What it exercises (and where it's headed)
@@ -50,7 +53,7 @@ wired up.
 | ----------------- | -------------------------------------------- | ------------ | ----------- |
 | `GetShipper`      | `resourcename` (validate name)               | #4           | wired       |
 | `ListShippers`    | `pagination`                                 | #6, #7       | wired¹      |
-| `CreateShipper`   | `resourceid` (generate), `resourcename` (format) | #5, #3   | #3 wired; #5 pending¹ |
+| `CreateShipper`   | `resourceid` (generate), `resourcename` (format) | #5, #3   | wired       |
 | `UpdateShipper`   | `fieldmask` (apply `update_mask`)            | #8           | wired¹      |
 | `DeleteShipper`   | `resourcename` (validate name)               | #4           | wired       |
 | `*Site` / `*Shipment`, `BatchGetSites` | all of the above + `filtering`, `ordering` | #9–#15 | `Unimplemented` |
