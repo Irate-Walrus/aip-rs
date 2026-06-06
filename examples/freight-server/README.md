@@ -56,7 +56,12 @@ wired up.
 | `CreateShipper`   | `resourceid` (generate), `resourcename` (format) | #5, #3   | wired       |
 | `UpdateShipper`   | `fieldmask` (apply `update_mask`)            | #8           | wired       |
 | `DeleteShipper`   | `resourcename` (validate name)               | #4           | wired       |
-| `*Site` / `*Shipment`, `BatchGetSites` | all of the above + `filtering`, `ordering` | #9–#15 | `Unimplemented` |
+| `*Site` / `*Shipment`, `BatchGetSites` | all of the above + `ordering` (parse/validate)³ + `filtering` | #10–#15 | `Unimplemented` |
+
+³ `ordering` parse and path-validation (#9) are library-ready; wiring them into
+`ListSites` — an `order_by` request field, Site storage, and the sort itself — is
+tracked by #28. The handlers also await the `filtering` crate (#11–#15) before
+they drop `Unimplemented` entirely.
 
 ² Real offset pagination through the `pagination` page-token codec (#6), with the
 request-checksum guard (#7) that rejects a token when a non-pagination field

@@ -37,26 +37,101 @@ pub struct OrderByField {
 
 impl OrderByField {
     /// The subfields of the path, split on `.`.
+    ///
+    /// Returns an empty iterator for an empty path (mirrors aip-go's `SubFields`
+    /// returning nil), and one entry per `.`-separated segment otherwise.
     pub fn sub_fields(&self) -> impl Iterator<Item = &str> {
-        self.path.split('.')
+        (!self.path.is_empty())
+            .then(|| self.path.split('.'))
+            .into_iter()
+            .flatten()
     }
 }
 
 impl FromStr for OrderBy {
     type Err = Error;
 
-    fn from_str(_s: &str) -> Result<Self, Self::Err> {
-        todo!("parse comma-separated fields with optional asc/desc")
+    /// Parses an AIP-132 `order_by` string.
+    ///
+    /// - An empty string is valid and yields an empty [`OrderBy`].
+    /// - Fields are comma-separated; each field is `<path>` or `<path> asc|desc`.
+    /// - Paths are ASCII identifiers optionally joined by `.` for subfields.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.is_empty() {
+            return Ok(OrderBy::default());
+        }
+
+        // Validate characters up front: only ASCII letters, digits, '_', space, ',', '.'
+        for c in s.chars() {
+            if !c.is_ascii_alphabetic()
+                && !c.is_ascii_digit()
+                && c != '_'
+                && c != ' '
+                && c != ','
+                && c != '.'
+            {
+                return Err(Error::Syntax(format!(
+                    "invalid order_by '{}': invalid character {}",
+                    s,
+                    c.escape_debug()
+                )));
+            }
+        }
+
+        let mut fields = Vec::new();
+        for raw in s.split(',') {
+            let mut parts = raw.split_whitespace();
+            let Some(path) = parts.next() else {
+                return Err(Error::Syntax(format!("invalid format for '{raw}'")));
+            };
+            validate_path_segments(path)?;
+            let desc = match (parts.next(), parts.next()) {
+                (None, _) => false,
+                (Some("asc"), None) => false,
+                (Some("desc"), None) => true,
+                _ => return Err(Error::Syntax(format!("invalid format for '{raw}'"))),
+            };
+            fields.push(OrderByField {
+                path: path.to_owned(),
+                desc,
+            });
+        }
+        Ok(OrderBy { fields })
     }
+}
+
+/// Validates that every `.`-separated segment of `path` is non-empty.
+///
+/// This rejects leading/trailing dots and consecutive dots (e.g. `"."`,
+/// `".foo"`, `"foo."`, `"foo..bar"`), which the character allowlist permits
+/// but which would produce empty segments when iterated by [`OrderByField::sub_fields`].
+fn validate_path_segments(path: &str) -> Result<(), Error> {
+    if path.split('.').any(|seg| seg.is_empty()) {
+        return Err(Error::Syntax(format!("invalid path: '{path}'")));
+    }
+    Ok(())
 }
 
 impl OrderBy {
     /// Validates every field path against an explicit allow-list.
-    pub fn validate_for_paths(&self, _allowed: &[&str]) -> Result<(), Error> {
-        todo!()
+    ///
+    /// Each entry in `allowed` must be the complete dot-notation path (e.g.
+    /// `"book.name"`), not individual segments. Matching is exact string equality.
+    pub fn validate_for_paths(&self, allowed: &[&str]) -> Result<(), Error> {
+        for field in &self.fields {
+            if !allowed.contains(&field.path.as_str()) {
+                return Err(Error::UnknownField(field.path.clone()));
+            }
+        }
+        Ok(())
     }
 
     /// Validates every field path against a message type (via `aip-fieldmask`).
+    ///
+    /// # Panics
+    ///
+    /// Always panics — not yet implemented. Tracked in issue #10. Callers receive
+    /// a panic rather than `Err` until that issue lands.
     pub fn validate_for_message(&self, _descriptor: &MessageDescriptor) -> Result<(), Error> {
         todo!("convert paths to a FieldMask and call aip_fieldmask::validate")
     }
