@@ -47,8 +47,7 @@ impl FreightService for FreightServer {
         request: Request<GetShipperRequest>,
     ) -> Result<Response<Shipper>, Status> {
         let name = request.into_inner().name;
-        // TODO(aip #4): validate `name` matches `shippers/{shipper}` via
-        // `aip::resourcename` and reject a malformed name with InvalidArgument.
+        validate_shipper_name(&name)?;
         self.storage
             .get_shipper(&name)
             .map(Response::new)
@@ -127,7 +126,8 @@ impl FreightService for FreightServer {
         request: Request<DeleteShipperRequest>,
     ) -> Result<Response<Shipper>, Status> {
         let name = request.into_inner().name;
-        // TODO(aip #4): validate `name`. Soft delete (AIP-164) is deferred.
+        // Soft delete (AIP-164) is deferred; this is a hard delete.
+        validate_shipper_name(&name)?;
         self.storage
             .remove_shipper(&name)
             .map(Response::new)
@@ -202,6 +202,21 @@ impl FreightService for FreightServer {
     ) -> Result<Response<Shipment>, Status> {
         Err(unimplemented("DeleteShipment"))
     }
+}
+
+/// Validates that `name` is a well-formed shipper resource name (AIP-122): a
+/// valid resource name that matches the `shippers/{shipper}` pattern. Returns
+/// `INVALID_ARGUMENT` otherwise.
+fn validate_shipper_name(name: &str) -> Result<(), Status> {
+    aip::resourcename::validate(name)
+        .map_err(|e| Status::invalid_argument(format!("invalid resource name `{name}`: {e}")))?;
+    let pattern = format!("{SHIPPERS_COLLECTION}/{{shipper}}");
+    if !aip::resourcename::is_match(&pattern, name) {
+        return Err(Status::invalid_argument(format!(
+            "name `{name}` must match the pattern `{pattern}`"
+        )));
+    }
+    Ok(())
 }
 
 /// The standard `Unimplemented` status for a method that hasn't been wired yet.
