@@ -37,23 +37,76 @@ pub struct OrderByField {
 
 impl OrderByField {
     /// The subfields of the path, split on `.`.
+    ///
+    /// Returns an empty iterator for an empty path (mirrors aip-go's `SubFields`
+    /// returning nil), and one entry per `.`-separated segment otherwise.
     pub fn sub_fields(&self) -> impl Iterator<Item = &str> {
-        self.path.split('.')
+        (!self.path.is_empty())
+            .then(|| self.path.split('.'))
+            .into_iter()
+            .flatten()
     }
 }
 
 impl FromStr for OrderBy {
     type Err = Error;
 
-    fn from_str(_s: &str) -> Result<Self, Self::Err> {
-        todo!("parse comma-separated fields with optional asc/desc")
+    /// Parses an AIP-132 `order_by` string.
+    ///
+    /// - An empty string is valid and yields an empty [`OrderBy`].
+    /// - Fields are comma-separated; each field is `<path>` or `<path> asc|desc`.
+    /// - Paths may contain letters, digits, `_`, and `.` (for subfields).
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.is_empty() {
+            return Ok(OrderBy::default());
+        }
+
+        // Validate characters up front: only letters, digits, '_', space, ',', '.'
+        for c in s.chars() {
+            if !c.is_alphabetic() && !c.is_numeric() && c != '_' && c != ' ' && c != ',' && c != '.'
+            {
+                return Err(Error::Syntax(format!(
+                    "invalid character {}",
+                    c.escape_debug()
+                )));
+            }
+        }
+
+        let mut fields = Vec::new();
+        for raw in s.split(',') {
+            let parts: Vec<&str> = raw.split_whitespace().collect();
+            match parts.as_slice() {
+                [path] => fields.push(OrderByField {
+                    path: (*path).to_owned(),
+                    desc: false,
+                }),
+                [path, direction] => {
+                    let desc = match *direction {
+                        "asc" => false,
+                        "desc" => true,
+                        _ => return Err(Error::Syntax(format!("invalid format for '{raw}'"))),
+                    };
+                    fields.push(OrderByField {
+                        path: (*path).to_owned(),
+                        desc,
+                    });
+                }
+                _ => return Err(Error::Syntax(format!("invalid format for '{raw}'"))),
+            }
+        }
+        Ok(OrderBy { fields })
     }
 }
 
 impl OrderBy {
     /// Validates every field path against an explicit allow-list.
-    pub fn validate_for_paths(&self, _allowed: &[&str]) -> Result<(), Error> {
-        todo!()
+    pub fn validate_for_paths(&self, allowed: &[&str]) -> Result<(), Error> {
+        for field in &self.fields {
+            if !allowed.contains(&field.path.as_str()) {
+                return Err(Error::UnknownField(field.path.clone()));
+            }
+        }
+        Ok(())
     }
 
     /// Validates every field path against a message type (via `aip-fieldmask`).
