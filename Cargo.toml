@@ -7,7 +7,7 @@
 
 [workspace]
 resolver = "2"
-members = ["crates/*"]
+members = ["crates/*", "examples/*"]
 
 [workspace.package]
 version = "0.1.0"
@@ -18,6 +18,7 @@ authors = ["irate-walrus"]
 
 [workspace.dependencies]
 # Internal crates (version + path so they can be published independently).
+aip              = { version = "0.1.0", path = "crates/aip" }
 aip-resourcename = { version = "0.1.0", path = "crates/aip-resourcename" }
 aip-resourceid   = { version = "0.1.0", path = "crates/aip-resourceid" }
 aip-pagination   = { version = "0.1.0", path = "crates/aip-pagination" }
@@ -49,3 +50,11 @@ protox = "0.9"
 
 # Optional gRPC status mapping (behind each crate's `tonic` feature).
 tonic = { version = "0.14", default-features = false }
+
+# Example gRPC server only (`examples/freight-server`) — never used by the core
+# crates. `tonic-prost` supplies the runtime Prost codec the generated service
+# uses; `tonic-prost-build` is the build-time codegen (fed a protox-built
+# descriptor set, so still no `protoc`). See examples/freight-server.
+tonic-prost       = "0.14"
+tonic-prost-build = "0.14"
+tokio             = { version = "1", features = ["rt-multi-thread", "macros"] }

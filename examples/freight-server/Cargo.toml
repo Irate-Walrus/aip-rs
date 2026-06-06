@@ -1,0 +1,37 @@
+# freight-server — runnable demo of aip-rs.
+#
+# A tonic gRPC server implementing einride's example `FreightService`
+# (Shipper / Site / Shipment) over an in-memory store. It exists to exercise the
+# aip-rs primitives end-to-end and to give us something real to test against; it
+# grows as the per-feature crates land (see the per-handler `TODO(aip #N)` seams
+# in `src/service.rs`).
+#
+# The proto types are generated at build time from a `protox`-built descriptor
+# set — no `protoc` — matching ADR-0001. The freight protos and their googleapis
+# imports are vendored under `proto/`, so the example builds standalone.
+[package]
+name = "freight-server"
+description = "Runnable tonic gRPC demo of aip-rs over einride's example FreightService"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+# The SDK under demonstration. Handlers wire in each module as its issue lands.
+aip = { workspace = true }
+
+# gRPC runtime: tonic core (server + transport), the Prost codec the generated
+# service uses, and the protobuf message runtime.
+tonic       = { workspace = true, features = ["server", "transport", "router", "codegen"] }
+tonic-prost = { workspace = true }
+prost       = { workspace = true }
+prost-types = { workspace = true }
+tokio       = { workspace = true }
+
+[build-dependencies]
+# Pure-Rust .proto compiler (no `protoc`) + tonic codegen fed its descriptor set.
+protox            = { workspace = true }
+tonic-prost-build = { workspace = true }

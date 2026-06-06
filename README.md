@@ -19,6 +19,16 @@ Rust port of [einride/aip-go](https://github.com/einride/aip-go).
 aip = "0.1"
 ```
 
+## Example
+
+[`examples/freight-server`](examples/freight-server) is a runnable tonic gRPC
+server that demonstrates the crates end-to-end over einride's example
+`FreightService`. It is a living demo that grows as each crate's issue lands:
+
+```sh
+cargo run -p freight-server
+```
+
 ## Reference
 
 The [`reference/`](reference) directory contains the upstream projects as git
