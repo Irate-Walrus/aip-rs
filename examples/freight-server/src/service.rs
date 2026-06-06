@@ -6,9 +6,12 @@
 //! per-feature crates land. Site, Shipment, and the batch method return
 //! `Unimplemented` until they follow the same pattern.
 
+use std::cmp::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use aip::ordering::{OrderBy, OrderByRequest};
 use aip::pagination::{PageRequest, PageToken};
+use prost_types::Timestamp;
 use tonic::{Request, Response, Status};
 
 use crate::proto::einride::example::freight::v1::{
@@ -36,6 +39,18 @@ const DEFAULT_PAGE_SIZE: usize = 50;
 /// Upper bound on a single page, so a client can't pull the whole store in one
 /// request — AIP-158 allows the server to return fewer results than requested.
 const MAX_PAGE_SIZE: usize = 1000;
+
+/// The Site field paths that `ListSites` accepts in an AIP-132 `order_by`. Used
+/// as the allow-list for [`OrderBy::validate_for_paths`]; the nested `lat_lng.*`
+/// paths exercise `.`-separated Subfield ordering.
+const SORTABLE_SITE_PATHS: &[&str] = &[
+    "name",
+    "display_name",
+    "create_time",
+    "update_time",
+    "lat_lng.latitude",
+    "lat_lng.longitude",
+];
 
 /// Serves `FreightService` over an in-memory [`Storage`].
 #[derive(Default)]
@@ -190,20 +205,95 @@ impl FreightService for FreightServer {
 
     async fn list_sites(
         &self,
-        _: Request<ListSitesRequest>,
+        request: Request<ListSitesRequest>,
     ) -> Result<Response<ListSitesResponse>, Status> {
-        // TODO(aip #11): apply the AIP-160 filter here once ListSites is wired.
-        // The comparison pipeline (`aip::filtering`: a Declarations allowlist →
-        // `check` → a native AST to walk) is ready; this seam is blocked on
-        // implementing the method (Site storage + AIP-132 ordering, #9/#10) and
-        // on `ListSitesRequest` gaining a `filter` field — the vendored einride
-        // proto carries none yet. Operator/function/enum coverage grows with
-        // #12–#15.
-        Err(unimplemented("ListSites"))
+        let req = request.into_inner();
+        validate_shipper_name(&req.parent)?;
+
+        // Parse and validate the AIP-132 `order_by` against the allow-list of
+        // sortable Site paths (#9's `validate_for_paths`, not the descriptor-based
+        // `validate_for_message` of #10). Bad syntax or an unknown ordering field
+        // is an InvalidArgument.
+        let order_by = aip::ordering::parse_order_by(&req)
+            .map_err(|e| Status::invalid_argument(format!("invalid order_by: {e}")))?;
+        order_by
+            .validate_for_paths(SORTABLE_SITE_PATHS)
+            .map_err(|e| Status::invalid_argument(format!("invalid order_by: {e}")))?;
+
+        // Offset pagination (AIP-158). `order_by` is a non-pagination field, so
+        // the request checksum covers it: changing it mid-pagination flips the
+        // checksum and `PageToken::parse` rejects the now-stale token.
+        let checksum = request_checksum_of("einride.example.freight.v1.ListSitesRequest", &req)?;
+        let current = PageToken::parse(&req, checksum)
+            .map_err(|e| Status::invalid_argument(format!("invalid page_token: {e}")))?;
+        let page_size = effective_page_size(req.page_size());
+
+        // Sites under this parent, in the store's stable resource-name order, then
+        // sorted by `order_by`. The sort is stable, so the name order breaks ties
+        // and the ordering stays consistent across pages.
+        // TODO(aip #11): apply an AIP-160 filter here once `ListSitesRequest`
+        // gains a `filter` field — the `aip::filtering` pipeline is ready.
+        let mut sites: Vec<Site> = self
+            .storage
+            .list_sites()
+            .into_iter()
+            .filter(|site| aip::resourcename::has_parent(&site.name, &req.parent))
+            .collect();
+        sort_sites(&mut sites, &order_by);
+
+        let total = sites.len();
+        let start = usize::try_from(current.offset).unwrap_or(0).min(total);
+        let end = start.saturating_add(page_size).min(total);
+        // Only hand back a `next_page_token` when results remain past this page.
+        let next_page_token = if end < total {
+            current.next(page_size as i32).encode()
+        } else {
+            String::new()
+        };
+        let sites = sites.drain(start..end).collect();
+        Ok(Response::new(ListSitesResponse {
+            sites,
+            next_page_token,
+        }))
     }
 
-    async fn create_site(&self, _: Request<CreateSiteRequest>) -> Result<Response<Site>, Status> {
-        Err(unimplemented("CreateSite"))
+    async fn create_site(
+        &self,
+        request: Request<CreateSiteRequest>,
+    ) -> Result<Response<Site>, Status> {
+        let req = request.into_inner();
+        validate_shipper_name(&req.parent)?;
+        let mut site = req
+            .site
+            .ok_or_else(|| Status::invalid_argument("site is required"))?;
+        if site.display_name.is_empty() {
+            return Err(Status::invalid_argument("site.display_name is required"));
+        }
+
+        // The validated `parent` binds the `{shipper}` of the canonical site
+        // pattern; mint a system-assigned `{site}` id (a UUIDv4, per AIP-148) and
+        // format the full resource name from the pattern (AIP-122) rather than
+        // hand-concatenating the segments.
+        let shipper_pattern = format!("{SHIPPERS_COLLECTION}/{{shipper}}");
+        let shipper_id = aip::resourcename::Pattern::parse(&shipper_pattern)
+            .expect("the shipper collection pattern is valid")
+            .match_name(&req.parent)
+            .and_then(|caps| caps.get("shipper"))
+            .expect("parent validated to match the shipper pattern")
+            .to_owned();
+        let id = aip::resourceid::generate_system();
+        let site_pattern = format!("{SHIPPERS_COLLECTION}/{{shipper}}/sites/{{site}}");
+        site.name = aip::resourcename::Pattern::parse(&site_pattern)
+            .expect("the site collection pattern is valid")
+            .format([("shipper", shipper_id.as_str()), ("site", id.as_str())])
+            .expect("a generated site id formats into the pattern");
+
+        let ts = now();
+        site.create_time = Some(ts);
+        site.update_time = Some(ts);
+        site.delete_time = None;
+        self.storage.put_site(site.clone());
+        Ok(Response::new(site))
     }
 
     async fn update_site(&self, _: Request<UpdateSiteRequest>) -> Result<Response<Site>, Status> {
@@ -273,6 +363,88 @@ impl PageRequest for ListShippersRequest {
     }
 }
 
+/// `ListSitesRequest` carries the full pagination field set, including AIP-158
+/// `skip` (which `ListShippersRequest` omits).
+impl PageRequest for ListSitesRequest {
+    fn page_token(&self) -> &str {
+        &self.page_token
+    }
+    fn page_size(&self) -> i32 {
+        self.page_size
+    }
+    fn skip(&self) -> i32 {
+        self.skip
+    }
+}
+
+/// Lets `aip::ordering::parse_order_by` read the AIP-132 `order_by` field off
+/// the generated request.
+impl OrderByRequest for ListSitesRequest {
+    fn order_by(&self) -> &str {
+        &self.order_by
+    }
+}
+
+/// Sorts `sites` in place by an AIP-132 `order_by`, breaking ties by resource
+/// name so the order is total and stable across pages — independent of the
+/// store's iteration order. An empty `order_by` leaves the store's
+/// resource-name order untouched.
+fn sort_sites(sites: &mut [Site], order_by: &OrderBy) {
+    if order_by.fields.is_empty() {
+        return;
+    }
+    sites.sort_by(|a, b| {
+        for field in &order_by.fields {
+            let ordering = compare_site_field(a, b, &field.path);
+            let ordering = if field.desc {
+                ordering.reverse()
+            } else {
+                ordering
+            };
+            if ordering != Ordering::Equal {
+                return ordering;
+            }
+        }
+        // Resource names are unique, so this makes the ordering total: equal
+        // `order_by` keys fall back to a fixed name order on every page.
+        a.name.cmp(&b.name)
+    });
+}
+
+/// Compares two sites by a single Site field path.
+///
+/// Every path reaching here is one of [`SORTABLE_SITE_PATHS`] — the `order_by`
+/// was validated against that allow-list — so an unrecognised path is
+/// unreachable and compares Equal.
+fn compare_site_field(a: &Site, b: &Site, path: &str) -> Ordering {
+    match path {
+        "name" => a.name.cmp(&b.name),
+        "display_name" => a.display_name.cmp(&b.display_name),
+        "create_time" => cmp_timestamp(&a.create_time, &b.create_time),
+        "update_time" => cmp_timestamp(&a.update_time, &b.update_time),
+        "lat_lng.latitude" => latitude(a).total_cmp(&latitude(b)),
+        "lat_lng.longitude" => longitude(a).total_cmp(&longitude(b)),
+        _ => Ordering::Equal,
+    }
+}
+
+/// Orders two optional timestamps by `(seconds, nanos)`, with an unset time
+/// sorting before any set time.
+fn cmp_timestamp(a: &Option<Timestamp>, b: &Option<Timestamp>) -> Ordering {
+    let key = |t: &Option<Timestamp>| t.as_ref().map(|t| (t.seconds, t.nanos));
+    key(a).cmp(&key(b))
+}
+
+/// The site's latitude, or `0.0` when it carries no location.
+fn latitude(site: &Site) -> f64 {
+    site.lat_lng.as_ref().map_or(0.0, |ll| ll.latitude)
+}
+
+/// The site's longitude, or `0.0` when it carries no location.
+fn longitude(site: &Site) -> f64 {
+    site.lat_lng.as_ref().map_or(0.0, |ll| ll.longitude)
+}
+
 /// Computes [`aip::pagination::request_checksum`] for a concrete request.
 ///
 /// The library's reflective surface is `DynamicMessage`-based (ADR-0001), but the
@@ -326,5 +498,162 @@ fn now() -> prost_types::Timestamp {
     prost_types::Timestamp {
         seconds: d.as_secs() as i64,
         nanos: d.subsec_nanos() as i32,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::google::r#type::LatLng;
+
+    /// A shipper parent name; the demo does not require the shipper to exist in
+    /// storage for `CreateSite`/`ListSites`, only that the name is well-formed.
+    const PARENT: &str = "shippers/acme";
+
+    /// Creates a site under `PARENT` with the given display name and latitude.
+    async fn seed_site(server: &FreightServer, display_name: &str, latitude: f64) {
+        let site = Site {
+            display_name: display_name.to_owned(),
+            lat_lng: Some(LatLng {
+                latitude,
+                longitude: 0.0,
+            }),
+            ..Default::default()
+        };
+        server
+            .create_site(Request::new(CreateSiteRequest {
+                parent: PARENT.to_owned(),
+                site: Some(site),
+            }))
+            .await
+            .expect("create_site succeeds");
+    }
+
+    /// Lists sites under `PARENT` with the given `order_by`, returning their
+    /// display names in the order the server produced them.
+    async fn list_display_names(server: &FreightServer, order_by: &str) -> Vec<String> {
+        let resp = server
+            .list_sites(Request::new(ListSitesRequest {
+                parent: PARENT.to_owned(),
+                order_by: order_by.to_owned(),
+                ..Default::default()
+            }))
+            .await
+            .expect("list_sites succeeds")
+            .into_inner();
+        resp.sites.into_iter().map(|s| s.display_name).collect()
+    }
+
+    #[tokio::test]
+    async fn orders_by_display_name_ascending_and_descending() {
+        let server = FreightServer::new();
+        for name in ["Bravo", "Alpha", "Charlie"] {
+            seed_site(&server, name, 0.0).await;
+        }
+        assert_eq!(
+            list_display_names(&server, "display_name").await,
+            ["Alpha", "Bravo", "Charlie"],
+        );
+        assert_eq!(
+            list_display_names(&server, "display_name desc").await,
+            ["Charlie", "Bravo", "Alpha"],
+        );
+    }
+
+    #[tokio::test]
+    async fn orders_by_nested_subfield_path() {
+        let server = FreightServer::new();
+        seed_site(&server, "north", 60.0).await;
+        seed_site(&server, "south", -30.0).await;
+        seed_site(&server, "equator", 0.0).await;
+        // `lat_lng.latitude` is a `.`-nested Subfield path.
+        assert_eq!(
+            list_display_names(&server, "lat_lng.latitude").await,
+            ["south", "equator", "north"],
+        );
+        assert_eq!(
+            list_display_names(&server, "lat_lng.latitude desc").await,
+            ["north", "equator", "south"],
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_order_by_with_invalid_argument() {
+        let server = FreightServer::new();
+        // `foo/bar` is bad syntax, `display_name bogus` has a non-direction word,
+        // and `unknown_field` is well-formed but not in the sortable allow-list.
+        for bad in ["foo/bar", "display_name bogus", "unknown_field"] {
+            let status = server
+                .list_sites(Request::new(ListSitesRequest {
+                    parent: PARENT.to_owned(),
+                    order_by: bad.to_owned(),
+                    ..Default::default()
+                }))
+                .await
+                .expect_err("invalid order_by is rejected");
+            assert_eq!(
+                status.code(),
+                tonic::Code::InvalidArgument,
+                "order_by {bad:?} should be InvalidArgument",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn paginates_stably_and_guards_order_by_change() {
+        let server = FreightServer::new();
+        for name in ["d", "b", "e", "a", "c"] {
+            seed_site(&server, name, 0.0).await;
+        }
+
+        // Page through (size 2) ordered by display_name; the concatenation across
+        // pages is the full, stably-ordered listing.
+        let mut collected = Vec::new();
+        let mut page_token = String::new();
+        loop {
+            let resp = server
+                .list_sites(Request::new(ListSitesRequest {
+                    parent: PARENT.to_owned(),
+                    order_by: "display_name".to_owned(),
+                    page_size: 2,
+                    page_token: page_token.clone(),
+                    ..Default::default()
+                }))
+                .await
+                .expect("list_sites page succeeds")
+                .into_inner();
+            collected.extend(resp.sites.into_iter().map(|s| s.display_name));
+            page_token = resp.next_page_token;
+            if page_token.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(collected, ["a", "b", "c", "d", "e"]);
+
+        // A token minted under one `order_by` is rejected when replayed under a
+        // different one: `order_by` is a non-pagination field, so the request
+        // checksum (#7) changes and the stale token is refused.
+        let first = server
+            .list_sites(Request::new(ListSitesRequest {
+                parent: PARENT.to_owned(),
+                order_by: "display_name".to_owned(),
+                page_size: 2,
+                ..Default::default()
+            }))
+            .await
+            .expect("first page succeeds")
+            .into_inner();
+        assert!(!first.next_page_token.is_empty());
+        let status = server
+            .list_sites(Request::new(ListSitesRequest {
+                parent: PARENT.to_owned(),
+                order_by: "name".to_owned(),
+                page_size: 2,
+                page_token: first.next_page_token,
+                ..Default::default()
+            }))
+            .await
+            .expect_err("changing order_by mid-pagination invalidates the token");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
     }
 }
