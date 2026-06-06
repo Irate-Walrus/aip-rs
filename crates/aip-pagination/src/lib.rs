@@ -9,7 +9,8 @@
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
-use prost_reflect::DynamicMessage;
+use prost::Message as _;
+use prost_reflect::{DynamicMessage, ReflectMessage as _};
 use serde::{Deserialize, Serialize};
 
 /// Version byte prepended to every encoded page token. Bump it whenever the
@@ -62,9 +63,37 @@ pub struct PageToken {
 }
 
 impl PageToken {
-    /// Parse and verify an offset page token from a request and its checksum.
-    pub fn parse(_request: &impl PageRequest, _checksum: u32) -> Result<Self, Error> {
-        todo!("decode token, verify checksum, apply skip")
+    /// Parses and verifies an offset page token from a request and the
+    /// [`request_checksum`] of its non-pagination fields.
+    ///
+    /// An empty [`page_token`](PageRequest::page_token) yields offset 0 (plus any
+    /// [`skip`](PageRequest::skip)); a non-empty one is decoded and its stored
+    /// offset returned (again with `skip` applied on top, per AIP-158). The token
+    /// is rejected with [`Error::ChecksumMismatch`] when its recorded checksum
+    /// disagrees with `checksum` — i.e. the client changed a non-pagination field
+    /// (filter, order_by, parent, …) mid-pagination.
+    ///
+    /// Unlike `aip-go`, no `pageTokenChecksumMask` is applied: the 1-byte version
+    /// prefix already forces older tokens to fail loudly across a format change
+    /// (see ADR-0004), so the mask would be redundant.
+    pub fn parse(request: &impl PageRequest, checksum: u32) -> Result<Self, Error> {
+        let skip = i64::from(request.skip());
+        if request.page_token().is_empty() {
+            return Ok(Self {
+                offset: skip,
+                request_checksum: checksum,
+            });
+        }
+        let token: Self = decode_page_token(request.page_token())?;
+        if token.request_checksum != checksum {
+            return Err(Error::ChecksumMismatch);
+        }
+        Ok(Self {
+            // Tokens are unsigned and therefore client-forgeable (ADR-0004), so
+            // saturate rather than risk an overflow panic on a hostile offset.
+            offset: token.offset.saturating_add(skip),
+            request_checksum: token.request_checksum,
+        })
     }
 
     /// The token for the next page, given the current page size.
@@ -119,8 +148,22 @@ pub fn decode_page_token<T: serde::de::DeserializeOwned>(token: &str) -> Result<
 
 /// Computes the CRC32-IEEE checksum of a request, excluding the pagination
 /// fields (`page_token`, `page_size`, `skip`). Reflective.
-pub fn request_checksum(_request: &DynamicMessage) -> Result<u32, Error> {
-    todo!("clone, clear pagination fields, prost-encode, crc32 IEEE")
+///
+/// Ported from `aip-go`'s `CalculateRequestChecksum`: the request is cloned, the
+/// pagination fields that legitimately change between pages are cleared, and the
+/// prost-encoded remainder is checksummed. Any *other* field changing flips the
+/// checksum, which is how [`PageToken::parse`] detects a request that mutated
+/// mid-pagination. A request that does not declare a given pagination field
+/// (e.g. one without `skip`) simply has nothing to clear for it.
+pub fn request_checksum(request: &DynamicMessage) -> Result<u32, Error> {
+    let mut cloned = request.clone();
+    let descriptor = cloned.descriptor();
+    for name in ["page_token", "page_size", "skip"] {
+        if let Some(field) = descriptor.get_field_by_name(name) {
+            cloned.clear_field(&field);
+        }
+    }
+    Ok(crc32fast::hash(&cloned.encode_to_vec()))
 }
 
 #[cfg(feature = "tonic")]
@@ -243,5 +286,178 @@ mod tests {
         assert_eq!(req.page_token(), "abc");
         assert_eq!(req.page_size(), 25);
         assert_eq!(req.skip(), 0); // default
+    }
+
+    /// A reflection-free offset request used to exercise [`PageToken::parse`];
+    /// `page_size` is irrelevant to parsing, so it is fixed at 0.
+    struct OffsetReq {
+        page_token: String,
+        skip: i32,
+    }
+    impl PageRequest for OffsetReq {
+        fn page_token(&self) -> &str {
+            &self.page_token
+        }
+        fn page_size(&self) -> i32 {
+            0
+        }
+        fn skip(&self) -> i32 {
+            self.skip
+        }
+    }
+
+    #[test]
+    fn parse_empty_token_starts_at_skip() {
+        // No token → offset 0, carrying the supplied checksum forward so the next
+        // page can detect a changed request.
+        let first = PageToken::parse(
+            &OffsetReq {
+                page_token: String::new(),
+                skip: 0,
+            },
+            0xABCD,
+        )
+        .expect("empty token parses");
+        assert_eq!(first.offset, 0);
+        assert_eq!(first.request_checksum, 0xABCD);
+
+        // Skip shifts the very first page (AIP-158).
+        let skipped = PageToken::parse(
+            &OffsetReq {
+                page_token: String::new(),
+                skip: 5,
+            },
+            0xABCD,
+        )
+        .expect("empty token with skip parses");
+        assert_eq!(skipped.offset, 5);
+    }
+
+    #[test]
+    fn parse_valid_token_returns_stored_offset() {
+        let checksum = 0x1234_5678;
+        let minted = PageToken {
+            offset: 100,
+            request_checksum: checksum,
+        };
+        let parsed = PageToken::parse(
+            &OffsetReq {
+                page_token: minted.encode(),
+                skip: 0,
+            },
+            checksum,
+        )
+        .expect("matching checksum parses");
+        assert_eq!(parsed.offset, 100);
+
+        // Skip stacks on top of the token's recorded position.
+        let skipped = PageToken::parse(
+            &OffsetReq {
+                page_token: minted.encode(),
+                skip: 5,
+            },
+            checksum,
+        )
+        .expect("matching checksum parses");
+        assert_eq!(skipped.offset, 105);
+    }
+
+    #[test]
+    fn parse_rejects_checksum_mismatch() {
+        // A token minted against one request is rejected when replayed against a
+        // request whose non-pagination fields changed (different checksum).
+        let minted = PageToken {
+            offset: 100,
+            request_checksum: 0x1111,
+        };
+        let err = PageToken::parse(
+            &OffsetReq {
+                page_token: minted.encode(),
+                skip: 0,
+            },
+            0x2222,
+        )
+        .expect_err("checksum mismatch");
+        assert!(matches!(err, Error::ChecksumMismatch), "{err:?}");
+    }
+
+    #[test]
+    fn parse_propagates_decode_errors() {
+        // A malformed (non-empty) token surfaces the decode error rather than
+        // being mistaken for the start of the result set.
+        let err = PageToken::parse(
+            &OffsetReq {
+                page_token: "not*base64".to_owned(),
+                skip: 0,
+            },
+            0,
+        )
+        .expect_err("malformed token");
+        assert!(matches!(err, Error::Decode(_)), "{err:?}");
+    }
+
+    #[test]
+    fn parse_saturates_offset_on_overflow() {
+        // Tokens are unsigned and forgeable: a near-max offset plus a skip must
+        // saturate rather than overflow-panic (a debug-build crash otherwise).
+        let minted = PageToken {
+            offset: i64::MAX,
+            request_checksum: 0,
+        };
+        let parsed = PageToken::parse(
+            &OffsetReq {
+                page_token: minted.encode(),
+                skip: 5,
+            },
+            0,
+        )
+        .expect("forged near-max offset parses");
+        assert_eq!(parsed.offset, i64::MAX);
+    }
+
+    /// Builds a `ListSitesRequest` fixture (it carries `parent`, `page_size`,
+    /// `page_token`, and `skip` — the full pagination field set) from JSON.
+    fn list_sites(json: &str) -> DynamicMessage {
+        test_fixtures::from_json("einride.example.freight.v1.ListSitesRequest", json)
+            .expect("ListSitesRequest fixture builds")
+    }
+
+    #[test]
+    fn request_checksum_ignores_pagination_fields() {
+        // Two requests that differ only in their pagination fields must share a
+        // checksum — that is exactly what changes legitimately between pages.
+        let a =
+            list_sites(r#"{"parent":"shippers/acme","pageSize":10,"pageToken":"first","skip":5}"#);
+        let b = list_sites(
+            r#"{"parent":"shippers/acme","pageSize":99,"pageToken":"second","skip":40}"#,
+        );
+        assert_eq!(request_checksum(&a).unwrap(), request_checksum(&b).unwrap());
+    }
+
+    #[test]
+    fn request_checksum_changes_when_other_field_changes() {
+        // A change to any non-pagination field (here `parent`) must flip the
+        // checksum, so a stale token is rejected.
+        let a = list_sites(r#"{"parent":"shippers/acme"}"#);
+        let b = list_sites(r#"{"parent":"shippers/other"}"#);
+        assert_ne!(request_checksum(&a).unwrap(), request_checksum(&b).unwrap());
+    }
+
+    #[test]
+    fn request_checksum_handles_request_without_skip() {
+        // `ListShippersRequest` declares only `page_size`/`page_token` (no
+        // `skip`/`parent`): clearing the absent `skip` is a no-op, and two
+        // pagination-only-different requests still match.
+        let a = test_fixtures::from_json(
+            "einride.example.freight.v1.ListShippersRequest",
+            r#"{"pageSize":10,"pageToken":"first"}"#,
+        )
+        .expect("ListShippersRequest fixture builds");
+        let b = test_fixtures::from_json(
+            "einride.example.freight.v1.ListShippersRequest",
+            r#"{"pageSize":20,"pageToken":"second"}"#,
+        )
+        .expect("ListShippersRequest fixture builds");
+        assert_eq!(request_checksum(&a).unwrap(), request_checksum(&b).unwrap());
     }
 }

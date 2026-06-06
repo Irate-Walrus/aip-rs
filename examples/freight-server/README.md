@@ -52,7 +52,7 @@ wired up.
 | Method            | aip-rs primitive(s)                          | Issue        | Status      |
 | ----------------- | -------------------------------------------- | ------------ | ----------- |
 | `GetShipper`      | `resourcename` (validate name)               | #4           | wired       |
-| `ListShippers`    | `pagination` (offset page-token codec)       | #6, #7       | wired²      |
+| `ListShippers`    | `pagination` (offset page-token codec + request-checksum guard) | #6, #7 | wired² |
 | `CreateShipper`   | `resourceid` (generate), `resourcename` (format) | #5, #3   | wired       |
 | `UpdateShipper`   | `fieldmask` (apply `update_mask`)            | #8           | wired¹      |
 | `DeleteShipper`   | `resourcename` (validate name)               | #4           | wired       |
@@ -61,9 +61,12 @@ wired up.
 ¹ Functional with naive placeholders today; the `TODO(aip #N)` seam swaps in the
 real primitive when its issue lands.
 
-² Real offset pagination through the `pagination` page-token codec (#6); the
-request-checksum guard that rejects a token when the filter/order changes
-mid-pagination lands in #7.
+² Real offset pagination through the `pagination` page-token codec (#6), with the
+request-checksum guard (#7) that rejects a token when a non-pagination field
+changes mid-pagination. `ListShippersRequest` carries only the pagination fields,
+so its checksum is constant — `ListSites` (when wired) exercises the guard
+against a varying `parent`/`skip`. The checksum is computed reflectively, via a
+`DynamicMessage` built from the server's descriptor pool.
 
 ## How the proto types are built
 

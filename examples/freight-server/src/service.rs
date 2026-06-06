@@ -8,7 +8,8 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use aip::pagination::{decode_page_token, PageRequest, PageToken};
+use aip::pagination::{PageRequest, PageToken};
+use prost_reflect::DynamicMessage;
 use tonic::{Request, Response, Status};
 
 use crate::proto::einride::example::freight::v1::{
@@ -68,22 +69,13 @@ impl FreightService for FreightServer {
         request: Request<ListShippersRequest>,
     ) -> Result<Response<ListShippersResponse>, Status> {
         let req = request.into_inner();
-        // Offset pagination (AIP-158) over the stable shipper listing. An empty
-        // token starts at offset 0; otherwise we decode the offset the previous
-        // page handed back.
-        //
-        // TODO(aip #7): verify `request_checksum` (via `PageToken::parse` +
-        // `request_checksum`) so a token is rejected when the filter/order
-        // changes mid-pagination. Until then the offset is taken on trust.
-        let current = if req.page_token().is_empty() {
-            PageToken {
-                offset: 0,
-                request_checksum: 0,
-            }
-        } else {
-            decode_page_token::<PageToken>(req.page_token())
-                .map_err(|e| Status::invalid_argument(format!("invalid page_token: {e}")))?
-        };
+        // Offset pagination (AIP-158) over the stable shipper listing. The
+        // checksum over the request's non-pagination fields is verified by
+        // `PageToken::parse`, so a token is rejected if the client changes the
+        // request mid-pagination; an empty token starts at offset 0.
+        let checksum = request_checksum_of("einride.example.freight.v1.ListShippersRequest", &req)?;
+        let current = PageToken::parse(&req, checksum)
+            .map_err(|e| Status::invalid_argument(format!("invalid page_token: {e}")))?;
         let page_size = effective_page_size(req.page_size());
         let mut shippers = self.storage.list_shippers();
         let total = shippers.len();
@@ -250,6 +242,25 @@ impl PageRequest for ListShippersRequest {
     fn page_size(&self) -> i32 {
         self.page_size
     }
+}
+
+/// Computes [`aip::pagination::request_checksum`] for a concrete request.
+///
+/// The library's reflective surface is `DynamicMessage`-based (ADR-0001), but the
+/// generated request types carry no reflection. We round-trip the request
+/// through the proto wire format and the server's [`DESCRIPTOR_POOL`] to obtain a
+/// `DynamicMessage`, then checksum it. `full_name` is the request's
+/// fully-qualified message name.
+///
+/// [`DESCRIPTOR_POOL`]: crate::proto::DESCRIPTOR_POOL
+fn request_checksum_of<M: prost::Message>(full_name: &str, request: &M) -> Result<u32, Status> {
+    let descriptor = crate::proto::DESCRIPTOR_POOL
+        .get_message_by_name(full_name)
+        .expect("the request type is present in the freight descriptor pool");
+    let dynamic = DynamicMessage::decode(descriptor, request.encode_to_vec().as_slice())
+        .expect("a freshly-encoded request re-decodes as a DynamicMessage");
+    aip::pagination::request_checksum(&dynamic)
+        .map_err(|e| Status::internal(format!("compute request checksum: {e}")))
 }
 
 /// Resolves the effective page size from a request's `page_size`, applying the
