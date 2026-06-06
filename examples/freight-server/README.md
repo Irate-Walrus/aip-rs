@@ -50,7 +50,7 @@ wired up.
 | ----------------- | -------------------------------------------- | ------------ | ----------- |
 | `GetShipper`      | `resourcename` (validate name)               | #4           | wired¹      |
 | `ListShippers`    | `pagination`                                 | #6, #7       | wired¹      |
-| `CreateShipper`   | `resourceid` (generate), `resourcename`      | #5, #3       | wired¹      |
+| `CreateShipper`   | `resourceid` (generate), `resourcename` (format) | #5, #3   | #3 wired; #5 pending¹ |
 | `UpdateShipper`   | `fieldmask` (apply `update_mask`)            | #8           | wired¹      |
 | `DeleteShipper`   | `resourcename`                               | #4           | wired       |
 | `*Site` / `*Shipment`, `BatchGetSites` | all of the above + `filtering`, `ordering` | #9–#15 | `Unimplemented` |
