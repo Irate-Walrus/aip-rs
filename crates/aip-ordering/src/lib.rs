@@ -71,7 +71,8 @@ impl FromStr for OrderBy {
                 && c != '.'
             {
                 return Err(Error::Syntax(format!(
-                    "invalid character {}",
+                    "invalid order_by '{}': invalid character {}",
+                    s,
                     c.escape_debug()
                 )));
             }
@@ -80,29 +81,20 @@ impl FromStr for OrderBy {
         let mut fields = Vec::new();
         for raw in s.split(',') {
             let mut parts = raw.split_whitespace();
-            match (parts.next(), parts.next(), parts.next()) {
-                (None, _, _) => return Err(Error::Syntax(format!("invalid format for '{raw}'"))),
-                (Some(path), None, _) => {
-                    validate_path_segments(path)?;
-                    fields.push(OrderByField {
-                        path: path.to_owned(),
-                        desc: false,
-                    });
-                }
-                (Some(path), Some(direction), None) => {
-                    let desc = match direction {
-                        "asc" => false,
-                        "desc" => true,
-                        _ => return Err(Error::Syntax(format!("invalid format for '{raw}'"))),
-                    };
-                    validate_path_segments(path)?;
-                    fields.push(OrderByField {
-                        path: path.to_owned(),
-                        desc,
-                    });
-                }
+            let Some(path) = parts.next() else {
+                return Err(Error::Syntax(format!("invalid format for '{raw}'")));
+            };
+            validate_path_segments(path)?;
+            let desc = match (parts.next(), parts.next()) {
+                (None, _) => false,
+                (Some("asc"), None) => false,
+                (Some("desc"), None) => true,
                 _ => return Err(Error::Syntax(format!("invalid format for '{raw}'"))),
-            }
+            };
+            fields.push(OrderByField {
+                path: path.to_owned(),
+                desc,
+            });
         }
         Ok(OrderBy { fields })
     }
@@ -135,6 +127,11 @@ impl OrderBy {
     }
 
     /// Validates every field path against a message type (via `aip-fieldmask`).
+    ///
+    /// # Panics
+    ///
+    /// Always panics — not yet implemented. Tracked in issue #10. Callers receive
+    /// a panic rather than `Err` until that issue lands.
     pub fn validate_for_message(&self, _descriptor: &MessageDescriptor) -> Result<(), Error> {
         todo!("convert paths to a FieldMask and call aip_fieldmask::validate")
     }
