@@ -68,15 +68,20 @@ pub fn message_descriptor(full_name: &str) -> Option<MessageDescriptor> {
 /// `full_name` is the fully-qualified message name, such as
 /// `"einride.example.freight.v1.Shipper"`.
 pub fn from_json(full_name: &str, json: &str) -> Result<DynamicMessage, FixtureError> {
-    let descriptor =
-        message_descriptor(full_name).ok_or_else(|| FixtureError::UnknownMessage(full_name.to_owned()))?;
+    let descriptor = message_descriptor(full_name)
+        .ok_or_else(|| FixtureError::UnknownMessage(full_name.to_owned()))?;
 
     let mut deserializer = serde_json::Deserializer::from_str(json);
-    let message = DynamicMessage::deserialize(descriptor, &mut deserializer)
-        .map_err(|source| FixtureError::Json { message: full_name.to_owned(), source })?;
-    deserializer
-        .end()
-        .map_err(|source| FixtureError::Json { message: full_name.to_owned(), source })?;
+    let message = DynamicMessage::deserialize(descriptor, &mut deserializer).map_err(|source| {
+        FixtureError::Json {
+            message: full_name.to_owned(),
+            source,
+        }
+    })?;
+    deserializer.end().map_err(|source| FixtureError::Json {
+        message: full_name.to_owned(),
+        source,
+    })?;
 
     Ok(message)
 }

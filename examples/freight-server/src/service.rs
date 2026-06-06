@@ -84,8 +84,13 @@ impl FreightService for FreightServer {
         // TODO(aip #5): assign the resource ID with `aip::resourceid::generate`
         // (or validate a user-supplied one) instead of a bare counter.
         let id = self.storage.next_id();
-        // TODO(aip #3): format the name from the pattern via `aip::resourcename`.
-        shipper.name = format!("{SHIPPERS_COLLECTION}/{id}");
+        // Format the canonical resource name `shippers/{shipper}` from its
+        // pattern (AIP-122) rather than hand-concatenating the segments.
+        let shipper_pattern = format!("{SHIPPERS_COLLECTION}/{{shipper}}");
+        shipper.name = aip::resourcename::Pattern::parse(&shipper_pattern)
+            .expect("the shipper collection pattern is valid")
+            .format([("shipper", id.to_string().as_str())])
+            .expect("a generated shipper id formats into the pattern");
         let ts = now();
         shipper.create_time = Some(ts);
         shipper.update_time = Some(ts);
@@ -201,7 +206,9 @@ impl FreightService for FreightServer {
 
 /// The standard `Unimplemented` status for a method that hasn't been wired yet.
 fn unimplemented(method: &str) -> Status {
-    Status::unimplemented(format!("{method} is not implemented yet in the aip-rs demo"))
+    Status::unimplemented(format!(
+        "{method} is not implemented yet in the aip-rs demo"
+    ))
 }
 
 /// Current wall-clock time as a protobuf `Timestamp`, for the server-set
