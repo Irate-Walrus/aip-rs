@@ -23,6 +23,8 @@ pub enum Error {
     PatternMismatch { pattern: String },
     #[error("invalid pattern: {0}")]
     InvalidPattern(String),
+    #[error("segment {segment:?}: resource names must not contain variables")]
+    VariableInName { segment: String },
     #[error("missing value for variable {name:?}")]
     MissingVariable { name: String },
     #[error("variable {name:?} is not declared in the pattern")]
@@ -226,50 +228,223 @@ fn variable_name(segment: &str) -> Option<&str> {
     }
 }
 
-/// Splits a resource name into its segments, skipping any `//service` full
-/// resource name prefix and a single leading `/`. Mirrors the segment sequence
-/// produced by aip-go's `Scanner` for names.
+/// Collects the segments of a resource name via [`Scanner`], skipping any
+/// `//service` prefix and a single leading `/`.
 fn name_segments(name: &str) -> Vec<&str> {
-    if name.is_empty() {
-        return Vec::new();
+    let mut scanner = Scanner::new(name);
+    let mut segments = Vec::new();
+    while let Some(segment) = scanner.scan() {
+        segments.push(segment.0);
     }
-    let body = if let Some(rest) = name.strip_prefix("//") {
-        // Full resource name: drop the service name (up to the next `/`).
-        match rest.find('/') {
-            Some(i) => &rest[i + 1..],
-            None => return Vec::new(), // service name only, no resource segments
-        }
-    } else if let Some(rest) = name.strip_prefix('/') {
-        rest
-    } else {
-        name
-    };
-    body.split('/').collect()
+    segments
 }
 
-/// Returns the ancestor of `name` matching `pattern`, if any.
-pub fn ancestor(_name: &str, _pattern: &str) -> Option<String> {
-    todo!()
+/// Extracts the ancestor of `name` selected by `pattern`, if `name` matches.
+///
+/// Walks `pattern` and `name` in lockstep; literal segments must be equal and
+/// variable segments bind any segment. Returns the prefix of `name` covered by
+/// the pattern (including any `//service` prefix), or `None` if `name` does not
+/// match, either is empty, or `pattern` contains a [`Wildcard`](WILDCARD).
+pub fn ancestor(name: &str, pattern: &str) -> Option<String> {
+    if name.is_empty() || pattern.is_empty() {
+        return None;
+    }
+    let mut name_scanner = Scanner::new(name);
+    let mut pattern_scanner = Scanner::new(pattern);
+    while let Some(pattern_segment) = pattern_scanner.scan() {
+        let name_segment = name_scanner.scan()?;
+        if pattern_segment.is_wildcard() {
+            return None; // wildcards are not allowed in patterns
+        }
+        if !pattern_segment.is_variable() && pattern_segment != name_segment {
+            return None; // literal mismatch
+        }
+    }
+    Some(name[..name_scanner.end].to_string())
 }
 
 /// Reports whether `parent` is a parent resource name of `name`.
-pub fn has_parent(_name: &str, _parent: &str) -> bool {
-    todo!()
+///
+/// [`Wildcard`](WILDCARD) (`-`) segments in `parent` match any segment. A
+/// resource name without a revision is a parent of the same name carrying a
+/// revision (per AIP-162). Full resource names match only when their service
+/// names agree.
+pub fn has_parent(name: &str, parent: &str) -> bool {
+    if name.is_empty() || parent.is_empty() || name == parent {
+        return false;
+    }
+    let mut parent_scanner = Scanner::new(parent);
+    let mut name_scanner = Scanner::new(name);
+    while let Some(parent_segment) = parent_scanner.scan() {
+        let Some(name_segment) = name_scanner.scan() else {
+            return false;
+        };
+        if parent_segment.is_wildcard() {
+            continue;
+        }
+        // A non-revisioned resource ID is the parent of its revisioned form.
+        if name_segment.literal().has_revision()
+            && !parent_segment.literal().has_revision()
+            && name_segment.literal().resource_id() == parent_segment.literal().resource_id()
+        {
+            continue;
+        }
+        if parent_segment != name_segment {
+            return false;
+        }
+    }
+    if parent_scanner.full() && name_scanner.full() {
+        return parent_scanner.service_name() == name_scanner.service_name();
+    }
+    true
 }
 
 /// Reports whether `name` contains any wildcard (`-`) segments.
-pub fn contains_wildcard(_name: &str) -> bool {
-    todo!()
+pub fn contains_wildcard(name: &str) -> bool {
+    let mut scanner = Scanner::new(name);
+    while let Some(segment) = scanner.scan() {
+        if segment.is_wildcard() {
+            return true;
+        }
+    }
+    false
 }
 
-/// Validates that `name` is a well-formed resource name.
-pub fn validate(_name: &str) -> Result<(), Error> {
-    todo!()
+/// Validates that `name` is a well-formed resource name per AIP-122.
+///
+/// Each segment must be a [`Wildcard`](WILDCARD) or a valid DNS-name
+/// [`Literal`]; variables are not allowed. A `//service` prefix must be a valid
+/// DNS name.
+pub fn validate(name: &str) -> Result<(), Error> {
+    if name.is_empty() {
+        return Err(Error::Empty);
+    }
+    let mut scanner = Scanner::new(name);
+    let mut index = 0;
+    while let Some(segment) = scanner.scan() {
+        index += 1;
+        if segment.0.is_empty() {
+            return Err(Error::EmptySegment { index });
+        }
+        if segment.is_wildcard() {
+            continue;
+        }
+        if segment.is_variable() {
+            return Err(Error::VariableInName {
+                segment: segment.0.to_string(),
+            });
+        }
+        if !is_domain_name(segment.0) {
+            return Err(Error::InvalidDnsName {
+                segment: segment.0.to_string(),
+            });
+        }
+    }
+    if scanner.full() && !is_domain_name(scanner.service_name()) {
+        return Err(Error::InvalidDnsName {
+            segment: scanner.service_name().to_string(),
+        });
+    }
+    Ok(())
 }
 
-/// Validates that `pattern` is a well-formed resource-name pattern.
-pub fn validate_pattern(_pattern: &str) -> Result<(), Error> {
-    todo!()
+/// Validates that `pattern` is a well-formed resource-name pattern per AIP-122.
+///
+/// Each segment must be a valid DNS-name [`Literal`] or a `{snake_case}`
+/// variable. Wildcards and full resource names are rejected.
+pub fn validate_pattern(pattern: &str) -> Result<(), Error> {
+    if pattern.is_empty() {
+        return Err(Error::InvalidPattern("pattern is empty".to_string()));
+    }
+    let mut scanner = Scanner::new(pattern);
+    let mut index = 0;
+    while let Some(segment) = scanner.scan() {
+        index += 1;
+        if segment.0.is_empty() {
+            return Err(Error::EmptySegment { index });
+        }
+        if segment.is_wildcard() {
+            return Err(Error::InvalidPattern(
+                "wildcards not allowed in patterns".to_string(),
+            ));
+        }
+        if segment.is_variable() {
+            let name = segment.literal().0;
+            if name.is_empty() {
+                return Err(Error::InvalidPattern("missing variable name".to_string()));
+            }
+            if !is_snake_case(name) {
+                return Err(Error::InvalidPattern(
+                    "variable name must be valid snake case".to_string(),
+                ));
+            }
+        } else if !is_domain_name(segment.0) {
+            return Err(Error::InvalidDnsName {
+                segment: segment.0.to_string(),
+            });
+        }
+    }
+    if scanner.full() {
+        return Err(Error::InvalidPattern(
+            "patterns can not be full resource names".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Reports whether `s` is a valid snake-case identifier: a lowercase letter
+/// followed by lowercase letters, digits, or underscores.
+fn is_snake_case(s: &str) -> bool {
+    for (i, c) in s.chars().enumerate() {
+        if i == 0 {
+            if !c.is_lowercase() {
+                return false;
+            }
+        } else if c != '_' && !c.is_lowercase() && !c.is_numeric() {
+            return false;
+        }
+    }
+    true
+}
+
+/// Reports whether `s` is a valid DNS name (RFC 1035 / RFC 3696). Ported from
+/// Go's `net.isDomainName`, as aip-go does.
+fn is_domain_name(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let l = bytes.len();
+    if l == 0 || l > 254 || (l == 254 && bytes[l - 1] != b'.') {
+        return false;
+    }
+    let mut last = b'.';
+    let mut part_len = 0;
+    for &c in bytes {
+        match c {
+            b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'0'..=b'9' => part_len += 1,
+            b'-' => {
+                // A byte before a dash cannot be a dot.
+                if last == b'.' {
+                    return false;
+                }
+                part_len += 1;
+            }
+            b'.' => {
+                // A byte before a dot cannot be a dot or dash.
+                if last == b'.' || last == b'-' {
+                    return false;
+                }
+                if part_len > 63 || part_len == 0 {
+                    return false;
+                }
+                part_len = 0;
+            }
+            _ => return false,
+        }
+        last = c;
+    }
+    if last == b'-' || part_len > 63 {
+        return false;
+    }
+    true
 }
 
 /// A single `/`-separated component of a resource name or pattern.
@@ -288,9 +463,14 @@ impl<'a> Segment<'a> {
         self.0 == WILDCARD
     }
 
-    /// View this segment as a [`Literal`].
+    /// View this segment as a [`Literal`]. For a `{variable}` segment, the
+    /// literal value is the variable name (with the braces stripped).
     pub fn literal(&self) -> Literal<'a> {
-        Literal(self.0)
+        if self.is_variable() {
+            Literal(&self.0[1..self.0.len() - 1])
+        } else {
+            Literal(self.0)
+        }
     }
 }
 
@@ -301,36 +481,113 @@ pub struct Literal<'a>(pub &'a str);
 impl<'a> Literal<'a> {
     /// The resource ID, with any `@revision` stripped.
     pub fn resource_id(&self) -> &'a str {
-        todo!()
+        match self.0.find(REVISION_SEPARATOR) {
+            Some(i) if self.has_revision() => &self.0[..i],
+            _ => self.0,
+        }
     }
 
     /// The revision ID following `@`, if present.
     pub fn revision_id(&self) -> Option<&'a str> {
-        todo!()
+        match self.0.find(REVISION_SEPARATOR) {
+            // `@` is one byte, so `i + 1` is a valid boundary.
+            Some(i) if self.has_revision() => Some(&self.0[i + 1..]),
+            _ => None,
+        }
     }
 
-    /// Does this literal carry a valid revision?
+    /// Does this literal carry a valid revision? A valid revision has non-empty
+    /// content on each side of a single `@`.
     pub fn has_revision(&self) -> bool {
-        todo!()
+        let Some(i) = self.0.find(REVISION_SEPARATOR) else {
+            return false;
+        };
+        if i < 1 || i >= self.0.len() - 1 {
+            return false; // content required on each side of `@`
+        }
+        // A second `@` means there is no single, valid revision.
+        !self.0[i + 1..].contains(REVISION_SEPARATOR)
     }
 }
 
-/// Iterates the segments of a resource name.
+/// Iterates the [`Segment`]s of a resource name or pattern.
+///
+/// A leading `//service` prefix (a full resource name) is recognised: its
+/// service name is exposed via [`service_name`](Scanner::service_name) and
+/// [`full`](Scanner::full) reports `true`, while [`scan`](Scanner::scan) yields
+/// only the resource segments. A single leading `/` is skipped.
 #[derive(Debug)]
 pub struct Scanner<'a> {
-    #[allow(dead_code)]
-    rest: &'a str,
+    name: &'a str,
+    /// Start byte index (inclusive) of the current segment.
+    start: usize,
+    /// End byte index (exclusive) of the current segment.
+    end: usize,
+    service_start: usize,
+    service_end: usize,
+    full: bool,
 }
 
 impl<'a> Scanner<'a> {
     /// Create a scanner over `name`.
     pub fn new(name: &'a str) -> Self {
-        Self { rest: name }
+        Self {
+            name,
+            start: 0,
+            end: 0,
+            service_start: 0,
+            service_end: 0,
+            full: false,
+        }
     }
 
     /// Advance to and return the next [`Segment`], or `None` at the end.
     pub fn scan(&mut self) -> Option<Segment<'a>> {
-        todo!()
+        let len = self.name.len();
+        if self.end == len {
+            return None;
+        }
+        if self.end == 0 {
+            // First scan: handle full resource names and a leading slash.
+            if self.name.starts_with("//") {
+                self.full = true;
+                self.start = 2;
+                match self.name[2..].find('/') {
+                    None => {
+                        // Service name with no resource segments.
+                        self.service_start = 2;
+                        self.service_end = len;
+                        self.start = len;
+                        self.end = len;
+                        return None;
+                    }
+                    Some(next) => {
+                        self.service_start = 2;
+                        self.service_end = 2 + next;
+                        self.start = 2 + next + 1;
+                    }
+                }
+            } else if self.name.starts_with('/') {
+                self.start = 1; // skip the leading slash
+            }
+        } else {
+            self.start = self.end + 1; // skip the slash ending the last segment
+        }
+        self.end = match self.name[self.start..].find('/') {
+            Some(next) => self.start + next,
+            None => len,
+        };
+        Some(Segment(&self.name[self.start..self.end]))
+    }
+
+    /// Whether the scanned name is a full resource name (`//service/...`).
+    pub fn full(&self) -> bool {
+        self.full
+    }
+
+    /// The service name of a full resource name, or `""` otherwise.
+    pub fn service_name(&self) -> &'a str {
+        &self.name[self.service_start..self.service_end]
     }
 }
 
@@ -531,5 +788,248 @@ mod tests {
                 "round-trip should reproduce {name:?}"
             );
         }
+    }
+
+    fn assert_err_contains(result: Result<(), Error>, needle: &str) {
+        match result {
+            Ok(()) => panic!("expected an error containing {needle:?}, got Ok"),
+            Err(e) => assert!(
+                e.to_string().contains(needle),
+                "error {e:?} should contain {needle:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn scanner_iterates_segments() {
+        // Ported from aip-go `TestSegmentScanner`.
+        // (input, full, service_name, segments)
+        let cases: &[(&str, bool, &str, &[&str])] = &[
+            ("", false, "", &[]),
+            ("singleton", false, "", &["singleton"]),
+            ("shippers/1", false, "", &["shippers", "1"]),
+            (
+                "shippers/1/settings",
+                false,
+                "",
+                &["shippers", "1", "settings"],
+            ),
+            (
+                "shippers/1/shipments/-",
+                false,
+                "",
+                &["shippers", "1", "shipments", "-"],
+            ),
+            (
+                "shippers//shipments",
+                false,
+                "",
+                &["shippers", "", "shipments"],
+            ),
+            ("shippers/", false, "", &["shippers", ""]),
+            (
+                "//library.googleapis.com/publishers/123/books/les-miserables",
+                true,
+                "library.googleapis.com",
+                &["publishers", "123", "books", "les-miserables"],
+            ),
+            (
+                "//library.googleapis.com",
+                true,
+                "library.googleapis.com",
+                &[],
+            ),
+            ("//", true, "", &[]),
+        ];
+        for (input, full, service, segments) in cases {
+            let mut scanner = Scanner::new(input);
+            let mut got = Vec::new();
+            while let Some(segment) = scanner.scan() {
+                got.push(segment.0);
+            }
+            assert_eq!(scanner.full(), *full, "full for {input:?}");
+            assert_eq!(scanner.service_name(), *service, "service for {input:?}");
+            assert_eq!(got.as_slice(), *segments, "segments for {input:?}");
+        }
+    }
+
+    #[test]
+    fn validate_table() {
+        // Ported from aip-go `TestValidate`.
+        for ok in [
+            "foo",
+            "-",
+            "foo/bar",
+            "-/bar",
+            "foo/-",
+            "foo/-/bar",
+            "foo/1234/bar",
+            "FOO/1234/bAr",
+            "//example.com/foo/bar",
+        ] {
+            assert!(validate(ok).is_ok(), "{ok:?} should validate");
+        }
+        assert_err_contains(validate(""), "empty");
+        assert_err_contains(validate("ice cream is best"), "not a valid DNS name");
+        assert_err_contains(
+            validate("foo/bar/ice cream is best"),
+            "not a valid DNS name",
+        );
+        assert_err_contains(
+            validate("//ice cream is best.com/foo/bar"),
+            "not a valid DNS name",
+        );
+        assert_err_contains(validate("foo/bar/{baz}"), "must not contain variables");
+    }
+
+    #[test]
+    fn validate_pattern_table() {
+        // Ported from aip-go `TestValidatePattern`.
+        for ok in [
+            "foo/bar/{baz}",
+            "foo",
+            "foo/bar",
+            "foo/1234/bar",
+            "FOO/1234/bAr",
+            "fooBars/{foo_bar}",
+        ] {
+            assert!(validate_pattern(ok).is_ok(), "{ok:?} should validate");
+        }
+        assert_err_contains(validate_pattern(""), "empty");
+        assert_err_contains(
+            validate_pattern("ice cream is best"),
+            "not a valid DNS name",
+        );
+        assert_err_contains(
+            validate_pattern("foo/bar/ice cream is best"),
+            "not a valid DNS name",
+        );
+        assert_err_contains(
+            validate_pattern("//ice cream is best.com/foo/bar"),
+            "patterns can not be full resource names",
+        );
+        for wildcard in ["-", "-/bar", "foo/-", "foo/-/bar"] {
+            assert_err_contains(
+                validate_pattern(wildcard),
+                "wildcards not allowed in patterns",
+            );
+        }
+        assert_err_contains(
+            validate_pattern("//example.com/foo/bar"),
+            "patterns can not be full resource names",
+        );
+        assert_err_contains(validate_pattern("fooBars/{fooBar}"), "snake case");
+    }
+
+    #[test]
+    fn ancestor_table() {
+        // Ported from aip-go `TestAncestor`.
+        assert_eq!(ancestor("", ""), None);
+        assert_eq!(ancestor("foo/1/bar/2", ""), None);
+        assert_eq!(ancestor("", "foo/{foo}"), None);
+        assert_eq!(ancestor("foo/1/bar/2", "baz/{baz}"), None);
+        assert_eq!(
+            ancestor("foo/1/bar/2", "foo/{foo}").as_deref(),
+            Some("foo/1")
+        );
+        assert_eq!(
+            ancestor("//foo.example.com/foo/1/bar/2", "foo/{foo}").as_deref(),
+            Some("//foo.example.com/foo/1")
+        );
+    }
+
+    #[test]
+    fn has_parent_table() {
+        // Ported from aip-go `TestHasParent`. (name, parent, expected)
+        let cases = [
+            ("shippers/1/sites/1", "shippers/1", true),
+            (
+                "shippers/1/sites/1/settings",
+                "shippers/1/sites/1/settings",
+                false,
+            ),
+            ("shippers/1/sites/1", "", false),
+            ("", "", false),
+            ("shippers/1/settings", "shippers/1", true),
+            ("shippers/1/sites/1/settings", "shippers/1/sites/1", true),
+            ("shippers/1/sites/1", "shippers/-", true),
+            (
+                "//freight-example.einride.tech/shippers/1/sites/1",
+                "shippers/-",
+                true,
+            ),
+            (
+                "shippers/1/sites/1",
+                "//freight-example.einride.tech/shippers/-",
+                true,
+            ),
+            (
+                "//other-example.einride.tech/shippers/1/sites/1",
+                "//freight-example.einride.tech/shippers/-",
+                false,
+            ),
+            ("shippers/1/sites/1@beef", "shippers/1/sites/1", true),
+            ("shippers/1/sites/1@beef", "shippers/1/sites/1@dead", false),
+            ("shippers/1/sites/1@beef", "shippers/1/sites/1@beef", false),
+            ("datasets/1@beef/tables/1", "datasets/1@beef", true),
+            ("datasets/1/tables/1", "datasets/1@beef", false),
+            ("datasets/1@dead/tables/1", "datasets/1@beef", false),
+            ("datasets/1@beef/tables/1", "datasets/1", true),
+        ];
+        for (name, parent, expected) in cases {
+            assert_eq!(
+                has_parent(name, parent),
+                expected,
+                "has_parent({name:?}, {parent:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn contains_wildcard_table() {
+        // Ported from aip-go `TestContainsWildcard`.
+        for (input, expected) in [
+            ("", false),
+            ("foo", false),
+            ("-", true),
+            ("foo/bar", false),
+            ("-/bar", true),
+            ("foo/-", true),
+            ("foo/-/bar", true),
+        ] {
+            assert_eq!(
+                contains_wildcard(input),
+                expected,
+                "contains_wildcard({input:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn literal_revision_parsing() {
+        let revisioned = Literal("les-miserables@1.0.0");
+        assert!(revisioned.has_revision());
+        assert_eq!(revisioned.resource_id(), "les-miserables");
+        assert_eq!(revisioned.revision_id(), Some("1.0.0"));
+
+        let plain = Literal("les-miserables");
+        assert!(!plain.has_revision());
+        assert_eq!(plain.resource_id(), "les-miserables");
+        assert_eq!(plain.revision_id(), None);
+
+        // `@` at an edge, or doubled, is not a valid revision.
+        for invalid in ["@1.0.0", "book@", "a@b@c"] {
+            let literal = Literal(invalid);
+            assert!(!literal.has_revision(), "{invalid:?} has no valid revision");
+            assert_eq!(literal.resource_id(), invalid);
+            assert_eq!(literal.revision_id(), None);
+        }
+    }
+
+    #[test]
+    fn segment_literal_strips_variable_braces() {
+        assert_eq!(Segment("{shipper}").literal().0, "shipper");
+        assert_eq!(Segment("shippers").literal().0, "shippers");
+        assert_eq!(Segment("-").literal().0, "-");
     }
 }
