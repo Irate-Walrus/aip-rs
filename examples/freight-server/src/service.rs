@@ -80,15 +80,17 @@ impl FreightService for FreightServer {
             // field violation rather than a plain message.
             return Err(Status::invalid_argument("shipper.display_name is required"));
         }
-        // TODO(aip #5): assign the resource ID with `aip::resourceid::generate`
-        // (or validate a user-supplied one) instead of a bare counter.
-        let id = self.storage.next_id();
+        // Mint a system-assigned resource ID (a UUIDv4) per AIP-148.
+        // `CreateShipperRequest` has no `shipper_id` field, so there is no
+        // user-supplied id to validate here; `validate_user_settable` guards
+        // that path wherever a request later exposes one.
+        let id = aip::resourceid::generate_system();
         // Format the canonical resource name `shippers/{shipper}` from its
         // pattern (AIP-122) rather than hand-concatenating the segments.
         let shipper_pattern = format!("{SHIPPERS_COLLECTION}/{{shipper}}");
         shipper.name = aip::resourcename::Pattern::parse(&shipper_pattern)
             .expect("the shipper collection pattern is valid")
-            .format([("shipper", id.to_string().as_str())])
+            .format([("shipper", id.as_str())])
             .expect("a generated shipper id formats into the pattern");
         let ts = now();
         shipper.create_time = Some(ts);
