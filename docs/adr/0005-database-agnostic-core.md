@@ -17,9 +17,10 @@ build a full executor/repository/ORM mapping every AIP standard method to the DB
   must never be spliced into SQL text.
 - **Executor-agnostic core.** The generator emits SQL + binds usable by any
   executor; `sqlx` is one optional integration.
-- **Dialects.** Start by hand-rolling one dialect (Postgres). Multi-dialect
-  generation via `polyglot` is deferred and, if adopted, kept an internal
-  implementation detail rather than public API.
+- **Dialects.** Start by hand-rolling one dialect — **SQLite first, then
+  Postgres** (this supersedes the original "Postgres first"; see ADR-0008).
+  Multi-dialect generation via `polyglot` is deferred and, if adopted, kept an
+  internal implementation detail rather than public API.
 
 ## Consequences
 
