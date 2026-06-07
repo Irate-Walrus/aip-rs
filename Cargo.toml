@@ -50,6 +50,9 @@ protox = "0.9"
 
 # Optional gRPC status mapping (behind each crate's `tonic` feature).
 tonic = { version = "0.14", default-features = false }
+# AIP-193 standard error details (BadRequest / ErrorInfo) packed into a mapped
+# `tonic::Status`. Pulled in alongside `tonic` by each crate's `tonic` feature.
+tonic-types = { version = "0.14", default-features = false }
 
 # Example gRPC server only (`examples/freight-server`) — never used by the core
 # crates. `tonic-prost` supplies the runtime Prost codec the generated service

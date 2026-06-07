@@ -76,7 +76,7 @@ impl FreightService for FreightServer {
         request: Request<GetShipperRequest>,
     ) -> Result<Response<Shipper>, Status> {
         let name = request.into_inner().name;
-        validate_shipper_name(&name)?;
+        validate_shipper_name("name", &name)?;
         self.storage
             .get_shipper(&name)
             .map(Response::new)
@@ -119,9 +119,7 @@ impl FreightService for FreightServer {
             .shipper
             .ok_or_else(|| Status::invalid_argument("shipper is required"))?;
         if shipper.display_name.is_empty() {
-            // TODO(aip #16): surface this as a structured AIP-193 BadRequest
-            // field violation rather than a plain message.
-            return Err(Status::invalid_argument("shipper.display_name is required"));
+            return Err(required_field("shipper.display_name"));
         }
         // Mint a system-assigned resource ID (a UUIDv4) per AIP-148.
         // `CreateShipperRequest` has no `shipper_id` field, so there is no
@@ -164,12 +162,13 @@ impl FreightService for FreightServer {
         // generated `Shipper`s to `DynamicMessage` and back.
         let descriptor = reflect::descriptor(SHIPPER_TYPE);
         let mask = req.update_mask.unwrap_or_default();
-        aip::fieldmask::validate(&mask, &descriptor)
-            .map_err(|e| Status::invalid_argument(format!("invalid update_mask: {e}")))?;
+        // An invalid mask path (or a type mismatch) converts via the crate's
+        // AIP-193 `From<Error> for Status` (#16): the client gets `INVALID_ARGUMENT`
+        // with an `ErrorInfo` and, for a bad path, a `BadRequest` naming it.
+        aip::fieldmask::validate(&mask, &descriptor)?;
         let mut merged = reflect::to_dynamic(&descriptor, &existing);
         let incoming = reflect::to_dynamic(&descriptor, &incoming);
-        aip::fieldmask::update(&mask, &mut merged, &incoming)
-            .map_err(|e| Status::invalid_argument(format!("update_mask: {e}")))?;
+        aip::fieldmask::update(&mask, &mut merged, &incoming)?;
         let mut shipper: Shipper = reflect::from_dynamic(&merged);
 
         // The OUTPUT_ONLY timestamps are server-owned: a client mask must not move
@@ -187,7 +186,7 @@ impl FreightService for FreightServer {
     ) -> Result<Response<Shipper>, Status> {
         let name = request.into_inner().name;
         // Soft delete (AIP-164) is deferred; this is a hard delete.
-        validate_shipper_name(&name)?;
+        validate_shipper_name("name", &name)?;
         self.storage
             .remove_shipper(&name)
             .map(Response::new)
@@ -205,17 +204,16 @@ impl FreightService for FreightServer {
         request: Request<ListSitesRequest>,
     ) -> Result<Response<ListSitesResponse>, Status> {
         let req = request.into_inner();
-        validate_shipper_name(&req.parent)?;
+        validate_shipper_name("parent", &req.parent)?;
 
         // Parse and validate the AIP-132 `order_by` against the allow-list of
         // sortable Site paths (#9's `validate_for_paths`, not the descriptor-based
         // `validate_for_message` of #10). Bad syntax or an unknown ordering field
-        // is an InvalidArgument.
-        let order_by = aip::ordering::parse_order_by(&req)
-            .map_err(|e| Status::invalid_argument(format!("invalid order_by: {e}")))?;
-        order_by
-            .validate_for_paths(SORTABLE_SITE_PATHS)
-            .map_err(|e| Status::invalid_argument(format!("invalid order_by: {e}")))?;
+        // converts via the crate's AIP-193 `From<Error> for Status` (#16) to
+        // `INVALID_ARGUMENT` with an `ErrorInfo`, plus a `BadRequest` naming the
+        // offending field path.
+        let order_by = aip::ordering::parse_order_by(&req)?;
+        order_by.validate_for_paths(SORTABLE_SITE_PATHS)?;
 
         // Offset pagination (AIP-158). `order_by` is a non-pagination field, so
         // the request checksum `parse_page` computes covers it: changing it
@@ -256,12 +254,12 @@ impl FreightService for FreightServer {
         request: Request<CreateSiteRequest>,
     ) -> Result<Response<Site>, Status> {
         let req = request.into_inner();
-        validate_shipper_name(&req.parent)?;
+        validate_shipper_name("parent", &req.parent)?;
         let mut site = req
             .site
             .ok_or_else(|| Status::invalid_argument("site is required"))?;
         if site.display_name.is_empty() {
-            return Err(Status::invalid_argument("site.display_name is required"));
+            return Err(required_field("site.display_name"));
         }
 
         // The validated `parent` binds the `{shipper}` of the canonical site
@@ -456,8 +454,10 @@ struct Page {
 /// their pagination logic with `parse_page(&req)?`.
 fn parse_page<M: PageRequest + prost::Name>(request: &M) -> Result<Page, Status> {
     let checksum = request_checksum_of(request)?;
-    let token = PageToken::parse(request, checksum)
-        .map_err(|e| Status::invalid_argument(format!("invalid page_token: {e}")))?;
+    // A malformed token, version mismatch, or checksum mismatch converts via the
+    // crate's AIP-193 `From<Error> for Status` (#16) to an `INVALID_ARGUMENT`
+    // carrying an `ErrorInfo` (e.g. `PAGE_TOKEN_CHECKSUM_MISMATCH`).
+    let token = PageToken::parse(request, checksum)?;
     let size = effective_page_size(request.page_size())?;
     Ok(Page { token, size })
 }
@@ -487,19 +487,57 @@ fn effective_page_size(requested: i32) -> Result<usize, Status> {
     }
 }
 
-/// Validates that `name` is a well-formed shipper resource name (AIP-122): a
+/// Validates that `value` is a well-formed shipper resource name (AIP-122): a
 /// valid resource name that matches the `shippers/{shipper}` pattern. Returns
-/// `INVALID_ARGUMENT` otherwise.
-fn validate_shipper_name(name: &str) -> Result<(), Status> {
-    aip::resourcename::validate(name)
-        .map_err(|e| Status::invalid_argument(format!("invalid resource name `{name}`: {e}")))?;
+/// `INVALID_ARGUMENT` otherwise. `field` is the request field the value came from
+/// (`name` or `parent`), so the AIP-193 `BadRequest` points at the right one.
+fn validate_shipper_name(field: &str, value: &str) -> Result<(), Status> {
+    // A malformed name converts via the crate's AIP-193 `From<Error> for Status`
+    // (#16) to an `INVALID_ARGUMENT` carrying an `ErrorInfo`. The collection-match
+    // check below is the server's own policy, so it builds its own AIP-193 details.
+    aip::resourcename::validate(value)?;
     let pattern = format!("{SHIPPERS_COLLECTION}/{{shipper}}");
-    if !aip::resourcename::is_match(&pattern, name) {
-        return Err(Status::invalid_argument(format!(
-            "name `{name}` must match the pattern `{pattern}`"
-        )));
+    if !aip::resourcename::is_match(&pattern, value) {
+        return Err(field_violation(
+            field,
+            format!("must match the pattern `{pattern}`"),
+            "RESOURCE_NAME_PATTERN_MISMATCH",
+        ));
     }
     Ok(())
+}
+
+/// The AIP-193 `ErrorInfo.domain` for errors the server raises itself — the
+/// presence and policy checks no aip-rs primitive covers. The aip-rs crates use
+/// their own (`aip-rs`) domain for the values they validate (#16).
+const SERVICE_DOMAIN: &str = "freight.example.com";
+
+/// Builds an `INVALID_ARGUMENT` carrying AIP-193 standard details for one bad
+/// request field: a `BadRequest` field violation plus the mandatory `ErrorInfo`
+/// (with the `field` echoed in `metadata`, since it appears in the message). This
+/// mirrors the shape the aip-rs crates emit via `From<Error>` (#16) for the
+/// server's own validations, which no primitive covers.
+fn field_violation(field: &str, description: impl Into<String>, reason: &str) -> Status {
+    use std::collections::HashMap;
+    use tonic_types::{ErrorDetails, StatusExt};
+
+    let description = description.into();
+    let mut details = ErrorDetails::with_bad_request_violation(field, description.clone());
+    details.set_error_info(
+        reason,
+        SERVICE_DOMAIN,
+        HashMap::from([("field".to_owned(), field.to_owned())]),
+    );
+    Status::with_error_details(
+        tonic::Code::InvalidArgument,
+        format!("{field}: {description}"),
+        details,
+    )
+}
+
+/// A [`field_violation`] for a required request field left empty.
+fn required_field(field: &str) -> Status {
+    field_violation(field, "field is required", "FIELD_REQUIRED")
 }
 
 /// The standard `Unimplemented` status for a method that hasn't been wired yet.
@@ -764,5 +802,86 @@ mod tests {
             aip::ordering::Error::UnknownField(path) => assert_eq!(path, "not_a_field"),
             other => panic!("expected UnknownField for `not_a_field`, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn create_shipper_missing_display_name_carries_aip193_details() {
+        use tonic_types::StatusExt as _;
+
+        // The server's own presence check (no aip-rs primitive covers it) still
+        // emits AIP-193 details: a `BadRequest` naming the field plus an
+        // `ErrorInfo`.
+        let server = FreightServer::new();
+        let status = server
+            .create_shipper(Request::new(CreateShipperRequest {
+                shipper: Some(Shipper::default()),
+            }))
+            .await
+            .expect_err("an empty display_name is rejected");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+        let bad = status
+            .get_details_bad_request()
+            .expect("a BadRequest field violation is attached");
+        assert_eq!(bad.field_violations.len(), 1);
+        assert_eq!(bad.field_violations[0].field, "shipper.display_name");
+
+        let info = status
+            .get_details_error_info()
+            .expect("an ErrorInfo is attached (AIP-193 MUST)");
+        assert_eq!(info.reason, "FIELD_REQUIRED");
+        assert_eq!(info.domain, SERVICE_DOMAIN);
+    }
+
+    #[tokio::test]
+    async fn list_sites_unknown_order_by_field_carries_aip193_details() {
+        use tonic_types::StatusExt as _;
+
+        // An unknown ordering field flows through the `ordering` crate's AIP-193
+        // `From<Error> for Status` (#16): the `BadRequest` names the field path
+        // and the `ErrorInfo` carries the machine-readable reason + domain.
+        let server = FreightServer::new();
+        let status = server
+            .list_sites(Request::new(ListSitesRequest {
+                parent: PARENT.to_owned(),
+                order_by: "unknown_field".to_owned(),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("an unknown order_by field is rejected");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+        let bad = status
+            .get_details_bad_request()
+            .expect("a BadRequest field violation is attached");
+        assert_eq!(bad.field_violations[0].field, "unknown_field");
+
+        let info = status
+            .get_details_error_info()
+            .expect("an ErrorInfo is attached (AIP-193 MUST)");
+        assert_eq!(info.reason, "ORDER_BY_UNKNOWN_FIELD");
+        assert_eq!(info.domain, "aip-rs");
+    }
+
+    #[tokio::test]
+    async fn list_sites_bad_parent_names_the_parent_field() {
+        use tonic_types::StatusExt as _;
+
+        // `validate_shipper_name` is shared by `name`- and `parent`-bearing
+        // handlers; the BadRequest must point at the field the value came from.
+        // `shippers/acme/sites/x` is a valid resource name but does not match the
+        // `shippers/{shipper}` pattern, so it trips the server's policy check.
+        let server = FreightServer::new();
+        let status = server
+            .list_sites(Request::new(ListSitesRequest {
+                parent: "shippers/acme/sites/x".to_owned(),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("a parent that is not a shipper name is rejected");
+        let bad = status
+            .get_details_bad_request()
+            .expect("a BadRequest field violation is attached");
+        assert_eq!(bad.field_violations[0].field, "parent");
     }
 }

@@ -86,10 +86,70 @@ pub fn generate_system() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+/// The AIP-193 `ErrorInfo.domain` for every error this crate maps. Reason codes
+/// are unique within this domain. See `docs/adr/0007-aip193-error-details.md`.
+#[cfg(feature = "tonic")]
+const ERROR_DOMAIN: &str = "aip-rs";
+
 #[cfg(feature = "tonic")]
 impl From<Error> for tonic::Status {
+    /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details: an `ErrorInfo`
+    /// carrying a machine-readable `reason` + [`domain`](ERROR_DOMAIN) and the
+    /// error's dynamic values as `metadata`. A resource ID is an opaque value
+    /// rather than a request field path, so no `BadRequest` is attached.
+    /// See `docs/adr/0007-aip193-error-details.md`.
     fn from(err: Error) -> Self {
-        tonic::Status::invalid_argument(err.to_string())
+        use std::collections::HashMap;
+        use tonic_types::{ErrorDetails, StatusExt};
+
+        let message = err.to_string();
+        let (reason, metadata): (&str, HashMap<String, String>) = match &err {
+            Error::Length { len } => (
+                "RESOURCE_ID_LENGTH",
+                HashMap::from([("length".to_owned(), len.to_string())]),
+            ),
+            Error::LeadingCharacter => ("RESOURCE_ID_LEADING_CHARACTER", HashMap::new()),
+            Error::TrailingCharacter => ("RESOURCE_ID_TRAILING_CHARACTER", HashMap::new()),
+            Error::Character {
+                character,
+                position,
+            } => (
+                "RESOURCE_ID_INVALID_CHARACTER",
+                HashMap::from([
+                    ("character".to_owned(), character.to_string()),
+                    ("position".to_owned(), position.to_string()),
+                ]),
+            ),
+        };
+        let mut details = ErrorDetails::new();
+        details.set_error_info(reason, ERROR_DOMAIN, metadata);
+        tonic::Status::with_error_details(tonic::Code::InvalidArgument, message, details)
+    }
+}
+
+#[cfg(all(test, feature = "tonic"))]
+mod tonic_tests {
+    use super::*;
+    use tonic_types::StatusExt as _;
+
+    #[test]
+    fn invalid_character_maps_to_invalid_argument_with_metadata() {
+        let status: tonic::Status = Error::Character {
+            character: '!',
+            position: 3,
+        }
+        .into();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+        let info = status
+            .get_details_error_info()
+            .expect("an ErrorInfo is always attached (AIP-193)");
+        assert_eq!(info.reason, "RESOURCE_ID_INVALID_CHARACTER");
+        assert_eq!(info.domain, ERROR_DOMAIN);
+        assert_eq!(info.metadata.get("position").map(String::as_str), Some("3"));
+
+        // A resource ID is an opaque value, not a request field path.
+        assert!(status.get_details_bad_request().is_none());
     }
 }
 

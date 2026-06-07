@@ -213,9 +213,93 @@ fn next_message(field: &FieldDescriptor) -> Option<MessageDescriptor> {
     }
 }
 
+/// The AIP-193 `ErrorInfo.domain` for every error this crate maps. Reason codes
+/// are unique within this domain. See `docs/adr/0007-aip193-error-details.md`.
+#[cfg(feature = "tonic")]
+const ERROR_DOMAIN: &str = "aip-rs";
+
 #[cfg(feature = "tonic")]
 impl From<Error> for tonic::Status {
+    /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details: an `ErrorInfo`
+    /// (machine-readable `reason` + [`domain`](ERROR_DOMAIN), with the error's
+    /// dynamic values as `metadata`) and, when the error names a mask path, a
+    /// `BadRequest` field violation keyed on that path.
+    /// See `docs/adr/0007-aip193-error-details.md`.
     fn from(err: Error) -> Self {
-        tonic::Status::invalid_argument(err.to_string())
+        use std::collections::HashMap;
+        use tonic_types::{ErrorDetails, StatusExt};
+
+        let message = err.to_string();
+        // The optional field violation carries the offending mask path — a path
+        // leading to a field, exactly what AIP-193's `BadRequest` expects.
+        let (reason, metadata, violation): (
+            &str,
+            HashMap<String, String>,
+            Option<(String, String)>,
+        ) = match &err {
+            Error::UnknownPath { path, message } => (
+                "FIELD_MASK_UNKNOWN_PATH",
+                HashMap::from([
+                    ("path".to_owned(), path.clone()),
+                    ("message".to_owned(), message.clone()),
+                ]),
+                Some((path.clone(), format!("does not exist on message {message}"))),
+            ),
+            Error::WildcardNotAlone => ("FIELD_MASK_WILDCARD_NOT_ALONE", HashMap::new(), None),
+            Error::TypeMismatch { dst, src } => (
+                "FIELD_MASK_TYPE_MISMATCH",
+                HashMap::from([
+                    ("dst".to_owned(), dst.clone()),
+                    ("src".to_owned(), src.clone()),
+                ]),
+                None,
+            ),
+        };
+        let mut details = ErrorDetails::new();
+        details.set_error_info(reason, ERROR_DOMAIN, metadata);
+        if let Some((field, description)) = violation {
+            details.add_bad_request_violation(field, description);
+        }
+        tonic::Status::with_error_details(tonic::Code::InvalidArgument, message, details)
+    }
+}
+
+#[cfg(all(test, feature = "tonic"))]
+mod tonic_tests {
+    use super::*;
+    use tonic_types::StatusExt as _;
+
+    #[test]
+    fn unknown_path_attaches_bad_request_field_violation() {
+        let status: tonic::Status = Error::UnknownPath {
+            path: "no_such_field".to_owned(),
+            message: "test.Msg".to_owned(),
+        }
+        .into();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+        let info = status
+            .get_details_error_info()
+            .expect("an ErrorInfo is always attached (AIP-193)");
+        assert_eq!(info.reason, "FIELD_MASK_UNKNOWN_PATH");
+        assert_eq!(info.domain, ERROR_DOMAIN);
+
+        // The offending mask path is a field path, so it surfaces as a violation.
+        let bad = status
+            .get_details_bad_request()
+            .expect("a BadRequest is attached for path errors");
+        assert_eq!(bad.field_violations.len(), 1);
+        assert_eq!(bad.field_violations[0].field, "no_such_field");
+    }
+
+    #[test]
+    fn wildcard_not_alone_has_error_info_but_no_bad_request() {
+        let status: tonic::Status = Error::WildcardNotAlone.into();
+        let info = status
+            .get_details_error_info()
+            .expect("an ErrorInfo is always attached (AIP-193)");
+        assert_eq!(info.reason, "FIELD_MASK_WILDCARD_NOT_ALONE");
+        // No single field path is at fault, so there is no BadRequest.
+        assert!(status.get_details_bad_request().is_none());
     }
 }

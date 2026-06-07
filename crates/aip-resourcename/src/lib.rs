@@ -591,10 +591,86 @@ impl<'a> Scanner<'a> {
     }
 }
 
+/// The AIP-193 `ErrorInfo.domain` for every error this crate maps. Reason codes
+/// are unique within this domain. See `docs/adr/0007-aip193-error-details.md`.
+#[cfg(feature = "tonic")]
+const ERROR_DOMAIN: &str = "aip-rs";
+
 #[cfg(feature = "tonic")]
 impl From<Error> for tonic::Status {
+    /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details: an `ErrorInfo`
+    /// carrying a machine-readable `reason` + [`domain`](ERROR_DOMAIN) and the
+    /// error's dynamic values as `metadata`. A resource name is an opaque value
+    /// rather than a request field path, so no `BadRequest` is attached.
+    /// See `docs/adr/0007-aip193-error-details.md`.
     fn from(err: Error) -> Self {
-        tonic::Status::invalid_argument(err.to_string())
+        use std::collections::HashMap;
+        use tonic_types::{ErrorDetails, StatusExt};
+
+        let message = err.to_string();
+        let (reason, metadata): (&str, HashMap<String, String>) = match &err {
+            Error::Empty => ("RESOURCE_NAME_EMPTY", HashMap::new()),
+            Error::EmptySegment { index } => (
+                "RESOURCE_NAME_EMPTY_SEGMENT",
+                HashMap::from([("index".to_owned(), index.to_string())]),
+            ),
+            Error::InvalidDnsName { segment } => (
+                "RESOURCE_NAME_INVALID_SEGMENT",
+                HashMap::from([("segment".to_owned(), segment.clone())]),
+            ),
+            Error::PatternMismatch { pattern } => (
+                "RESOURCE_NAME_PATTERN_MISMATCH",
+                HashMap::from([("pattern".to_owned(), pattern.clone())]),
+            ),
+            Error::InvalidPattern(detail) => (
+                "RESOURCE_NAME_INVALID_PATTERN",
+                HashMap::from([("detail".to_owned(), detail.clone())]),
+            ),
+            Error::VariableInName { segment } => (
+                "RESOURCE_NAME_VARIABLE_IN_NAME",
+                HashMap::from([("segment".to_owned(), segment.clone())]),
+            ),
+            Error::MissingVariable { name } => (
+                "RESOURCE_NAME_MISSING_VARIABLE",
+                HashMap::from([("variable".to_owned(), name.clone())]),
+            ),
+            Error::UnknownVariable { name } => (
+                "RESOURCE_NAME_UNKNOWN_VARIABLE",
+                HashMap::from([("variable".to_owned(), name.clone())]),
+            ),
+        };
+        let mut details = ErrorDetails::new();
+        details.set_error_info(reason, ERROR_DOMAIN, metadata);
+        tonic::Status::with_error_details(tonic::Code::InvalidArgument, message, details)
+    }
+}
+
+#[cfg(all(test, feature = "tonic"))]
+mod tonic_tests {
+    use super::*;
+    use tonic_types::StatusExt as _;
+
+    #[test]
+    fn maps_to_invalid_argument_with_error_info_and_metadata() {
+        let status: tonic::Status = Error::InvalidDnsName {
+            segment: "Bad_Seg".to_owned(),
+        }
+        .into();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+        let info = status
+            .get_details_error_info()
+            .expect("an ErrorInfo is always attached (AIP-193)");
+        assert_eq!(info.reason, "RESOURCE_NAME_INVALID_SEGMENT");
+        assert_eq!(info.domain, ERROR_DOMAIN);
+        assert_eq!(
+            info.metadata.get("segment").map(String::as_str),
+            Some("Bad_Seg"),
+        );
+
+        // A resource name is an opaque value, not a request field path, so there
+        // is no BadRequest.
+        assert!(status.get_details_bad_request().is_none());
     }
 }
 

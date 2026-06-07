@@ -10,7 +10,9 @@ authors.workspace = true
 [dependencies]
 thiserror.workspace = true
 tonic = { workspace = true, optional = true }
+tonic-types = { workspace = true, optional = true }
 
 [features]
-# Adds `From<Error> for tonic::Status` (INVALID_ARGUMENT) per AIP-193.
-tonic = ["dep:tonic"]
+# Adds `From<Error> for tonic::Status` (INVALID_ARGUMENT) with AIP-193 standard
+# error details (ErrorInfo + BadRequest). See docs/adr/0007-aip193-error-details.md.
+tonic = ["dep:tonic", "dep:tonic-types"]

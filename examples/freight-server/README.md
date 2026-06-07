@@ -54,8 +54,15 @@ gc -d '{"parent":"shippers/$ID","site":{"display_name":"Alpha"}}' 127.0.0.1:5005
 gc -d '{"parent":"shippers/$ID","orderBy":"display_name"}'        127.0.0.1:50051 $SVC/ListSites
 gc -d '{"parent":"shippers/$ID","orderBy":"display_name desc"}'   127.0.0.1:50051 $SVC/ListSites
 
-# Bad syntax or an unknown ordering field is rejected with InvalidArgument:
+# Bad syntax or an unknown ordering field is rejected with InvalidArgument —
+# and the status carries AIP-193 details (#16): an ErrorInfo with a
+# machine-readable reason (ORDER_BY_UNKNOWN_FIELD / domain aip-rs) plus a
+# BadRequest naming the offending field. grpcurl prints the details block.
 gc -d '{"parent":"shippers/$ID","orderBy":"bogus_field"}'         127.0.0.1:50051 $SVC/ListSites
+
+# A missing required field is rejected the same way (here the server's own
+# presence check, reason FIELD_REQUIRED / domain freight.example.com):
+gc -d '{"shipper":{}}'                                            127.0.0.1:50051 $SVC/CreateShipper
 ```
 
 ## What it exercises (and where it's headed)
@@ -97,6 +104,21 @@ resolution — and rejects a negative `page_size` with `INVALID_ARGUMENT` (#31).
 checksum is computed reflectively, via a `DynamicMessage` built from the server's
 descriptor pool; the request's message name is derived from its type
 (`prost::Name`), not hand-typed.
+
+## Errors (AIP-193)
+
+Every handler returns rich [AIP-193](https://google.aip.dev/193) errors (#16).
+A primitive's validation error converts straight to a `tonic::Status` with the
+`?` operator: the crates' `From<Error> for tonic::Status` (behind their `tonic`
+feature, enabled here) maps it to `INVALID_ARGUMENT` with an `ErrorInfo`
+(machine-readable `reason` + `domain` `aip-rs`) and, where the error names a
+field path, a `BadRequest` field violation — see
+[`docs/adr/0007-aip193-error-details.md`](../../docs/adr/0007-aip193-error-details.md).
+So `UpdateShipper`'s bad `update_mask` path, `ListSites`'s unknown `order_by`
+field, and a stale page token all surface as structured errors with no per-call
+wiring. The server's own presence and policy checks (e.g. a required
+`display_name`, the shipper-name pattern) build the same details with
+`tonic-types` directly, under the service's own domain.
 
 ## How the proto types are built
 

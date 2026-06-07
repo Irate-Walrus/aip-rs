@@ -32,6 +32,7 @@ dependencies = [
  "test-fixtures",
  "thiserror",
  "tonic",
+ "tonic-types",
 ]
 
 [[package]]
@@ -44,6 +45,7 @@ dependencies = [
  "test-fixtures",
  "thiserror",
  "tonic",
+ "tonic-types",
 ]
 
 [[package]]
@@ -56,6 +58,7 @@ dependencies = [
  "test-fixtures",
  "thiserror",
  "tonic",
+ "tonic-types",
 ]
 
 [[package]]
@@ -71,6 +74,7 @@ dependencies = [
  "test-fixtures",
  "thiserror",
  "tonic",
+ "tonic-types",
 ]
 
 [[package]]
@@ -79,6 +83,7 @@ version = "0.1.0"
 dependencies = [
  "thiserror",
  "tonic",
+ "tonic-types",
  "uuid",
 ]
 
@@ -88,6 +93,7 @@ version = "0.1.0"
 dependencies = [
  "thiserror",
  "tonic",
+ "tonic-types",
 ]
 
 [[package]]
@@ -308,6 +314,7 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+ "tonic-types",
 ]
 
 [[package]]
@@ -1297,6 +1304,17 @@ dependencies = [
  "syn",
  "tempfile",
  "tonic-build",
+]
+
+[[package]]
+name = "tonic-types"
+version = "0.14.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73ab1b02061f83d519bba3caa167f88f261ef05720ab8ebc954ade70de3348e8"
+dependencies = [
+ "prost",
+ "prost-types",
+ "tonic",
 ]
 
 [[package]]
