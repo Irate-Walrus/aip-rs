@@ -4,8 +4,9 @@
 //! product, so it's built to be walked. Optional CEL-proto interop lives behind
 //! the `cel-proto` feature. See `docs/adr/0003-native-filter-ast.md`.
 //!
-//! Declarations are explicit (an allowlist of filterable identifiers); the parse
-//! and check core is reflection-free, with `enum_ident` the one reflective hook.
+//! Declarations are explicit (an allowlist of filterable identifiers and
+//! functions); the parse and check core is reflection-free, with `enum_ident`
+//! the one reflective hook.
 //!
 //! See <https://google.aip.dev/160>.
 
@@ -15,8 +16,39 @@ use prost_reflect::EnumDescriptor;
 
 mod checker;
 mod lexer;
+mod macros;
 mod parser;
 mod token;
+
+pub use macros::{apply_macros, Cursor};
+
+/// The standard AIP-160 function and operator names that the [parser](parse)
+/// emits and the checker resolves. Walk a [`Filter`] by matching
+/// [`Expr::Call`]'s `function` against these.
+pub mod function {
+    /// Logical conjunction (`a AND b`).
+    pub const AND: &str = "AND";
+    /// Logical disjunction (`a OR b`).
+    pub const OR: &str = "OR";
+    /// Logical negation (`NOT a` / `-a`).
+    pub const NOT: &str = "NOT";
+    /// Implicit conjunction between space-separated terms (`a b`). Deliberately
+    /// not part of [`standard_functions`](crate::DeclarationsBuilder::standard_functions):
+    /// a caller wanting implicit-AND semantics must declare it themselves.
+    pub const FUZZY: &str = "FUZZY";
+    /// Equality (`a = b`).
+    pub const EQUALS: &str = "=";
+    /// Inequality (`a != b`).
+    pub const NOT_EQUALS: &str = "!=";
+    /// Less-than (`a < b`).
+    pub const LESS_THAN: &str = "<";
+    /// Less-than-or-equal (`a <= b`).
+    pub const LESS_EQUALS: &str = "<=";
+    /// Greater-than (`a > b`).
+    pub const GREATER_THAN: &str = ">";
+    /// Greater-than-or-equal (`a >= b`).
+    pub const GREATER_EQUALS: &str = ">=";
+}
 
 /// Errors produced when parsing or type-checking a filter.
 #[derive(Debug, thiserror::Error)]
@@ -68,7 +100,7 @@ pub enum Expr {
     Ident(String),
     /// Field selection: `operand.field`.
     Select { operand: Box<Expr>, field: String },
-    /// Function or operator call (e.g. `_==_`, `:`, `AND`).
+    /// Function or operator call (e.g. `=`, `AND`, `NOT`).
     Call { function: String, args: Vec<Expr> },
 }
 
@@ -79,12 +111,29 @@ pub struct Filter {
     pub expr: Expr,
 }
 
+/// A single overload of a declared function: a result [`Type`] plus the
+/// parameter [`Type`]s an argument list must match exactly to resolve it.
+#[derive(Debug, Clone)]
+pub struct Overload {
+    pub(crate) result: Type,
+    pub(crate) params: Vec<Type>,
+}
+
+impl Overload {
+    /// An overload returning `result` for arguments matching `params`.
+    pub fn new(result: Type, params: Vec<Type>) -> Self {
+        Self { result, params }
+    }
+}
+
 /// The typed schema a [`Filter`] is checked against: an allowlist of filterable
 /// identifiers, plus declared functions and enums.
 #[derive(Debug, Clone, Default)]
 pub struct Declarations {
     /// Declared filterable identifiers, keyed by their (possibly dotted) name.
     idents: HashMap<String, Type>,
+    /// Declared functions, keyed by name; each carries its resolvable overloads.
+    functions: HashMap<String, Vec<Overload>>,
 }
 
 impl Declarations {
@@ -97,18 +146,59 @@ impl Declarations {
     pub(crate) fn lookup_ident(&self, name: &str) -> Option<&Type> {
         self.idents.get(name)
     }
+
+    /// Look up a declared function's overloads by name.
+    pub(crate) fn lookup_function(&self, name: &str) -> Option<&[Overload]> {
+        self.functions.get(name).map(Vec::as_slice)
+    }
 }
 
 /// Builder for [`Declarations`] (replaces `aip-go`'s functional options).
 #[derive(Debug, Default)]
 pub struct DeclarationsBuilder {
     idents: HashMap<String, Type>,
+    functions: HashMap<String, Vec<Overload>>,
 }
 
 impl DeclarationsBuilder {
-    /// Declare the standard AIP-160 function and operator set.
+    /// Declare the standard AIP-160 comparison and logical operators with their
+    /// standard overloads: `=` / `!=` (bool, int, double, double/int, string),
+    /// the ordering operators `<` / `<=` / `>` / `>=` (int, double, double/int,
+    /// string), and `AND` / `OR` / `NOT` over bools.
+    ///
+    /// The `:` (has) operator and the timestamp/duration and enum overloads land
+    /// with their own slices.
     pub fn standard_functions(self) -> Self {
-        todo!("standard function declarations land with the full-operator slice")
+        use Type::{Bool, Double, Int, String};
+        // `=` / `!=` additionally accept two bools.
+        let equality = || {
+            vec![
+                Overload::new(Bool, vec![Bool, Bool]),
+                Overload::new(Bool, vec![Int, Int]),
+                Overload::new(Bool, vec![Double, Double]),
+                Overload::new(Bool, vec![Double, Int]),
+                Overload::new(Bool, vec![String, String]),
+            ]
+        };
+        // The ordering operators compare like-typed operands (and a double to an
+        // int literal), but not bools.
+        let ordering = || {
+            vec![
+                Overload::new(Bool, vec![Int, Int]),
+                Overload::new(Bool, vec![Double, Double]),
+                Overload::new(Bool, vec![Double, Int]),
+                Overload::new(Bool, vec![String, String]),
+            ]
+        };
+        self.function(function::EQUALS, equality())
+            .function(function::NOT_EQUALS, equality())
+            .function(function::LESS_THAN, ordering())
+            .function(function::LESS_EQUALS, ordering())
+            .function(function::GREATER_THAN, ordering())
+            .function(function::GREATER_EQUALS, ordering())
+            .function(function::AND, vec![Overload::new(Bool, vec![Bool, Bool])])
+            .function(function::OR, vec![Overload::new(Bool, vec![Bool, Bool])])
+            .function(function::NOT, vec![Overload::new(Bool, vec![Bool])])
     }
 
     /// Declare a filterable identifier with a type. A repeated name replaces the
@@ -123,15 +213,21 @@ impl DeclarationsBuilder {
         todo!("enum identifiers land with the enum/well-known-type slice")
     }
 
-    /// Declare a custom function (overloads added via the returned builder).
-    pub fn function(self, _name: &str) -> Self {
-        todo!("custom functions land with the full-operator slice")
+    /// Declare a function with the given resolvable `overloads`. Declaring the
+    /// same name again appends overloads to the existing declaration.
+    pub fn function(mut self, name: &str, overloads: Vec<Overload>) -> Self {
+        self.functions
+            .entry(name.to_string())
+            .or_default()
+            .extend(overloads);
+        self
     }
 
     /// Finalize the declarations.
     pub fn build(self) -> Result<Declarations, Error> {
         Ok(Declarations {
             idents: self.idents,
+            functions: self.functions,
         })
     }
 }
