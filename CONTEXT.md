@@ -135,6 +135,42 @@ A name **Declared** as filterable, paired with a **Type**.
 The `:` operator in a **Filter**, testing presence/membership (e.g. a key in a
 map, a value in a list).
 
+### Reflection
+
+**Descriptor**:
+The reified protobuf message type — a `prost_reflect::MessageDescriptor`. Both a
+**Typed message** (which carries its own) and a **Dynamic message** are described
+by one; resolving a **Field mask** or **Order by** path means walking a descriptor.
+_Avoid_: schema, type info, reflection data.
+
+**Reflective primitive**:
+An AIP operation that needs a message's **Descriptor** to run — applying an
+**Update mask**, computing a **Page token**'s request checksum. The pure-syntax
+operations (**Resource name**, **Resource ID**) never reflect.
+_Avoid_: dynamic operation, introspective primitive.
+
+**Typed message**:
+A concrete generated prost message that carries its own **Descriptor** because it
+implements `prost_reflect::ReflectMessage`. Every **Reflective primitive**'s
+**Typed facade** is expressed over typed messages, so a caller never builds or
+threads a descriptor pool, nor touches a **Dynamic message**.
+_Avoid_: concrete message (only when contrasting), native message.
+
+**Dynamic message**:
+A `prost_reflect::DynamicMessage` — a message value whose type is known only at
+runtime through a **Descriptor**. The surface beneath each **Typed facade**, and
+the surface the reflective crates test through (JSON → a dynamic message, via
+`test-fixtures`).
+_Avoid_: reflected message, generic message, untyped message.
+
+**Typed facade / Dynamic core**:
+The two surfaces of a **Reflective primitive**. The *typed facade* is the
+headline interface over **Typed messages**; the *dynamic core* is the public
+low-level interface over **Dynamic messages** that the facade transcodes onto. The
+core is also the test surface and the escape hatch for a caller who holds only a
+**Dynamic message** (JSON ingestion, a generic gateway).
+_Avoid_: wrapper/inner, high-level/low-level (say facade/core).
+
 ## Relationships
 
 - An **Order by** is an ordered list of **Ordering fields**.
@@ -150,6 +186,11 @@ map, a value in a list).
 - **Collection IDs** and **Resource IDs** alternate within a well-formed
   **Resource name**.
 - A **Full resource name** is a **Service name** plus a **Resource name**.
+- A **Reflective primitive** presents a **Typed facade** layered on a **Dynamic
+  core**; the facade transcodes a **Typed message** to a **Dynamic message** and
+  back through wire bytes.
+- A **Typed message** carries its own **Descriptor**; a **Dynamic message** is
+  paired with one.
 
 ## Example dialogue
 
