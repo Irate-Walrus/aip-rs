@@ -320,10 +320,7 @@ pub trait FilterRequest {
 }
 
 #[cfg(feature = "cel-proto")]
-pub mod cel_proto {
-    //! Conversion between the native AST and `google.api.expr.v1alpha1` CEL
-    //! protos. The generated CEL types and `From`/`Into` impls live here.
-}
+pub mod cel_proto;
 
 /// The AIP-193 `ErrorInfo.domain` for every error this crate maps. Reason codes
 /// are unique within this domain. See `docs/adr/0007-aip193-error-details.md`.

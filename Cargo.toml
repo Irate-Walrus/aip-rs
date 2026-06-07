@@ -34,6 +34,10 @@ test-fixtures    = { path = "crates/test-fixtures" }
 prost         = "0.14"
 prost-types   = "0.14"
 prost-reflect = "0.16"
+# Build-time prost codegen for vendored protos, fed a `protox`-built descriptor
+# set via `compile_fds` (so still no `protoc`). Used by `aip-filtering`'s
+# optional `cel-proto` feature to generate the CEL `v1alpha1` types.
+prost-build   = "0.14"
 
 # Shared building blocks.
 thiserror  = "2"
