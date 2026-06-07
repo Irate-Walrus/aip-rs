@@ -35,15 +35,21 @@ tonic-types = { workspace = true }
 tonic-prost = { workspace = true }
 prost       = { workspace = true }
 prost-types = { workspace = true }
-# Reflection (ADR-0001): a DescriptorPool + DynamicMessage transcode bridge so
-# the reflective `aip::pagination::request_checksum` and `aip::fieldmask` can
-# read a concrete request/message.
-prost-reflect = { workspace = true }
+# Reflection (ADR-0001 / ADR-0009): the `derive` feature emits the
+# `ReflectMessage` impls that make the generated freight types Typed messages —
+# each carrying its own descriptor — and supplies the `DescriptorPool` +
+# `DynamicMessage` transcode bridge the reflective `aip::pagination` /
+# `aip::fieldmask` primitives still read through in this slice.
+prost-reflect = { workspace = true, features = ["derive"] }
 tokio       = { workspace = true }
 
 [build-dependencies]
 # Pure-Rust .proto compiler (no `protoc`) + tonic codegen fed its descriptor set.
-# `prost` re-encodes that set so it can be embedded for the runtime pool.
+# `prost` re-encodes that set so it can be embedded for the runtime pool;
+# `prost-reflect` reads the same set back to enumerate the messages that get the
+# `ReflectMessage` derive (ADR-0009). See build.rs for why the derive attributes
+# are added directly rather than through `prost-reflect-build`.
 protox            = { workspace = true }
 prost             = { workspace = true }
+prost-reflect     = { workspace = true }
 tonic-prost-build = { workspace = true }
