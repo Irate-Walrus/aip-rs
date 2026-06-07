@@ -91,8 +91,12 @@ request field before they drop `Unimplemented`.
 request-checksum guard (#7) that rejects a token when a non-pagination field
 changes mid-pagination. `ListShippersRequest` carries only the pagination fields,
 so its checksum is constant — `ListSites` exercises the guard against a varying
-`parent`/`order_by`. The checksum is computed reflectively, via a
-`DynamicMessage` built from the server's descriptor pool.
+`parent`/`order_by`. Both list handlers open with one shared `parse_page(&req)?`
+helper that folds the three-step preamble — checksum, token parse, page-size
+resolution — and rejects a negative `page_size` with `INVALID_ARGUMENT` (#31). The
+checksum is computed reflectively, via a `DynamicMessage` built from the server's
+descriptor pool; the request's message name is derived from its type
+(`prost::Name`), not hand-typed.
 
 ## How the proto types are built
 
