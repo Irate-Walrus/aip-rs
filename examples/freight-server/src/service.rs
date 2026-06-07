@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use aip::ordering::{OrderBy, OrderByRequest};
 use aip::pagination::{PageRequest, PageToken};
+use prost_reflect::ReflectMessage;
 use prost_types::Timestamp;
 use tonic::{Request, Response, Status};
 
@@ -452,27 +453,21 @@ struct Page {
 /// request's non-pagination fields, parse and verify the offset page token
 /// against that checksum, and resolve the page size. Both list handlers open
 /// their pagination logic with `parse_page(&req)?`.
-fn parse_page<M: PageRequest + prost::Name>(request: &M) -> Result<Page, Status> {
-    let checksum = request_checksum_of(request)?;
+fn parse_page<M: PageRequest + ReflectMessage>(request: &M) -> Result<Page, Status> {
+    // Compute the request checksum directly off the concrete request. Since #46
+    // the generated types are Typed messages (`ReflectMessage`), so the descriptor
+    // travels with the value and `request_checksum` takes it without the
+    // `DynamicMessage` bridge or a hand-derived message name (ADR-0009). A
+    // checksum failure would mean the type and its descriptor disagree — a build
+    // bug, not bad input — so it surfaces as `internal`.
+    let checksum = aip::pagination::request_checksum(request)
+        .map_err(|e| Status::internal(format!("compute request checksum: {e}")))?;
     // A malformed token, version mismatch, or checksum mismatch converts via the
     // crate's AIP-193 `From<Error> for Status` (#16) to an `INVALID_ARGUMENT`
     // carrying an `ErrorInfo` (e.g. `PAGE_TOKEN_CHECKSUM_MISMATCH`).
     let token = PageToken::parse(request, checksum)?;
     let size = effective_page_size(request.page_size())?;
     Ok(Page { token, size })
-}
-
-/// Computes [`aip::pagination::request_checksum`] for a concrete request.
-///
-/// The library's reflective surface is `DynamicMessage`-based (ADR-0001), but the
-/// generated request types carry no reflection. We transcode the request to a
-/// `DynamicMessage` via the [`reflect`] bridge, then checksum it. The request's
-/// fully-qualified message name is derived from its type via [`prost::Name`], so
-/// it can't drift from the actual message.
-fn request_checksum_of<M: prost::Name>(request: &M) -> Result<u32, Status> {
-    let dynamic = reflect::to_dynamic(&reflect::descriptor(&M::full_name()), request);
-    aip::pagination::request_checksum(&dynamic)
-        .map_err(|e| Status::internal(format!("compute request checksum: {e}")))
 }
 
 /// Resolves the effective page size from a request's `page_size` per AIP-158: a

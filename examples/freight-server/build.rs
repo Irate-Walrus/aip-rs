@@ -58,11 +58,7 @@ fn main() {
     )
     .expect("write the freight descriptor set for runtime reflection");
 
-    // Emit `prost::Name` impls for the generated messages so a handler can derive
-    // a request's fully-qualified name from its type (`M::full_name()`) rather than
-    // hand-typing it — see `request_checksum_of` in `service.rs`.
     let mut config = tonic_prost_build::Config::new();
-    config.enable_type_names();
 
     // ADR-0009 Typed messages: derive `ReflectMessage` for every generated message
     // so it carries its own descriptor, resolved from the embedded
