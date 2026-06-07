@@ -166,10 +166,64 @@ pub fn request_checksum(request: &DynamicMessage) -> Result<u32, Error> {
     Ok(crc32fast::hash(&cloned.encode_to_vec()))
 }
 
+/// The AIP-193 `ErrorInfo.domain` for every error this crate maps. Reason codes
+/// are unique within this domain. See `docs/adr/0007-aip193-error-details.md`.
+#[cfg(feature = "tonic")]
+const ERROR_DOMAIN: &str = "aip-rs";
+
 #[cfg(feature = "tonic")]
 impl From<Error> for tonic::Status {
+    /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details: an `ErrorInfo`
+    /// carrying a machine-readable `reason` + [`domain`](ERROR_DOMAIN) and the
+    /// error's dynamic values as `metadata`. A page token is an opaque value
+    /// rather than a request field path, so no `BadRequest` is attached.
+    /// See `docs/adr/0007-aip193-error-details.md`.
     fn from(err: Error) -> Self {
-        tonic::Status::invalid_argument(err.to_string())
+        use std::collections::HashMap;
+        use tonic_types::{ErrorDetails, StatusExt};
+
+        let message = err.to_string();
+        let (reason, metadata): (&str, HashMap<String, String>) = match &err {
+            Error::Malformed => ("PAGE_TOKEN_MALFORMED", HashMap::new()),
+            Error::UnsupportedVersion { found, expected } => (
+                "PAGE_TOKEN_UNSUPPORTED_VERSION",
+                HashMap::from([
+                    ("found".to_owned(), found.to_string()),
+                    ("expected".to_owned(), expected.to_string()),
+                ]),
+            ),
+            Error::ChecksumMismatch => ("PAGE_TOKEN_CHECKSUM_MISMATCH", HashMap::new()),
+            Error::Decode(_) => ("PAGE_TOKEN_DECODE", HashMap::new()),
+        };
+        let mut details = ErrorDetails::new();
+        details.set_error_info(reason, ERROR_DOMAIN, metadata);
+        tonic::Status::with_error_details(tonic::Code::InvalidArgument, message, details)
+    }
+}
+
+#[cfg(all(test, feature = "tonic"))]
+mod tonic_tests {
+    use super::*;
+    use tonic_types::StatusExt as _;
+
+    #[test]
+    fn unsupported_version_maps_to_invalid_argument_with_metadata() {
+        let status: tonic::Status = Error::UnsupportedVersion {
+            found: 9,
+            expected: PAGE_TOKEN_VERSION,
+        }
+        .into();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+        let info = status
+            .get_details_error_info()
+            .expect("an ErrorInfo is always attached (AIP-193)");
+        assert_eq!(info.reason, "PAGE_TOKEN_UNSUPPORTED_VERSION");
+        assert_eq!(info.domain, ERROR_DOMAIN);
+        assert_eq!(info.metadata.get("found").map(String::as_str), Some("9"));
+
+        // A page token is an opaque value, not a request field path.
+        assert!(status.get_details_bad_request().is_none());
     }
 }
 

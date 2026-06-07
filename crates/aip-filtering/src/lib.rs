@@ -259,9 +259,61 @@ pub mod cel_proto {
     //! protos. The generated CEL types and `From`/`Into` impls live here.
 }
 
+/// The AIP-193 `ErrorInfo.domain` for every error this crate maps. Reason codes
+/// are unique within this domain. See `docs/adr/0007-aip193-error-details.md`.
+#[cfg(feature = "tonic")]
+const ERROR_DOMAIN: &str = "aip-rs";
+
 #[cfg(feature = "tonic")]
 impl From<Error> for tonic::Status {
+    /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details: an `ErrorInfo`
+    /// carrying a machine-readable `reason` + [`domain`](ERROR_DOMAIN) and the
+    /// error's dynamic values as `metadata`. A filter error points inside the
+    /// filter expression rather than at a request field path, so no `BadRequest`
+    /// is attached. See `docs/adr/0007-aip193-error-details.md`.
     fn from(err: Error) -> Self {
-        tonic::Status::invalid_argument(err.to_string())
+        use std::collections::HashMap;
+        use tonic_types::{ErrorDetails, StatusExt};
+
+        let message = err.to_string();
+        let (reason, metadata): (&str, HashMap<String, String>) = match &err {
+            Error::Syntax { position, .. } => (
+                "FILTER_SYNTAX",
+                HashMap::from([("position".to_owned(), position.to_string())]),
+            ),
+            Error::Type(_) => ("FILTER_TYPE", HashMap::new()),
+            Error::UndeclaredIdent(ident) => (
+                "FILTER_UNDECLARED_IDENTIFIER",
+                HashMap::from([("identifier".to_owned(), ident.clone())]),
+            ),
+        };
+        let mut details = ErrorDetails::new();
+        details.set_error_info(reason, ERROR_DOMAIN, metadata);
+        tonic::Status::with_error_details(tonic::Code::InvalidArgument, message, details)
+    }
+}
+
+#[cfg(all(test, feature = "tonic"))]
+mod tonic_tests {
+    use super::*;
+    use tonic_types::StatusExt as _;
+
+    #[test]
+    fn undeclared_identifier_maps_to_invalid_argument_with_metadata() {
+        let status: tonic::Status = Error::UndeclaredIdent("ghost".to_owned()).into();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+        let info = status
+            .get_details_error_info()
+            .expect("an ErrorInfo is always attached (AIP-193)");
+        assert_eq!(info.reason, "FILTER_UNDECLARED_IDENTIFIER");
+        assert_eq!(info.domain, ERROR_DOMAIN);
+        assert_eq!(
+            info.metadata.get("identifier").map(String::as_str),
+            Some("ghost"),
+        );
+
+        // A filter error points inside the expression, not at a request field.
+        assert!(status.get_details_bad_request().is_none());
     }
 }

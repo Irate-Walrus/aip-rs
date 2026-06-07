@@ -12,9 +12,12 @@ thiserror.workspace = true
 prost-types.workspace = true
 prost-reflect.workspace = true
 tonic = { workspace = true, optional = true }
+tonic-types = { workspace = true, optional = true }
 
 [features]
-tonic = ["dep:tonic"]
+# Adds `From<Error> for tonic::Status` (INVALID_ARGUMENT) with AIP-193 standard
+# error details (ErrorInfo + BadRequest). See docs/adr/0007-aip193-error-details.md.
+tonic = ["dep:tonic", "dep:tonic-types"]
 
 [dev-dependencies]
 # Shared DescriptorPool + JSON -> DynamicMessage fixtures for reflective tests.

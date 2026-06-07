@@ -163,9 +163,77 @@ pub fn parse_order_by(request: &impl OrderByRequest) -> Result<OrderBy, Error> {
     request.order_by().parse()
 }
 
+/// The AIP-193 `ErrorInfo.domain` for every error this crate maps. Reason codes
+/// are unique within this domain. See `docs/adr/0007-aip193-error-details.md`.
+#[cfg(feature = "tonic")]
+const ERROR_DOMAIN: &str = "aip-rs";
+
 #[cfg(feature = "tonic")]
 impl From<Error> for tonic::Status {
+    /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details: an `ErrorInfo`
+    /// (machine-readable `reason` + [`domain`](ERROR_DOMAIN), with the error's
+    /// dynamic values as `metadata`) and, when the error names an ordering field,
+    /// a `BadRequest` field violation keyed on that path.
+    /// See `docs/adr/0007-aip193-error-details.md`.
     fn from(err: Error) -> Self {
-        tonic::Status::invalid_argument(err.to_string())
+        use std::collections::HashMap;
+        use tonic_types::{ErrorDetails, StatusExt};
+
+        let message = err.to_string();
+        // An unknown ordering field is a request field path, so it also surfaces
+        // as a `BadRequest` violation; a syntax error has no single field locus.
+        let (reason, metadata, violation): (
+            &str,
+            HashMap<String, String>,
+            Option<(String, String)>,
+        ) = match &err {
+            Error::Syntax(_) => ("ORDER_BY_SYNTAX", HashMap::new(), None),
+            Error::UnknownField(field) => (
+                "ORDER_BY_UNKNOWN_FIELD",
+                HashMap::from([("field".to_owned(), field.clone())]),
+                Some((field.clone(), "unknown order_by field".to_owned())),
+            ),
+        };
+        let mut details = ErrorDetails::new();
+        details.set_error_info(reason, ERROR_DOMAIN, metadata);
+        if let Some((field, description)) = violation {
+            details.add_bad_request_violation(field, description);
+        }
+        tonic::Status::with_error_details(tonic::Code::InvalidArgument, message, details)
+    }
+}
+
+#[cfg(all(test, feature = "tonic"))]
+mod tonic_tests {
+    use super::*;
+    use tonic_types::StatusExt as _;
+
+    #[test]
+    fn unknown_field_attaches_bad_request_field_violation() {
+        let status: tonic::Status = Error::UnknownField("ghost_field".to_owned()).into();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+        let info = status
+            .get_details_error_info()
+            .expect("an ErrorInfo is always attached (AIP-193)");
+        assert_eq!(info.reason, "ORDER_BY_UNKNOWN_FIELD");
+        assert_eq!(info.domain, ERROR_DOMAIN);
+
+        let bad = status
+            .get_details_bad_request()
+            .expect("a BadRequest is attached for unknown ordering fields");
+        assert_eq!(bad.field_violations.len(), 1);
+        assert_eq!(bad.field_violations[0].field, "ghost_field");
+    }
+
+    #[test]
+    fn syntax_error_has_error_info_but_no_bad_request() {
+        let status: tonic::Status = Error::Syntax("trailing comma".to_owned()).into();
+        let info = status
+            .get_details_error_info()
+            .expect("an ErrorInfo is always attached (AIP-193)");
+        assert_eq!(info.reason, "ORDER_BY_SYNTAX");
+        // A syntax error has no single field locus, so there is no BadRequest.
+        assert!(status.get_details_bad_request().is_none());
     }
 }
