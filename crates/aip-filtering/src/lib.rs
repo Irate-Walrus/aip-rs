@@ -149,8 +149,16 @@ impl Declarations {
         DeclarationsBuilder::default()
     }
 
-    /// Look up a declared identifier's type by name.
-    pub(crate) fn lookup_ident(&self, name: &str) -> Option<&Type> {
+    /// The declared [`Type`] of a filterable identifier, if it was declared.
+    ///
+    /// [`check`] discards types (it yields only the untyped [`Expr`]), so a
+    /// downstream consumer that walks a checked [`Filter`] — e.g. a SQL
+    /// transpiler mapping identifiers to columns — recovers an operand's type by
+    /// looking it up here rather than re-running the checker. An enum *value*
+    /// name (declared by [`enum_ident`](DeclarationsBuilder::enum_ident)) reports
+    /// the same [`Enum`](Type::Enum) type as its field, which is how a consumer
+    /// tells a bare enum value apart from a missing scalar column.
+    pub fn ident_type(&self, name: &str) -> Option<&Type> {
         self.idents.get(name)
     }
 

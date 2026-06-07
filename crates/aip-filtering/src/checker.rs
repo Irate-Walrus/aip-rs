@@ -26,7 +26,7 @@ fn type_of(expr: &Expr, declarations: &Declarations) -> Result<Type, Error> {
         Expr::Select { operand, field } => {
             // A fully-qualified member chain may be declared as one identifier.
             if let Some(name) = qualified_name(expr) {
-                if let Some(ty) = declarations.lookup_ident(&name) {
+                if let Some(ty) = declarations.ident_type(&name) {
                     return Ok(ty.clone());
                 }
             }
@@ -78,7 +78,7 @@ fn check_call(function: &str, args: &[Expr], declarations: &Declarations) -> Res
 /// Look an identifier up in the allowlist.
 fn lookup(name: &str, declarations: &Declarations) -> Result<Type, Error> {
     declarations
-        .lookup_ident(name)
+        .ident_type(name)
         .cloned()
         .ok_or_else(|| Error::UndeclaredIdent(name.to_string()))
 }

@@ -1,6 +1,6 @@
 //! The [`Dialect`] trait, its single-pass renderer, and the SQLite dialect.
 
-use crate::predicate::{Predicate, Value};
+use crate::predicate::{Column, Predicate, Value};
 
 /// Spells a [`Predicate`]'s leaves for one SQL engine and renders a whole
 /// `Predicate` to `(sql, Vec<Value>)`.
@@ -34,11 +34,14 @@ fn write_node<D: Dialect + ?Sized>(
     binds: &mut Vec<Value>,
 ) {
     match node {
-        Predicate::Eq { column, value } => {
-            sql.push_str(column);
-            sql.push_str(" = ");
-            // Number the placeholder from how many binds precede it, then record
-            // the value — one pass, so the count is the position.
+        Predicate::Compare { column, op, value } => {
+            // Render the left side first (a map member emits its own bound key),
+            // then ` <op> `, then the right-hand value placeholder. One pass, so
+            // each placeholder number is the count of binds preceding it.
+            write_column(dialect, column, sql, binds);
+            sql.push(' ');
+            sql.push_str(op.sql());
+            sql.push(' ');
             sql.push_str(&dialect.placeholder(binds.len() + 1));
             binds.push(value.clone());
         }
@@ -65,6 +68,27 @@ fn write_node<D: Dialect + ?Sized>(
             sql,
             binds,
         ),
+    }
+}
+
+/// Append the left side of a comparison: a plain column verbatim, or a map
+/// member as `column ->> ?` with its key bound. The key bind is emitted here, so
+/// it precedes the comparison's right-hand value in the single left-to-right
+/// pass and its placeholder number lands one before the value's.
+fn write_column<D: Dialect + ?Sized>(
+    dialect: &D,
+    column: &Column,
+    sql: &mut String,
+    binds: &mut Vec<Value>,
+) {
+    match column {
+        Column::Plain(name) => sql.push_str(name),
+        Column::MapMember { column, key } => {
+            sql.push_str(column);
+            sql.push_str(" ->> ");
+            sql.push_str(&dialect.placeholder(binds.len() + 1));
+            binds.push(Value::Text(key.clone()));
+        }
     }
 }
 

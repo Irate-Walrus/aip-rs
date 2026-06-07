@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use aip_sql::Dialect as _;
 use prost::Message as _;
 
-use crate::proto::einride::example::freight::v1::{Shipper, Site};
+use crate::proto::einride::example::freight::v1::{site::State, Shipper, Site};
 
 /// Process-lifetime store. Shippers are a `BTreeMap` keyed by resource name,
 /// which keeps listings in a stable order (the deterministic tie-break behind a
@@ -64,14 +64,31 @@ impl Storage {
     }
 
     /// Insert or overwrite a site, keyed by its `name`. The full site is stored as
-    /// wire bytes alongside its filterable columns.
+    /// wire bytes alongside the columns an AIP-160 filter can address: the scalar
+    /// `display_name`, the timestamp `create_time` as sortable RFC3339 text, the
+    /// nested `lat_lng.latitude` flattened to a numeric column, and the enum
+    /// `state` as its value name (matching the transpiler's enum rendering, #40).
     pub fn put_site(&self, site: Site) {
+        let create_time = site.create_time.as_ref().map(rfc3339);
+        let latitude = site.lat_lng.as_ref().map(|ll| ll.latitude);
+        let state = State::try_from(site.state)
+            .unwrap_or(State::Unspecified)
+            .as_str_name();
         self.sites
             .lock()
             .unwrap()
             .execute(
-                "INSERT OR REPLACE INTO sites (name, display_name, data) VALUES (?1, ?2, ?3)",
-                rusqlite::params![site.name, site.display_name, site.encode_to_vec()],
+                "INSERT OR REPLACE INTO sites \
+                 (name, display_name, create_time, latitude, state, data) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    site.name,
+                    site.display_name,
+                    create_time,
+                    latitude,
+                    state,
+                    site.encode_to_vec(),
+                ],
             )
             .expect("insert site");
     }
@@ -110,7 +127,8 @@ impl Storage {
 }
 
 /// Open an in-memory SQLite database with the `sites` table: the resource name as
-/// primary key, the filterable `display_name` column, and the full site as wire
+/// primary key, the filterable `display_name` / `create_time` / `latitude` /
+/// `state` columns the AIP-160 filter addresses (#40), and the full site as wire
 /// bytes for lossless round-trips.
 fn new_sites_db() -> rusqlite::Connection {
     let conn = rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
@@ -118,11 +136,39 @@ fn new_sites_db() -> rusqlite::Connection {
         "CREATE TABLE sites (
             name         TEXT PRIMARY KEY,
             display_name TEXT NOT NULL,
+            create_time  TEXT,
+            latitude     REAL,
+            state        TEXT NOT NULL,
             data         BLOB NOT NULL
         );",
     )
     .expect("create sites table");
     conn
+}
+
+/// Format a protobuf `Timestamp` as a canonical RFC 3339 UTC string at second
+/// precision, so the stored `create_time` column sorts and compares
+/// lexicographically the same way the RFC3339 literal a filter binds does (the
+/// transpiler binds timestamps as text, #40). Only the non-negative range the
+/// demo produces (`now()`) is handled; the civil date comes from Howard
+/// Hinnant's `civil_from_days` algorithm.
+fn rfc3339(ts: &prost_types::Timestamp) -> String {
+    let secs = ts.seconds.max(0);
+    let days = secs.div_euclid(86_400);
+    let tod = secs.rem_euclid(86_400);
+    let (hour, minute, second) = (tod / 3600, (tod % 3600) / 60, tod % 60);
+
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let day = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let month = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let year = yoe + era * 400 + i64::from(month <= 2);
+
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
 /// Map an aip-sql bind [`Value`](aip_sql::Value) onto rusqlite's owned value type
