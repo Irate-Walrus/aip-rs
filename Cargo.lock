@@ -40,8 +40,10 @@ name = "aip-filtering"
 version = "0.1.0"
 dependencies = [
  "prost",
+ "prost-build",
  "prost-reflect",
  "prost-types",
+ "protox",
  "test-fixtures",
  "thiserror",
  "tonic",
