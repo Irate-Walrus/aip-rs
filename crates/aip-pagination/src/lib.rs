@@ -10,7 +10,7 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use prost::Message as _;
-use prost_reflect::{DynamicMessage, ReflectMessage as _};
+use prost_reflect::{DynamicMessage, ReflectMessage};
 use serde::{Deserialize, Serialize};
 
 /// Version byte prepended to every encoded page token. Bump it whenever the
@@ -147,17 +147,32 @@ pub fn decode_page_token<T: serde::de::DeserializeOwned>(token: &str) -> Result<
 }
 
 /// Computes the CRC32-IEEE checksum of a request, excluding the pagination
-/// fields (`page_token`, `page_size`, `skip`). Reflective.
+/// fields (`page_token`, `page_size`, `skip`).
 ///
-/// Ported from `aip-go`'s `CalculateRequestChecksum`: the request is cloned, the
-/// pagination fields that legitimately change between pages are cleared, and the
-/// prost-encoded remainder is checksummed. Any *other* field changing flips the
-/// checksum, which is how [`PageToken::parse`] detects a request that mutated
-/// mid-pagination. A request that does not declare a given pagination field
-/// (e.g. one without `skip`) simply has nothing to clear for it.
-pub fn request_checksum(request: &DynamicMessage) -> Result<u32, Error> {
-    let mut cloned = request.clone();
-    let descriptor = cloned.descriptor();
+/// The headline reflective surface (ADR-0009): generic over [`ReflectMessage`],
+/// so the request's [`MessageDescriptor`](prost_reflect::MessageDescriptor)
+/// travels with the value and no descriptor pool is threaded through the call.
+/// Unlike the field-mask primitive this is a single generic function, not a
+/// facade/core pair — it only *reads* the request, so it needs no `Default` and
+/// no decode-back. Because `prost_reflect::DynamicMessage` itself implements
+/// [`ReflectMessage`], a `&DynamicMessage` caller (the crate's tests, a
+/// JSON/gateway path) keeps compiling unchanged.
+///
+/// Ported from `aip-go`'s `CalculateRequestChecksum`: the request is transcoded
+/// to a [`DynamicMessage`] (the pagination fields are cleared by name, which only
+/// a dynamic message can do), those fields that legitimately change between pages
+/// are cleared, and the prost-encoded remainder is checksummed. Any *other* field
+/// changing flips the checksum, which is how [`PageToken::parse`] detects a
+/// request that mutated mid-pagination. A request that does not declare a given
+/// pagination field (e.g. one without `skip`) simply has nothing to clear for it.
+pub fn request_checksum<M: ReflectMessage>(request: &M) -> Result<u32, Error> {
+    let descriptor = request.descriptor();
+    // Transcode through wire bytes into a dynamic message so the pagination
+    // fields can be cleared by name. The round-trip can only fail if a message
+    // and its descriptor disagree — a build/config bug, not bad input — so it is
+    // treated as an invariant rather than an error variant (ADR-0009).
+    let mut cloned = DynamicMessage::decode(descriptor.clone(), request.encode_to_vec().as_slice())
+        .expect("a message round-trips through its own descriptor");
     for name in ["page_token", "page_size", "skip"] {
         if let Some(field) = descriptor.get_field_by_name(name) {
             cloned.clear_field(&field);

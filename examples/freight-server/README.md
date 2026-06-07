@@ -101,9 +101,10 @@ so its checksum is constant — `ListSites` exercises the guard against a varyin
 `parent`/`order_by`. Both list handlers open with one shared `parse_page(&req)?`
 helper that folds the three-step preamble — checksum, token parse, page-size
 resolution — and rejects a negative `page_size` with `INVALID_ARGUMENT` (#31). The
-checksum is computed reflectively, via a `DynamicMessage` built from the server's
-descriptor pool; the request's message name is derived from its type
-(`prost::Name`), not hand-typed.
+checksum is computed directly off the concrete request: the generated types are
+Typed messages (#46), so `request_checksum` takes the request by its
+`ReflectMessage` descriptor (#47) — no `DynamicMessage` bridge, no hand-derived
+message name.
 
 ## Errors (AIP-193)
 
@@ -127,19 +128,19 @@ a pure-Rust protobuf compiler, so **no `protoc` is required** (matching
 [ADR-0001](../../docs/adr/0001-prost-reflect-and-workspace.md)) — and feeds the
 resulting `FileDescriptorSet` to `tonic-prost-build` for the message + service
 codegen. The same set is embedded raw so the server can build a
-`prost_reflect::DescriptorPool` at runtime; that pool transcodes a generated
-message to a `DynamicMessage` for the reflective primitives — `ListShippers`'
-`request_checksum` (#7) and `UpdateShipper`'s `fieldmask` apply
+`prost_reflect::DescriptorPool` at runtime; that pool backs the `ReflectMessage`
+derives below (each Typed message resolves its own descriptor from it) and the
+`DynamicMessage` bridge that `UpdateShipper`'s `fieldmask` apply still uses
 ([`src/reflect.rs`](src/reflect.rs)).
 
-The generated freight messages are also **Typed messages** (#46): `build.rs`
+The generated freight messages are **Typed messages** (#46): `build.rs`
 adds `#[derive(prost_reflect::ReflectMessage)]` to each, enumerated from the same
 `protox` set, so a message carries its own `MessageDescriptor`
 (`Shipper::default().descriptor()`) without a by-name pool lookup — per
-[ADR-0009](../../docs/adr/0009-reflective-typed-message-api.md). This is the
-enabling step for the reflective primitives' typed facades; the runtime still
-routes through the `DynamicMessage` bridge above until that conversion lands
-(#47, #48).
+[ADR-0009](../../docs/adr/0009-reflective-typed-message-api.md). The list
+handlers' `request_checksum` now takes the request straight off that descriptor
+(#47); `UpdateShipper`'s `fieldmask` apply still routes through the
+`DynamicMessage` bridge until its typed facade lands (#48).
 
 The freight protos and their vendored googleapis imports live under
 [`proto/`](proto), so the example builds standalone. They are a copy of the same
