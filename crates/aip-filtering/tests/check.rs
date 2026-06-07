@@ -2,11 +2,11 @@
 //! [`Declarations`] allowlist — identifiers and dotted members resolve, calls
 //! resolve a declared overload, and the whole filter must be a `bool`.
 //!
-//! Ported from `aip-go`'s `checker_test.go`, excluding the `:` (has) cases and
-//! the enum and timestamp/duration overload cases (which land with their own
-//! slices).
+//! Ported from `aip-go`'s `checker_test.go`, excluding the enum and the
+//! timestamp/duration *comparison* overload cases (which land with their own
+//! slices); the `:` (has) operator, including its timestamp overload, is here.
 
-use aip_filtering::Type::{self, Bool, Double, Int, String};
+use aip_filtering::Type::{self, Bool, Double, Int, String, Timestamp};
 use aip_filtering::{check, Declarations, DeclarationsBuilder, Error, Overload};
 
 /// Build declarations on top of the standard function set via `build`.
@@ -18,6 +18,10 @@ fn decls(build: impl FnOnce(DeclarationsBuilder) -> DeclarationsBuilder) -> Decl
 
 fn map(key: Type, value: Type) -> Type {
     Type::Map(Box::new(key), Box::new(value))
+}
+
+fn list(element: Type) -> Type {
+    Type::List(Box::new(element))
 }
 
 /// A custom function with a single overload over `params` returning `result`.
@@ -242,4 +246,57 @@ fn function_builder_appends_overloads() {
         .expect("declarations build");
     check("f(x)", &declarations).expect("int overload resolves");
     check("f(s)", &declarations).expect("string overload resolves");
+}
+
+#[test]
+fn accepts_has_operator_overloads() {
+    let cases: Vec<(&str, Declarations)> = vec![
+        // string : string — a quoted value and a bare-identifier value.
+        (r#"name:"acme""#, decls(|b| b.ident("name", String))),
+        ("name:acme", decls(|b| b.ident("name", String))),
+        // map<string,string> : string — presence of a key.
+        (
+            "labels:production",
+            decls(|b| b.ident("labels", map(String, String))),
+        ),
+        // list<string> : string — presence of an element.
+        ("tags:urgent", decls(|b| b.ident("tags", list(String)))),
+        // timestamp : "*" — the presence-only wildcard.
+        (
+            "create_time:*",
+            decls(|b| b.ident("create_time", Timestamp)),
+        ),
+    ];
+    for (filter, declarations) in cases {
+        check(filter, &declarations)
+            .unwrap_or_else(|e| panic!("filter {filter:?} should check: {e}"));
+    }
+}
+
+#[test]
+fn rejects_invalid_has_operands() {
+    // An operand whose type has no `:` overload resolves to no matching overload.
+    let no_overload: Vec<(&str, Declarations)> = vec![
+        ("count:foo", decls(|b| b.ident("count", Int))),
+        ("flag:foo", decls(|b| b.ident("flag", Bool))),
+    ];
+    for (filter, declarations) in no_overload {
+        match check(filter, &declarations) {
+            Err(Error::Type(message)) => assert!(
+                message.contains("no matching overload"),
+                "filter {filter:?}: message {message:?} lacks 'no matching overload'"
+            ),
+            other => panic!("filter {filter:?}: expected a type error, got {other:?}"),
+        }
+    }
+    // A timestamp field can only be presence-checked with the `*` wildcard, not
+    // membership-tested against a concrete value.
+    let declarations = decls(|b| b.ident("create_time", Timestamp));
+    match check(r#"create_time:"2022-08-12T22:22:22+01:00""#, &declarations) {
+        Err(Error::Type(message)) => assert!(
+            message.contains("only supports the wildcard"),
+            "message {message:?} lacks the timestamp wildcard restriction"
+        ),
+        other => panic!("expected a wildcard-restriction type error, got {other:?}"),
+    }
 }

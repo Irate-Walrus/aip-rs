@@ -35,7 +35,7 @@ pub(crate) enum TokenType {
     Dot,
     /// `=`
     Equals,
-    /// `:` — the has operator (lexed here, handled in a later slice).
+    /// `:` — the has operator.
     Has,
     /// `<`
     LessThan,
@@ -54,11 +54,9 @@ pub(crate) enum TokenType {
 }
 
 impl TokenType {
-    /// The AST function name a comparison operator maps to (`=`, `!=`, …), or
-    /// `None` if this token is not a comparison operator.
-    ///
-    /// The `:` (has) operator is also a comparator in the full grammar but lands
-    /// with the has-operator slice, so it deliberately yields `None` here.
+    /// The AST function name a comparison operator maps to (`=`, `!=`, `:`, …),
+    /// or `None` if this token is not a comparison operator. The `:` (has)
+    /// operator is a comparator in the full grammar and maps to `:`.
     pub(crate) fn comparison_function(self) -> Option<&'static str> {
         Some(match self {
             Self::Equals => "=",
@@ -67,6 +65,7 @@ impl TokenType {
             Self::LessEquals => "<=",
             Self::GreaterThan => ">",
             Self::GreaterEquals => ">=",
+            Self::Has => ":",
             _ => return None,
         })
     }

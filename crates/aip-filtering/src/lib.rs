@@ -48,6 +48,9 @@ pub mod function {
     pub const GREATER_THAN: &str = ">";
     /// Greater-than-or-equal (`a >= b`).
     pub const GREATER_EQUALS: &str = ">=";
+    /// The has operator (`a : b`): presence/membership — a key in a map, a value
+    /// in a list, a substring of a string, or `*` presence on a timestamp.
+    pub const HAS: &str = ":";
 }
 
 /// Errors produced when parsing or type-checking a filter.
@@ -164,12 +167,13 @@ impl DeclarationsBuilder {
     /// Declare the standard AIP-160 comparison and logical operators with their
     /// standard overloads: `=` / `!=` (bool, int, double, double/int, string),
     /// the ordering operators `<` / `<=` / `>` / `>=` (int, double, double/int,
-    /// string), and `AND` / `OR` / `NOT` over bools.
+    /// string), `AND` / `OR` / `NOT` over bools, and the has operator `:` (over
+    /// a string, a `map<string,string>`, a `list<string>`, or a timestamp).
     ///
-    /// The `:` (has) operator and the timestamp/duration and enum overloads land
+    /// The timestamp/duration comparison overloads and the enum overloads land
     /// with their own slices.
     pub fn standard_functions(self) -> Self {
-        use Type::{Bool, Double, Int, String};
+        use Type::{Bool, Double, Int, String, Timestamp};
         // `=` / `!=` additionally accept two bools.
         let equality = || {
             vec![
@@ -190,12 +194,27 @@ impl DeclarationsBuilder {
                 Overload::new(Bool, vec![String, String]),
             ]
         };
+        // `a : b` tests presence/membership: a substring of a string, a key in a
+        // `map<string,string>`, a value in a `list<string>`, or — restricted to
+        // the `*` wildcard by the checker — presence of a timestamp field.
+        let has = || {
+            vec![
+                Overload::new(Bool, vec![String, String]),
+                Overload::new(
+                    Bool,
+                    vec![Type::Map(Box::new(String), Box::new(String)), String],
+                ),
+                Overload::new(Bool, vec![Type::List(Box::new(String)), String]),
+                Overload::new(Bool, vec![Timestamp, String]),
+            ]
+        };
         self.function(function::EQUALS, equality())
             .function(function::NOT_EQUALS, equality())
             .function(function::LESS_THAN, ordering())
             .function(function::LESS_EQUALS, ordering())
             .function(function::GREATER_THAN, ordering())
             .function(function::GREATER_EQUALS, ordering())
+            .function(function::HAS, has())
             .function(function::AND, vec![Overload::new(Bool, vec![Bool, Bool])])
             .function(function::OR, vec![Overload::new(Bool, vec![Bool, Bool])])
             .function(function::NOT, vec![Overload::new(Bool, vec![Bool])])

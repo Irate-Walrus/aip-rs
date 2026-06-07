@@ -19,10 +19,11 @@
 //!
 //! Logical composition lowers to [`Expr::Call`]s: `AND` for explicit
 //! conjunction, `FUZZY` for the implicit AND between space-separated factors,
-//! `OR` for disjunction, and `NOT` for negation. The has operator `:` lands with
-//! its own slice, so it is not yet accepted as a comparator. Whitespace is
-//! significant (it separates factors), so — unlike the comparison slice — the
-//! lexer's whitespace tokens are kept and consumed explicitly.
+//! `OR` for disjunction, and `NOT` for negation. The has operator `:` is a
+//! comparator like the others, except a bare identifier on its right (`m:foo`)
+//! is read as the *string* `"foo"` rather than an identifier reference.
+//! Whitespace is significant (it separates factors), so — unlike the comparison
+//! slice — the lexer's whitespace tokens are kept and consumed explicitly.
 
 use crate::token::{self, Token, TokenType};
 use crate::{function, Constant, Error, Expr};
@@ -218,7 +219,14 @@ impl Parser<'_> {
         self.eat(&[TokenType::Whitespace]);
         let comparator = self.expect(TokenType::is_comparator, "a comparator")?;
         self.eat(&[TokenType::Whitespace]);
-        let arg = self.arg()?;
+        let mut arg = self.arg()?;
+        // `m:foo` tests whether `m` has the key/value `foo`, so a bare identifier
+        // on the right of `:` is its string value, not an identifier reference.
+        if comparator.ty == TokenType::Has {
+            if let Expr::Ident(name) = arg {
+                arg = Expr::Const(Constant::String(name));
+            }
+        }
         let function = comparator
             .ty
             .comparison_function()
