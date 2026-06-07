@@ -72,17 +72,20 @@ wired up.
 | `UpdateShipper`   | `fieldmask` (apply `update_mask`)            | #8           | wired       |
 | `DeleteShipper`   | `resourcename` (validate name)               | #4           | wired       |
 | `CreateSite`      | `resourceid` (generate), `resourcename` (parse parent + format) | #5, #3 | wired       |
-| `ListSites`       | `ordering` (parse/validate/sort) + `pagination` (offset + checksum guard) | #9, #6, #7 | wired³ |
+| `ListSites`       | `ordering` (parse/validate/sort) + `pagination` (offset + checksum guard) | #9, #10, #6, #7 | wired³ |
 | `GetSite` / `UpdateSite` / `DeleteSite`, `BatchGetSites`, `*Shipment` | the same primitives + `filtering` | #11–#15 | `Unimplemented` |
 
-³ `ListSites` parses the `order_by` (`aip::ordering::parse_order_by`), validates
-it against an allow-list of sortable Site paths (`validate_for_paths`, #9 — not
-the descriptor-based `validate_for_message` of #10), then applies the sort before
-paginating. Ordering composes with pagination: because `order_by` is a
-non-pagination field, changing it mid-pagination flips the request checksum and
-the now-stale page token is rejected. The remaining Site/Shipment handlers await
-the `filtering` crate (#11–#15) and a `filter` request field before they drop
-`Unimplemented`.
+³ `ListSites` parses the `order_by` (`aip::ordering::parse_order_by`) and
+validates it against an allow-list of sortable Site paths (`validate_for_paths`,
+#9) — the right gate here, because the in-memory `sort_sites` only knows those
+curated paths. The descriptor-based `validate_for_message` (#10) guards that
+allow-list in turn: a test checks every sortable path against the `Site`
+descriptor, so the allow-list can't silently drift from the proto. `ListSites`
+then applies the sort before paginating. Ordering composes with pagination:
+because `order_by` is a non-pagination field, changing it mid-pagination flips
+the request checksum and the now-stale page token is rejected. The remaining
+Site/Shipment handlers await the `filtering` crate (#11–#15) and a `filter`
+request field before they drop `Unimplemented`.
 
 ² Real offset pagination through the `pagination` page-token codec (#6), with the
 request-checksum guard (#7) that rejects a token when a non-pagination field

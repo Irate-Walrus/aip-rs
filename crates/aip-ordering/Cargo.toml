@@ -10,7 +10,9 @@ authors.workspace = true
 [dependencies]
 thiserror.workspace = true
 prost-reflect.workspace = true
-# Used by `validate_for_message` to validate field paths against a descriptor.
+# `validate_for_message` builds a `FieldMask` from the ordering paths and hands it
+# to `aip-fieldmask` for descriptor-based path validation.
+prost-types.workspace = true
 aip-fieldmask.workspace = true
 tonic = { workspace = true, optional = true }
 
