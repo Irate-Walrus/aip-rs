@@ -193,7 +193,10 @@ impl From<Error> for tonic::Status {
                 ]),
             ),
             Error::ChecksumMismatch => ("PAGE_TOKEN_CHECKSUM_MISMATCH", HashMap::new()),
-            Error::Decode(_) => ("PAGE_TOKEN_DECODE", HashMap::new()),
+            Error::Decode(detail) => (
+                "PAGE_TOKEN_DECODE",
+                HashMap::from([("detail".to_owned(), detail.clone())]),
+            ),
         };
         let mut details = ErrorDetails::new();
         details.set_error_info(reason, ERROR_DOMAIN, metadata);

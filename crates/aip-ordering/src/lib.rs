@@ -187,7 +187,11 @@ impl From<Error> for tonic::Status {
             HashMap<String, String>,
             Option<(String, String)>,
         ) = match &err {
-            Error::Syntax(_) => ("ORDER_BY_SYNTAX", HashMap::new(), None),
+            Error::Syntax(detail) => (
+                "ORDER_BY_SYNTAX",
+                HashMap::from([("detail".to_owned(), detail.clone())]),
+                None,
+            ),
             Error::UnknownField(field) => (
                 "ORDER_BY_UNKNOWN_FIELD",
                 HashMap::from([("field".to_owned(), field.clone())]),
@@ -233,6 +237,12 @@ mod tonic_tests {
             .get_details_error_info()
             .expect("an ErrorInfo is always attached (AIP-193)");
         assert_eq!(info.reason, "ORDER_BY_SYNTAX");
+        // The dynamic diagnostic that appears in the message is mirrored into
+        // metadata (AIP-193's "no parsing the message" rule).
+        assert_eq!(
+            info.metadata.get("detail").map(String::as_str),
+            Some("trailing comma"),
+        );
         // A syntax error has no single field locus, so there is no BadRequest.
         assert!(status.get_details_bad_request().is_none());
     }

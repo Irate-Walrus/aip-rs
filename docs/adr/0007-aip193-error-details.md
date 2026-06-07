@@ -32,9 +32,12 @@ Built with [`tonic-types`](https://docs.rs/tonic-types) (`ErrorDetails` +
   `RESOURCE_ID_*`, `PAGE_TOKEN_*`, `FIELD_MASK_*`, `ORDER_BY_*`, `FILTER_*` — so
   the `(reason, domain)` pair is unique across crates that share the one domain.
   Per AIP-193, a `reason` must match `[A-Z][A-Z0-9_]+[A-Z0-9]`.
-- **`metadata` carries the error's structured dynamic values** (the offending
-  segment, index, path, character, position, …), not free-form prose. Keys are
-  snake_case and match `[a-z][a-zA-Z0-9-_]+`.
+- **`metadata` carries the error's dynamic values.** AIP-193 requires that any
+  request-specific information appearing in `Status.message` also appear in
+  `metadata`, so a machine actor never has to parse the prose. Discrete values get
+  their own key (the offending `segment`, `index`, `path`, `character`,
+  `position`, …); a free-form diagnostic with no discrete value is mirrored under
+  the `detail` key. Keys are snake_case and match `[a-z][a-zA-Z0-9-_]+`.
 - **A `BadRequest` is added only when the error identifies a request field path.**
 
 ## Why per-crate, not a shared error crate

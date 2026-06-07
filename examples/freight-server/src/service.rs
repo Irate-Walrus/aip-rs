@@ -76,7 +76,7 @@ impl FreightService for FreightServer {
         request: Request<GetShipperRequest>,
     ) -> Result<Response<Shipper>, Status> {
         let name = request.into_inner().name;
-        validate_shipper_name(&name)?;
+        validate_shipper_name("name", &name)?;
         self.storage
             .get_shipper(&name)
             .map(Response::new)
@@ -186,7 +186,7 @@ impl FreightService for FreightServer {
     ) -> Result<Response<Shipper>, Status> {
         let name = request.into_inner().name;
         // Soft delete (AIP-164) is deferred; this is a hard delete.
-        validate_shipper_name(&name)?;
+        validate_shipper_name("name", &name)?;
         self.storage
             .remove_shipper(&name)
             .map(Response::new)
@@ -204,7 +204,7 @@ impl FreightService for FreightServer {
         request: Request<ListSitesRequest>,
     ) -> Result<Response<ListSitesResponse>, Status> {
         let req = request.into_inner();
-        validate_shipper_name(&req.parent)?;
+        validate_shipper_name("parent", &req.parent)?;
 
         // Parse and validate the AIP-132 `order_by` against the allow-list of
         // sortable Site paths (#9's `validate_for_paths`, not the descriptor-based
@@ -254,7 +254,7 @@ impl FreightService for FreightServer {
         request: Request<CreateSiteRequest>,
     ) -> Result<Response<Site>, Status> {
         let req = request.into_inner();
-        validate_shipper_name(&req.parent)?;
+        validate_shipper_name("parent", &req.parent)?;
         let mut site = req
             .site
             .ok_or_else(|| Status::invalid_argument("site is required"))?;
@@ -487,18 +487,19 @@ fn effective_page_size(requested: i32) -> Result<usize, Status> {
     }
 }
 
-/// Validates that `name` is a well-formed shipper resource name (AIP-122): a
+/// Validates that `value` is a well-formed shipper resource name (AIP-122): a
 /// valid resource name that matches the `shippers/{shipper}` pattern. Returns
-/// `INVALID_ARGUMENT` otherwise.
-fn validate_shipper_name(name: &str) -> Result<(), Status> {
+/// `INVALID_ARGUMENT` otherwise. `field` is the request field the value came from
+/// (`name` or `parent`), so the AIP-193 `BadRequest` points at the right one.
+fn validate_shipper_name(field: &str, value: &str) -> Result<(), Status> {
     // A malformed name converts via the crate's AIP-193 `From<Error> for Status`
     // (#16) to an `INVALID_ARGUMENT` carrying an `ErrorInfo`. The collection-match
     // check below is the server's own policy, so it builds its own AIP-193 details.
-    aip::resourcename::validate(name)?;
+    aip::resourcename::validate(value)?;
     let pattern = format!("{SHIPPERS_COLLECTION}/{{shipper}}");
-    if !aip::resourcename::is_match(&pattern, name) {
+    if !aip::resourcename::is_match(&pattern, value) {
         return Err(field_violation(
-            "name",
+            field,
             format!("must match the pattern `{pattern}`"),
             "RESOURCE_NAME_PATTERN_MISMATCH",
         ));
@@ -860,5 +861,27 @@ mod tests {
             .expect("an ErrorInfo is attached (AIP-193 MUST)");
         assert_eq!(info.reason, "ORDER_BY_UNKNOWN_FIELD");
         assert_eq!(info.domain, "aip-rs");
+    }
+
+    #[tokio::test]
+    async fn list_sites_bad_parent_names_the_parent_field() {
+        use tonic_types::StatusExt as _;
+
+        // `validate_shipper_name` is shared by `name`- and `parent`-bearing
+        // handlers; the BadRequest must point at the field the value came from.
+        // `shippers/acme/sites/x` is a valid resource name but does not match the
+        // `shippers/{shipper}` pattern, so it trips the server's policy check.
+        let server = FreightServer::new();
+        let status = server
+            .list_sites(Request::new(ListSitesRequest {
+                parent: "shippers/acme/sites/x".to_owned(),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("a parent that is not a shipper name is rejected");
+        let bad = status
+            .get_details_bad_request()
+            .expect("a BadRequest field violation is attached");
+        assert_eq!(bad.field_violations[0].field, "parent");
     }
 }

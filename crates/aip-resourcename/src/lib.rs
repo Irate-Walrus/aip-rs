@@ -622,7 +622,10 @@ impl From<Error> for tonic::Status {
                 "RESOURCE_NAME_PATTERN_MISMATCH",
                 HashMap::from([("pattern".to_owned(), pattern.clone())]),
             ),
-            Error::InvalidPattern(_) => ("RESOURCE_NAME_INVALID_PATTERN", HashMap::new()),
+            Error::InvalidPattern(detail) => (
+                "RESOURCE_NAME_INVALID_PATTERN",
+                HashMap::from([("detail".to_owned(), detail.clone())]),
+            ),
             Error::VariableInName { segment } => (
                 "RESOURCE_NAME_VARIABLE_IN_NAME",
                 HashMap::from([("segment".to_owned(), segment.clone())]),

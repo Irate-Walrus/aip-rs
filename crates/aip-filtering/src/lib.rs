@@ -277,11 +277,17 @@ impl From<Error> for tonic::Status {
 
         let message = err.to_string();
         let (reason, metadata): (&str, HashMap<String, String>) = match &err {
-            Error::Syntax { position, .. } => (
+            Error::Syntax { position, message } => (
                 "FILTER_SYNTAX",
-                HashMap::from([("position".to_owned(), position.to_string())]),
+                HashMap::from([
+                    ("position".to_owned(), position.to_string()),
+                    ("detail".to_owned(), message.clone()),
+                ]),
             ),
-            Error::Type(_) => ("FILTER_TYPE", HashMap::new()),
+            Error::Type(detail) => (
+                "FILTER_TYPE",
+                HashMap::from([("detail".to_owned(), detail.clone())]),
+            ),
             Error::UndeclaredIdent(ident) => (
                 "FILTER_UNDECLARED_IDENTIFIER",
                 HashMap::from([("identifier".to_owned(), ident.clone())]),
