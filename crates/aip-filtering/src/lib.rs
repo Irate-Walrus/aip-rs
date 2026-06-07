@@ -51,6 +51,10 @@ pub mod function {
     /// The has operator (`a : b`): presence/membership — a key in a map, a value
     /// in a list, a substring of a string, or `*` presence on a timestamp.
     pub const HAS: &str = ":";
+    /// Constructs a timestamp from an RFC3339 string (`timestamp("2024-01-01T00:00:00Z")`).
+    pub const TIMESTAMP: &str = "timestamp";
+    /// Constructs a duration from a string (`duration("3600s")`).
+    pub const DURATION: &str = "duration";
 }
 
 /// Errors produced when parsing or type-checking a filter.
@@ -165,16 +169,24 @@ pub struct DeclarationsBuilder {
 
 impl DeclarationsBuilder {
     /// Declare the standard AIP-160 comparison and logical operators with their
-    /// standard overloads: `=` / `!=` (bool, int, double, double/int, string),
-    /// the ordering operators `<` / `<=` / `>` / `>=` (int, double, double/int,
-    /// string), `AND` / `OR` / `NOT` over bools, and the has operator `:` (over
-    /// a string, a `map<string,string>`, a `list<string>`, or a timestamp).
+    /// standard overloads: `=` / `!=` (bool, int, double, double/int, string,
+    /// timestamp, timestamp/string, duration), the ordering operators
+    /// `<` / `<=` / `>` / `>=` (int, double, double/int, string, timestamp,
+    /// timestamp/string, duration), `AND` / `OR` / `NOT` over bools, the has
+    /// operator `:` (over a string, a `map<string,string>`, a `list<string>`, or
+    /// a timestamp), and the `timestamp` / `duration` constructors that lift an
+    /// RFC3339 / duration string to a [`Timestamp`](Type::Timestamp) /
+    /// [`Duration`](Type::Duration).
     ///
-    /// The timestamp/duration comparison overloads and the enum overloads land
-    /// with their own slices.
+    /// The `timestamp/string` overload lets a timestamp field compare directly
+    /// against an RFC3339 literal (`create_time > "2024-01-01T00:00:00Z"`); a
+    /// duration string is compared via the `duration` constructor
+    /// (`ttl > duration("3600s")`). Enum overloads are per-enum and land with
+    /// [`enum_ident`](Self::enum_ident).
     pub fn standard_functions(self) -> Self {
-        use Type::{Bool, Double, Int, String, Timestamp};
-        // `=` / `!=` additionally accept two bools.
+        use Type::{Bool, Double, Duration, Int, String, Timestamp};
+        // `=` / `!=` additionally accept two bools, and compare timestamps (to a
+        // timestamp or an RFC3339 string) and durations.
         let equality = || {
             vec![
                 Overload::new(Bool, vec![Bool, Bool]),
@@ -182,16 +194,22 @@ impl DeclarationsBuilder {
                 Overload::new(Bool, vec![Double, Double]),
                 Overload::new(Bool, vec![Double, Int]),
                 Overload::new(Bool, vec![String, String]),
+                Overload::new(Bool, vec![Timestamp, Timestamp]),
+                Overload::new(Bool, vec![Timestamp, String]),
+                Overload::new(Bool, vec![Duration, Duration]),
             ]
         };
         // The ordering operators compare like-typed operands (and a double to an
-        // int literal), but not bools.
+        // int literal), but not bools; plus the same timestamp/duration overloads.
         let ordering = || {
             vec![
                 Overload::new(Bool, vec![Int, Int]),
                 Overload::new(Bool, vec![Double, Double]),
                 Overload::new(Bool, vec![Double, Int]),
                 Overload::new(Bool, vec![String, String]),
+                Overload::new(Bool, vec![Timestamp, Timestamp]),
+                Overload::new(Bool, vec![Timestamp, String]),
+                Overload::new(Bool, vec![Duration, Duration]),
             ]
         };
         // `a : b` tests presence/membership: a substring of a string, a key in a
@@ -218,6 +236,16 @@ impl DeclarationsBuilder {
             .function(function::AND, vec![Overload::new(Bool, vec![Bool, Bool])])
             .function(function::OR, vec![Overload::new(Bool, vec![Bool, Bool])])
             .function(function::NOT, vec![Overload::new(Bool, vec![Bool])])
+            // `timestamp("...")` / `duration("...")` lift a string literal to a
+            // temporal value, so it can be compared via the overloads above.
+            .function(
+                function::TIMESTAMP,
+                vec![Overload::new(Timestamp, vec![String])],
+            )
+            .function(
+                function::DURATION,
+                vec![Overload::new(Duration, vec![String])],
+            )
     }
 
     /// Declare a filterable identifier with a type. A repeated name replaces the
@@ -228,8 +256,27 @@ impl DeclarationsBuilder {
     }
 
     /// Declare an enum-typed identifier (the one reflective declaration).
-    pub fn enum_ident(self, _name: &str, _descriptor: EnumDescriptor) -> Self {
-        todo!("enum identifiers land with the enum/well-known-type slice")
+    ///
+    /// `name` becomes an [`Enum`](Type::Enum) identifier carrying the
+    /// descriptor's full name, and `=` / `!=` gain an overload comparing two
+    /// values of that enum. Each of the enum's value names is also declared as
+    /// an identifier of the same enum type, so a filter can name a value bare
+    /// (`state = ACTIVE`). Declaring the same enum again re-adds these (an
+    /// already-declared value name is replaced, like [`ident`](Self::ident)).
+    pub fn enum_ident(self, name: &str, descriptor: EnumDescriptor) -> Self {
+        let enum_type = Type::Enum(descriptor.full_name().to_string());
+        let comparison = vec![Overload::new(
+            Type::Bool,
+            vec![enum_type.clone(), enum_type.clone()],
+        )];
+        let mut builder = self
+            .ident(name, enum_type.clone())
+            .function(function::EQUALS, comparison.clone())
+            .function(function::NOT_EQUALS, comparison);
+        for value in descriptor.values() {
+            builder = builder.ident(value.name(), enum_type.clone());
+        }
+        builder
     }
 
     /// Declare a function with the given resolvable `overloads`. Declaring the

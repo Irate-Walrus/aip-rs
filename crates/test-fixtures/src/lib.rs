@@ -21,7 +21,7 @@
 
 use std::sync::LazyLock;
 
-use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor};
+use prost_reflect::{DescriptorPool, DynamicMessage, EnumDescriptor, MessageDescriptor};
 
 /// The `FileDescriptorSet` produced by `build.rs`, embedded into the test binary.
 static FILE_DESCRIPTOR_SET: &[u8] =
@@ -59,6 +59,13 @@ pub fn pool() -> DescriptorPool {
 /// `"einride.example.freight.v1.Shipper"`) in the shared [`pool`].
 pub fn message_descriptor(full_name: &str) -> Option<MessageDescriptor> {
     POOL.get_message_by_name(full_name)
+}
+
+/// Look up an enum type by its fully-qualified name (e.g.
+/// `"einride.example.syntax.v1.Enum"`) in the shared [`pool`] — the fixture for
+/// `aip-filtering`'s reflective `enum_ident` declarations.
+pub fn enum_descriptor(full_name: &str) -> Option<EnumDescriptor> {
+    POOL.get_enum_by_name(full_name)
 }
 
 /// Build a [`DynamicMessage`] of the named message type from a JSON string,
