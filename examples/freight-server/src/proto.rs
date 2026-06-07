@@ -41,3 +41,25 @@ pub mod google {
         include!(concat!(env!("OUT_DIR"), "/google.r#type.rs"));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use prost_reflect::ReflectMessage;
+
+    use super::einride::example::freight::v1::{ListShippersRequest, Shipper};
+
+    /// ADR-0009 smoke check: a generated freight type is a **Typed message** — it
+    /// resolves its own `MessageDescriptor` straight off the value, with no
+    /// hand-built pool lookup at the call site (`DESCRIPTOR_POOL.get_message_by_name`).
+    #[test]
+    fn generated_types_carry_their_descriptor() {
+        assert_eq!(
+            Shipper::default().descriptor().full_name(),
+            "einride.example.freight.v1.Shipper"
+        );
+        assert_eq!(
+            ListShippersRequest::default().descriptor().full_name(),
+            "einride.example.freight.v1.ListShippersRequest"
+        );
+    }
+}
