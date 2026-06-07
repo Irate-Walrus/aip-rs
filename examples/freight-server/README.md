@@ -38,7 +38,11 @@ gc() { grpcurl -import-path "$PROTO" \
 gc -d '{"shipper":{"display_name":"Acme"}}' 127.0.0.1:50051 $SVC/CreateShipper
 gc -d '{}'                                  127.0.0.1:50051 $SVC/ListShippers
 gc -d '{"name":"shippers/$ID"}'             127.0.0.1:50051 $SVC/GetShipper
-gc -d '{"shipper":{"name":"shippers/$ID","display_name":"Acme Corp"}}' \
+# UpdateShipper applies an AIP-134 update_mask via the typed `fieldmask::update`
+# facade (#48): only `display_name` is masked, so it changes while the rest of the
+# stored shipper is left untouched. Omit `display_name` from the request with the
+# same mask and it is cleared instead.
+gc -d '{"shipper":{"name":"shippers/$ID","display_name":"Acme Corp"},"updateMask":{"paths":["display_name"]}}' \
                                             127.0.0.1:50051 $SVC/UpdateShipper
 gc -d '{"name":"shippers/$ID"}'             127.0.0.1:50051 $SVC/DeleteShipper
 ```
@@ -76,7 +80,7 @@ wired up.
 | `GetShipper`      | `resourcename` (validate name)               | #4           | wired       |
 | `ListShippers`    | `pagination` (offset page-token codec + request-checksum guard) | #6, #7 | wired² |
 | `CreateShipper`   | `resourceid` (generate), `resourcename` (format) | #5, #3   | wired       |
-| `UpdateShipper`   | `fieldmask` (apply `update_mask`)            | #8           | wired       |
+| `UpdateShipper`   | `fieldmask` (typed `update` over `update_mask`) | #8, #48   | wired       |
 | `DeleteShipper`   | `resourcename` (validate name)               | #4           | wired       |
 | `CreateSite`      | `resourceid` (generate), `resourcename` (parse parent + format) | #5, #3 | wired       |
 | `ListSites`       | `ordering` (parse/validate/sort) + `pagination` (offset + checksum guard) | #9, #10, #6, #7 | wired³ |
@@ -129,18 +133,18 @@ a pure-Rust protobuf compiler, so **no `protoc` is required** (matching
 resulting `FileDescriptorSet` to `tonic-prost-build` for the message + service
 codegen. The same set is embedded raw so the server can build a
 `prost_reflect::DescriptorPool` at runtime; that pool backs the `ReflectMessage`
-derives below (each Typed message resolves its own descriptor from it) and the
-`DynamicMessage` bridge that `UpdateShipper`'s `fieldmask` apply still uses
-([`src/reflect.rs`](src/reflect.rs)).
+derives below — each Typed message resolves its own descriptor from it.
 
 The generated freight messages are **Typed messages** (#46): `build.rs`
 adds `#[derive(prost_reflect::ReflectMessage)]` to each, enumerated from the same
 `protox` set, so a message carries its own `MessageDescriptor`
 (`Shipper::default().descriptor()`) without a by-name pool lookup — per
-[ADR-0009](../../docs/adr/0009-reflective-typed-message-api.md). The list
-handlers' `request_checksum` now takes the request straight off that descriptor
-(#47); `UpdateShipper`'s `fieldmask` apply still routes through the
-`DynamicMessage` bridge until its typed facade lands (#48).
+[ADR-0009](../../docs/adr/0009-reflective-typed-message-api.md). Every reflective
+primitive the handlers call is now expressed over these Typed messages:
+`ListShippers`/`ListSites` take `request_checksum` straight off the request's
+descriptor (#47), and `UpdateShipper` applies its `update_mask` with the typed
+`fieldmask::update` facade (#48) — so the server holds no `DynamicMessage` of its
+own and the hand-rolled `reflect.rs` bridge is gone.
 
 The freight protos and their vendored googleapis imports live under
 [`proto/`](proto), so the example builds standalone. They are a copy of the same

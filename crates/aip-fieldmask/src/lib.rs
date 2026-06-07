@@ -1,15 +1,22 @@
 //! AIP-161 field masks: apply update masks and validate paths.
 //!
 //! The mask type is `google.protobuf.FieldMask` (`prost_types::FieldMask`) —
-//! exactly how it arrives in an update request. Only the *message* side is
-//! reflective ([`DynamicMessage`]); the mask itself is plain data.
+//! exactly how it arrives in an update request. The mask itself is plain data;
+//! only the *message* side is reflective.
 //!
-//! This is a port of `go.einride.tech/aip/fieldmask` onto [`DynamicMessage`].
-//! It departs from the reference in one place: a source/destination type
-//! mismatch returns [`Error::TypeMismatch`] where aip-go panics.
+//! Applying an update mask is presented as a **Typed facade** ([`update`],
+//! generic over [`ReflectMessage`], so a message carries its own descriptor)
+//! layered on a still-public **Dynamic core** ([`update_dynamic`], over
+//! [`DynamicMessage`]) — see
+//! `docs/adr/0009-reflective-typed-message-api.md`.
+//!
+//! The core is a port of `go.einride.tech/aip/fieldmask`. It departs from the
+//! reference in one place: a source/destination type mismatch returns
+//! [`Error::TypeMismatch`] where aip-go panics.
 //!
 //! See <https://google.aip.dev/161> and <https://google.aip.dev/134>.
 
+use prost::Message as _;
 use prost_reflect::{DynamicMessage, FieldDescriptor, Kind, MessageDescriptor, ReflectMessage};
 use prost_types::FieldMask;
 
@@ -27,7 +34,9 @@ pub enum Error {
     /// The full-replacement path `*` was combined with other paths.
     #[error("field mask path \"*\" must not be combined with other paths")]
     WildcardNotAlone,
-    /// `update` was given a destination and source of different message types.
+    /// [`update_dynamic`] was given a destination and source of different
+    /// message types. (The typed [`update`] facade fixes both to one type, so it
+    /// cannot raise this.)
     #[error("dst and src message types differ: {dst} vs {src}")]
     TypeMismatch { dst: String, src: String },
 }
@@ -40,7 +49,13 @@ pub fn is_full_replacement(mask: &FieldMask) -> bool {
     mask.paths.len() == 1 && mask.paths[0] == WILDCARD_PATH
 }
 
-/// Applies an AIP-134 update mask, copying masked fields from `src` into `dst`.
+/// The [Dynamic core](self) of the update-mask primitive: applies an AIP-134
+/// update mask, copying masked fields from `src` into `dst` (ADR-0009).
+///
+/// This is the low-level interface over [`DynamicMessage`] — the escape hatch
+/// for a caller who already holds a dynamic message (JSON ingestion, a generic
+/// gateway) and the crate's test surface. Callers holding concrete generated
+/// types reach for the [`update`] **Typed facade**, which transcodes onto this.
 ///
 /// - An **empty** mask copies only the fields populated on `src` (proto3
 ///   presence: a default-valued scalar without explicit presence counts as
@@ -54,7 +69,7 @@ pub fn is_full_replacement(mask: &FieldMask) -> bool {
 /// descriptors differ (where aip-go panics).
 ///
 /// [`Full replacement`]: is_full_replacement
-pub fn update(
+pub fn update_dynamic(
     mask: &FieldMask,
     dst: &mut DynamicMessage,
     src: &DynamicMessage,
@@ -80,6 +95,41 @@ pub fn update(
             update_named_field(dst, src, &segments);
         }
     }
+    Ok(())
+}
+
+/// Applies an AIP-134 update mask to a **Typed message**, copying masked fields
+/// from `src` into `dst`. The headline interface over the [`update_dynamic`]
+/// core (ADR-0009).
+///
+/// `dst` and `src` are concrete generated messages that carry their own
+/// [`Descriptor`](ReflectMessage::descriptor); the facade transcodes both to
+/// [`DynamicMessage`]s through their wire bytes, runs the core, and decodes the
+/// result back into `dst`. Same masking semantics as [`update_dynamic`]: an
+/// empty mask copies `src`'s populated fields, `["*"]` is a [`Full replacement`],
+/// and a named path absent from `src` clears that field.
+///
+/// The `M → DynamicMessage → M` round-trip can fail only if a type and its
+/// descriptor disagree — a build/config bug, not bad input — so it is treated as
+/// an invariant (`expect`), not an [`Error`] variant (ADR-0009). Because `dst`
+/// and `src` share the type `M`, the core's [`Error::TypeMismatch`] is
+/// unreachable here; the `Result` mirrors the core for a uniform call surface.
+///
+/// [`Full replacement`]: is_full_replacement
+pub fn update<M: ReflectMessage + Default>(
+    mask: &FieldMask,
+    dst: &mut M,
+    src: &M,
+) -> Result<(), Error> {
+    let descriptor = dst.descriptor();
+    let mut dst_dynamic =
+        DynamicMessage::decode(descriptor.clone(), dst.encode_to_vec().as_slice())
+            .expect("a message round-trips through its own descriptor");
+    let src_dynamic = DynamicMessage::decode(descriptor, src.encode_to_vec().as_slice())
+        .expect("a message round-trips through its own descriptor");
+    update_dynamic(mask, &mut dst_dynamic, &src_dynamic)?;
+    *dst = M::decode(dst_dynamic.encode_to_vec().as_slice())
+        .expect("a dynamic message re-decodes into its generated type");
     Ok(())
 }
 
