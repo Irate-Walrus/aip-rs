@@ -41,3 +41,21 @@ pub mod google {
         include!(concat!(env!("OUT_DIR"), "/google.r#type.rs"));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use prost_reflect::ReflectMessage;
+
+    use super::einride::example::freight::v1::Shipper;
+
+    /// A generated message is a Typed message (ADR-0009): it carries its own
+    /// `Descriptor` via the `ReflectMessage` derive, so a value resolves it
+    /// directly — no hand-built pool lookup keyed on a fully-qualified name.
+    #[test]
+    fn generated_message_carries_its_descriptor() {
+        assert_eq!(
+            Shipper::default().descriptor().full_name(),
+            "einride.example.freight.v1.Shipper",
+        );
+    }
+}

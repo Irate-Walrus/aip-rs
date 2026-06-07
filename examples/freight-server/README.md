@@ -132,6 +132,18 @@ message to a `DynamicMessage` for the reflective primitives — `ListShippers`'
 `request_checksum` (#7) and `UpdateShipper`'s `fieldmask` apply
 ([`src/reflect.rs`](src/reflect.rs)).
 
+`build.rs` also makes every generated message a **Typed message**
+([ADR-0009](../../docs/adr/0009-reflective-typed-message-api.md), #46): it
+enumerates the messages in the `protox`-built set and attaches
+`#[derive(prost_reflect::ReflectMessage)]`, so a value carries its own
+`Descriptor` — `Shipper::default().descriptor()` resolves it with no name-keyed
+pool lookup. (`prost-reflect-build` automates this, but only by re-running
+`protoc`; we replicate its attribute wiring against the protox set to keep the
+no-`protoc` build.) The derive points at the same runtime `DESCRIPTOR_POOL`, so
+this is the enabling step only — the `DynamicMessage` transcode bridge above is
+unchanged here and is retired once the reflective primitives move to the typed
+facade.
+
 The freight protos and their vendored googleapis imports live under
 [`proto/`](proto), so the example builds standalone. They are a copy of the same
 einride sources used by

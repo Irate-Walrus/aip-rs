@@ -37,8 +37,9 @@ prost       = { workspace = true }
 prost-types = { workspace = true }
 # Reflection (ADR-0001): a DescriptorPool + DynamicMessage transcode bridge so
 # the reflective `aip::pagination::request_checksum` and `aip::fieldmask` can
-# read a concrete request/message.
-prost-reflect = { workspace = true }
+# read a concrete request/message. The `derive` feature supplies the
+# `ReflectMessage` derive the generated Typed messages carry (ADR-0009).
+prost-reflect = { workspace = true, features = ["derive"] }
 tokio       = { workspace = true }
 
 [build-dependencies]
@@ -47,3 +48,8 @@ tokio       = { workspace = true }
 protox            = { workspace = true }
 prost             = { workspace = true }
 tonic-prost-build = { workspace = true }
+# Decodes the protox-built descriptor set so `build.rs` can enumerate every
+# message and attach the `ReflectMessage` derive (ADR-0009 fallback path:
+# `prost-reflect-build` only consumes an FDS by re-running `protoc`, which would
+# break the no-`protoc` build, so we replicate its ~10 lines of attribute wiring).
+prost-reflect     = { workspace = true }

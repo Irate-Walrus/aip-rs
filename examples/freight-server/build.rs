@@ -15,6 +15,7 @@
 use std::{env, path::PathBuf};
 
 use prost::Message as _;
+use prost_reflect::DescriptorPool;
 
 /// The freight `.proto` files to serve, relative to this crate's `proto/` root.
 /// Their imports (sibling freight protos, vendored `google/api` + `google/type`,
@@ -42,9 +43,10 @@ fn main() {
     // Persist the descriptor set so `proto.rs` can build a runtime reflection
     // pool. Written before `compile_fds_with_config` consumes the set.
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is set by cargo"));
+    let descriptor_set_bytes = file_descriptor_set.encode_to_vec();
     std::fs::write(
         out_dir.join("freight_descriptor_set.bin"),
-        file_descriptor_set.encode_to_vec(),
+        &descriptor_set_bytes,
     )
     .expect("write the freight descriptor set for runtime reflection");
 
@@ -53,6 +55,32 @@ fn main() {
     // hand-typing it — see `request_checksum_of` in `service.rs`.
     let mut config = tonic_prost_build::Config::new();
     config.enable_type_names();
+
+    // Make every generated message a Typed message (ADR-0009): derive
+    // `prost_reflect::ReflectMessage` so the value carries its own Descriptor.
+    // `prost-reflect-build` automates this, but its only FDS-consuming entry
+    // points re-run `protoc` — we already have a `protox`-built descriptor set
+    // (no `protoc`, ADR-0001/0006), so we replicate its attribute wiring against
+    // it: enumerate the messages and point the derive at the existing runtime
+    // pool (`crate::proto::DESCRIPTOR_POOL`). Messages with no generated Rust
+    // type — the well-known `google.protobuf.*`, options-only `google.api.*`, and
+    // synthetic map-entry messages — match nothing, so their attributes are
+    // harmless no-ops.
+    let pool = DescriptorPool::decode(descriptor_set_bytes.as_slice())
+        .expect("the protox descriptor set decodes into a reflection pool");
+    for message in pool.all_messages() {
+        let full_name = message.full_name();
+        config
+            .type_attribute(full_name, "#[derive(::prost_reflect::ReflectMessage)]")
+            .type_attribute(
+                full_name,
+                format!(r#"#[prost_reflect(message_name = "{full_name}")]"#),
+            )
+            .type_attribute(
+                full_name,
+                r#"#[prost_reflect(descriptor_pool = "crate::proto::DESCRIPTOR_POOL")]"#,
+            );
+    }
 
     // Server-only: we implement the service, we don't call it.
     tonic_prost_build::configure()
