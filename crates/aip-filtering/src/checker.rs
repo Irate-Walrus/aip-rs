@@ -7,7 +7,7 @@
 //! matched against the declared identifier names, with map-valued operands the
 //! one structural fallback (`com.google` where `com` is a `map`).
 
-use crate::{Constant, Declarations, Error, Expr, Type};
+use crate::{function, Constant, Declarations, Error, Expr, Type};
 
 /// Type-check `expr` against `declarations`, requiring a boolean result.
 pub(crate) fn check(expr: &Expr, declarations: &Declarations) -> Result<(), Error> {
@@ -54,6 +54,19 @@ fn check_call(function: &str, args: &[Expr], declarations: &Declarations) -> Res
         .ok_or_else(|| Error::Type(format!("undeclared function '{function}'")))?;
     for overload in overloads {
         if overload.params == arg_types {
+            // The has operator on a timestamp is presence-only: `field:*` checks
+            // presence, but comparing the field to a concrete value is rejected.
+            if function == function::HAS && arg_types == [Type::Timestamp, Type::String] {
+                if let Expr::Const(Constant::String(value)) = &args[1] {
+                    if value != "*" {
+                        return Err(Error::Type(
+                            "the has operator on timestamp fields only supports \
+                             the wildcard \"*\" for presence checks"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
             return Ok(overload.result.clone());
         }
     }

@@ -1,11 +1,10 @@
 //! Table tests for the public [`parse`] over the full AIP-160 grammar: the
-//! parser builds the native [`Expr`] AST for comparisons, the logical operators
-//! (`AND` / `OR` / `NOT`, plus the implicit `FUZZY` AND), functions, and
-//! parenthesised composites.
+//! parser builds the native [`Expr`] AST for comparisons, the has operator `:`,
+//! the logical operators (`AND` / `OR` / `NOT`, plus the implicit `FUZZY` AND),
+//! functions, and parenthesised composites.
 //!
-//! Ported from `aip-go`'s `parser_test.go`, excluding the `:` (has) cases (which
-//! land with the has-operator slice) and its invalid-UTF-8 case (a Rust `&str`
-//! is always valid UTF-8).
+//! Ported from `aip-go`'s `parser_test.go`, excluding its invalid-UTF-8 case (a
+//! Rust `&str` is always valid UTF-8).
 
 use aip_filtering::{parse, Constant, Error, Expr};
 
@@ -230,6 +229,32 @@ fn parses_functions() {
             call("timestamp", vec![string("2012-04-21T11:30:00-04:00")]),
         ),
         ("duration('32s')", call("duration", vec![string("32s")])),
+    ];
+    for (filter, expected) in cases {
+        assert_eq!(parse(filter).expect(filter), expected, "filter: {filter}");
+    }
+}
+
+#[test]
+fn parses_has_operator() {
+    let cases = [
+        // A bare identifier on the right of `:` is read as its string value
+        // (`m:foo` tests whether `m` has the key/value "foo").
+        (
+            "annotations:schedule",
+            call(":", vec![ident("annotations"), string("schedule")]),
+        ),
+        // A quoted string on the right stays a string; the leading `-` negates
+        // the whole restriction.
+        (
+            r#"-file:".java""#,
+            not(call(":", vec![ident("file"), string(".java")])),
+        ),
+        // `field:*` is the presence-check wildcard — still a plain string value.
+        (
+            "create_time:*",
+            call(":", vec![ident("create_time"), string("*")]),
+        ),
     ];
     for (filter, expected) in cases {
         assert_eq!(parse(filter).expect(filter), expected, "filter: {filter}");
