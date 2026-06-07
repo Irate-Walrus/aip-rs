@@ -217,14 +217,28 @@ impl FreightService for FreightServer {
         // mid-pagination flips the checksum and the now-stale token is rejected.
         let page = parse_page(&req)?;
 
+        // The AIP-160 `filter` is applied first, at the source: parse +
+        // type-check it (`aip::filtering`), transpile it to a parameterized
+        // `Predicate` (`aip_sql`), and let the SQLite-backed store run it (#39). An
+        // empty filter lists every site.
+        let predicate = if req.filter.is_empty() {
+            None
+        } else {
+            // An invalid/unsupported filter converts to `INVALID_ARGUMENT`:
+            // `check` via `aip-filtering`'s AIP-193 `From<Error>` (#16), and a
+            // construct beyond this slice's `=`/`AND` transpiler explicitly.
+            let filter = aip::filtering::check(&req.filter, &site_declarations())?;
+            let predicate = aip_sql::transpile_filter(&filter, &site_schema())
+                .map_err(|e| Status::invalid_argument(format!("filter: {e}")))?;
+            Some(predicate)
+        };
+
         // Sites under this parent, in the store's stable resource-name order, then
         // sorted by `order_by`. The sort is stable, so the name order breaks ties
         // and the ordering stays consistent across pages.
-        // TODO(aip #11): apply an AIP-160 filter here once `ListSitesRequest`
-        // gains a `filter` field — the `aip::filtering` pipeline is ready.
         let mut sites: Vec<Site> = self
             .storage
-            .list_sites()
+            .list_sites_matching(predicate.as_ref())
             .into_iter()
             .filter(|site| aip::resourcename::has_parent(&site.name, &req.parent))
             .collect();
@@ -432,6 +446,37 @@ fn latitude(site: &Site) -> f64 {
 /// The site's longitude, or `0.0` when it carries no location.
 fn longitude(site: &Site) -> f64 {
     site.lat_lng.as_ref().map_or(0.0, |ll| ll.longitude)
+}
+
+/// The AIP-160 declarations a `ListSites` filter is checked against: the scalar
+/// string columns `display_name` and `name`, with `=` and `AND`. Deliberately
+/// narrower than `standard_functions` so the checker rejects anything this
+/// slice's transpiler can't lower (e.g. `OR`, `!=`) with a clean
+/// `INVALID_ARGUMENT`, rather than failing later in transpile.
+fn site_declarations() -> aip::filtering::Declarations {
+    use aip::filtering::{function, Overload, Type};
+    aip::filtering::Declarations::builder()
+        .ident("display_name", Type::String)
+        .ident("name", Type::String)
+        .function(
+            function::EQUALS,
+            vec![Overload::new(Type::Bool, vec![Type::String, Type::String])],
+        )
+        .function(
+            function::AND,
+            vec![Overload::new(Type::Bool, vec![Type::Bool, Type::Bool])],
+        )
+        .build()
+        .expect("site filter declarations are valid")
+}
+
+/// Maps the filterable Site identifiers onto their SQLite columns (#39). Both map
+/// to identically-named columns in the `sites` table.
+fn site_schema() -> aip_sql::Schema {
+    aip_sql::Schema::builder()
+        .column("display_name", "display_name")
+        .column("name", "name")
+        .build()
 }
 
 /// The resolved AIP-158 pagination state for one list page, produced by
@@ -958,5 +1003,69 @@ mod tests {
             .get_details_bad_request()
             .expect("a BadRequest field violation is attached");
         assert_eq!(bad.field_violations[0].field, "parent");
+    }
+
+    /// Lists sites under `PARENT` carrying an AIP-160 `filter`, returning their
+    /// display names in the order the server produced them.
+    async fn list_filtered_display_names(server: &FreightServer, filter: &str) -> Vec<String> {
+        let resp = server
+            .list_sites(Request::new(ListSitesRequest {
+                parent: PARENT.to_owned(),
+                filter: filter.to_owned(),
+                order_by: "display_name".to_owned(),
+                ..Default::default()
+            }))
+            .await
+            .expect("list_sites succeeds")
+            .into_inner();
+        resp.sites.into_iter().map(|s| s.display_name).collect()
+    }
+
+    #[tokio::test]
+    async fn filter_returns_only_matching_site_from_sqlite() {
+        // The headline tracer-bullet path (#39): `display_name = "Alpha"` is
+        // type-checked, transpiled to a parameterized Predicate, and run inside
+        // SQLite, which returns just the matching row.
+        let server = FreightServer::new();
+        for name in ["Alpha", "Bravo", "Charlie"] {
+            seed_site(&server, name, 0.0).await;
+        }
+        assert_eq!(
+            list_filtered_display_names(&server, r#"display_name = "Alpha""#).await,
+            ["Alpha"],
+        );
+    }
+
+    #[tokio::test]
+    async fn filter_conjunction_binds_both_literals() {
+        // `AND` over two `=` leaves binds two parameters; contradictory equalities
+        // match nothing, proving both binds reach SQLite.
+        let server = FreightServer::new();
+        for name in ["Alpha", "Bravo"] {
+            seed_site(&server, name, 0.0).await;
+        }
+        assert!(list_filtered_display_names(
+            &server,
+            r#"display_name = "Alpha" AND display_name = "Bravo""#
+        )
+        .await
+        .is_empty(),);
+    }
+
+    #[tokio::test]
+    async fn filter_beyond_the_slice_is_invalid_argument() {
+        // `OR` is outside this slice's declarations, so the checker rejects it with
+        // `INVALID_ARGUMENT` before it ever reaches the transpiler.
+        let server = FreightServer::new();
+        seed_site(&server, "Alpha", 0.0).await;
+        let status = server
+            .list_sites(Request::new(ListSitesRequest {
+                parent: PARENT.to_owned(),
+                filter: r#"display_name = "Alpha" OR display_name = "Bravo""#.to_owned(),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("an unsupported filter is rejected");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
     }
 }

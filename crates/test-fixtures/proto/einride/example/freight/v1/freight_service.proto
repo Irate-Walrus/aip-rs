@@ -275,6 +275,12 @@ message ListSitesRequest {
   // `display_name desc, name`. See: https://google.aip.dev/132#ordering.
   // An unset value returns sites in their default (resource-name) order.
   string order_by = 5;
+
+  // An AIP-160 filter expression over the sites' fields, e.g.
+  // `display_name = "Alpha"`. An unset value applies no filter. The demo
+  // transpiles it to parameterized SQL and runs it against SQLite when built
+  // with `--features sqlite`. See: https://google.aip.dev/160.
+  string filter = 6;
 }
 
 // Response message for FreightService.ListSites.
