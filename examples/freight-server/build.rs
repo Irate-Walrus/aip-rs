@@ -40,7 +40,7 @@ fn main() {
     .expect("protox failed to compile the freight protos");
 
     // Persist the descriptor set so `proto.rs` can build a runtime reflection
-    // pool. Written before `compile_fds` consumes the set.
+    // pool. Written before `compile_fds_with_config` consumes the set.
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is set by cargo"));
     std::fs::write(
         out_dir.join("freight_descriptor_set.bin"),
@@ -48,11 +48,17 @@ fn main() {
     )
     .expect("write the freight descriptor set for runtime reflection");
 
+    // Emit `prost::Name` impls for the generated messages so a handler can derive
+    // a request's fully-qualified name from its type (`M::full_name()`) rather than
+    // hand-typing it — see `request_checksum_of` in `service.rs`.
+    let mut config = tonic_prost_build::Config::new();
+    config.enable_type_names();
+
     // Server-only: we implement the service, we don't call it.
     tonic_prost_build::configure()
         .build_server(true)
         .build_client(false)
-        .compile_fds(file_descriptor_set)
+        .compile_fds_with_config(file_descriptor_set, config)
         .expect("tonic-prost-build failed to generate the freight service");
 
     // Recompile whenever any shared proto changes.

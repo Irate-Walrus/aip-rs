@@ -88,21 +88,18 @@ impl FreightService for FreightServer {
         request: Request<ListShippersRequest>,
     ) -> Result<Response<ListShippersResponse>, Status> {
         let req = request.into_inner();
-        // Offset pagination (AIP-158) over the stable shipper listing. The
-        // checksum over the request's non-pagination fields is verified by
-        // `PageToken::parse`, so a token is rejected if the client changes the
-        // request mid-pagination; an empty token starts at offset 0.
-        let checksum = request_checksum_of("einride.example.freight.v1.ListShippersRequest", &req)?;
-        let current = PageToken::parse(&req, checksum)
-            .map_err(|e| Status::invalid_argument(format!("invalid page_token: {e}")))?;
-        let page_size = effective_page_size(req.page_size());
+        // Offset pagination (AIP-158) over the stable shipper listing. `parse_page`
+        // checksums the request's non-pagination fields, verifies the offset token
+        // against that checksum (rejecting a request that changed mid-pagination),
+        // and resolves the page size; an empty token starts at offset 0.
+        let page = parse_page(&req)?;
         let mut shippers = self.storage.list_shippers();
         let total = shippers.len();
-        let start = usize::try_from(current.offset).unwrap_or(0).min(total);
-        let end = start.saturating_add(page_size).min(total);
+        let start = usize::try_from(page.token.offset).unwrap_or(0).min(total);
+        let end = start.saturating_add(page.size).min(total);
         // Only hand back a `next_page_token` when results remain past this page.
         let next_page_token = if end < total {
-            current.next(page_size as i32).encode()
+            page.token.next(page.size as i32).encode()
         } else {
             String::new()
         };
@@ -221,12 +218,9 @@ impl FreightService for FreightServer {
             .map_err(|e| Status::invalid_argument(format!("invalid order_by: {e}")))?;
 
         // Offset pagination (AIP-158). `order_by` is a non-pagination field, so
-        // the request checksum covers it: changing it mid-pagination flips the
-        // checksum and `PageToken::parse` rejects the now-stale token.
-        let checksum = request_checksum_of("einride.example.freight.v1.ListSitesRequest", &req)?;
-        let current = PageToken::parse(&req, checksum)
-            .map_err(|e| Status::invalid_argument(format!("invalid page_token: {e}")))?;
-        let page_size = effective_page_size(req.page_size());
+        // the request checksum `parse_page` computes covers it: changing it
+        // mid-pagination flips the checksum and the now-stale token is rejected.
+        let page = parse_page(&req)?;
 
         // Sites under this parent, in the store's stable resource-name order, then
         // sorted by `order_by`. The sort is stable, so the name order breaks ties
@@ -242,11 +236,11 @@ impl FreightService for FreightServer {
         sort_sites(&mut sites, &order_by);
 
         let total = sites.len();
-        let start = usize::try_from(current.offset).unwrap_or(0).min(total);
-        let end = start.saturating_add(page_size).min(total);
+        let start = usize::try_from(page.token.offset).unwrap_or(0).min(total);
+        let end = start.saturating_add(page.size).min(total);
         // Only hand back a `next_page_token` when results remain past this page.
         let next_page_token = if end < total {
-            current.next(page_size as i32).encode()
+            page.token.next(page.size as i32).encode()
         } else {
             String::new()
         };
@@ -445,25 +439,51 @@ fn longitude(site: &Site) -> f64 {
     site.lat_lng.as_ref().map_or(0.0, |ll| ll.longitude)
 }
 
+/// The resolved AIP-158 pagination state for one list page, produced by
+/// [`parse_page`]: the verified offset page token and the clamped page size.
+struct Page {
+    /// The verified offset page token. `token.offset` is where this page starts;
+    /// `token.next(size)` mints the following page's token, carrying the request
+    /// checksum forward so a mid-pagination change is still rejected.
+    token: PageToken,
+    /// The page size after the AIP-158 default/cap has been applied.
+    size: usize,
+}
+
+/// Folds the AIP-158 list-pagination preamble into a single step: checksum the
+/// request's non-pagination fields, parse and verify the offset page token
+/// against that checksum, and resolve the page size. Both list handlers open
+/// their pagination logic with `parse_page(&req)?`.
+fn parse_page<M: PageRequest + prost::Name>(request: &M) -> Result<Page, Status> {
+    let checksum = request_checksum_of(request)?;
+    let token = PageToken::parse(request, checksum)
+        .map_err(|e| Status::invalid_argument(format!("invalid page_token: {e}")))?;
+    let size = effective_page_size(request.page_size())?;
+    Ok(Page { token, size })
+}
+
 /// Computes [`aip::pagination::request_checksum`] for a concrete request.
 ///
 /// The library's reflective surface is `DynamicMessage`-based (ADR-0001), but the
 /// generated request types carry no reflection. We transcode the request to a
-/// `DynamicMessage` via the [`reflect`] bridge, then checksum it. `full_name` is
-/// the request's fully-qualified message name.
-fn request_checksum_of<M: prost::Message>(full_name: &str, request: &M) -> Result<u32, Status> {
-    let dynamic = reflect::to_dynamic(&reflect::descriptor(full_name), request);
+/// `DynamicMessage` via the [`reflect`] bridge, then checksum it. The request's
+/// fully-qualified message name is derived from its type via [`prost::Name`], so
+/// it can't drift from the actual message.
+fn request_checksum_of<M: prost::Name>(request: &M) -> Result<u32, Status> {
+    let dynamic = reflect::to_dynamic(&reflect::descriptor(&M::full_name()), request);
     aip::pagination::request_checksum(&dynamic)
         .map_err(|e| Status::internal(format!("compute request checksum: {e}")))
 }
 
-/// Resolves the effective page size from a request's `page_size`, applying the
-/// AIP-158 default (when unset or non-positive) and the [`MAX_PAGE_SIZE`] cap.
-fn effective_page_size(requested: i32) -> usize {
-    if requested <= 0 {
-        DEFAULT_PAGE_SIZE
-    } else {
-        (requested as usize).min(MAX_PAGE_SIZE)
+/// Resolves the effective page size from a request's `page_size` per AIP-158: a
+/// negative value is rejected with `INVALID_ARGUMENT`, zero/unset falls back to
+/// [`DEFAULT_PAGE_SIZE`], and a positive value is capped at [`MAX_PAGE_SIZE`] (the
+/// server may return fewer results than the client requested).
+fn effective_page_size(requested: i32) -> Result<usize, Status> {
+    match requested.cmp(&0) {
+        Ordering::Less => Err(Status::invalid_argument("page_size must not be negative")),
+        Ordering::Equal => Ok(DEFAULT_PAGE_SIZE),
+        Ordering::Greater => Ok((requested as usize).min(MAX_PAGE_SIZE)),
     }
 }
 
@@ -654,6 +674,62 @@ mod tests {
             }))
             .await
             .expect_err("changing order_by mid-pagination invalidates the token");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn effective_page_size_applies_aip158_rules() {
+        // AIP-158: a negative `page_size` is rejected, zero/unset falls back to
+        // the default, a positive value passes through, and anything above the
+        // cap is clamped to the max.
+        assert_eq!(
+            effective_page_size(-1)
+                .expect_err("negative is rejected")
+                .code(),
+            tonic::Code::InvalidArgument,
+        );
+        assert_eq!(
+            effective_page_size(0).expect("zero is the default"),
+            DEFAULT_PAGE_SIZE
+        );
+        assert_eq!(
+            effective_page_size(10).expect("positive passes through"),
+            10
+        );
+        assert_eq!(
+            effective_page_size(i32::MAX).expect("over-max is clamped"),
+            MAX_PAGE_SIZE,
+        );
+    }
+
+    #[tokio::test]
+    async fn list_sites_rejects_negative_page_size() {
+        // A negative `page_size` is InvalidArgument (AIP-158), not a silent
+        // fall-back to the default page.
+        let server = FreightServer::new();
+        let status = server
+            .list_sites(Request::new(ListSitesRequest {
+                parent: PARENT.to_owned(),
+                page_size: -1,
+                ..Default::default()
+            }))
+            .await
+            .expect_err("negative page_size is rejected");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn list_shippers_rejects_negative_page_size() {
+        // The shared `parse_page` preamble rejects a negative `page_size` for
+        // `ListShippers` too — independent of whether any shippers exist.
+        let server = FreightServer::new();
+        let status = server
+            .list_shippers(Request::new(ListShippersRequest {
+                page_size: -1,
+                ..Default::default()
+            }))
+            .await
+            .expect_err("negative page_size is rejected");
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
     }
 
