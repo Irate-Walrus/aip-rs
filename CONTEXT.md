@@ -135,6 +135,36 @@ A name **Declared** as filterable, paired with a **Type**.
 The `:` operator in a **Filter**, testing presence/membership (e.g. a key in a
 map, a value in a list).
 
+### SQL adapter
+
+The optional `aip-sql` crate (ADR-0005 / ADR-0008): turns a primitive's native
+AST into parameterized SQL. Not part of the database-agnostic core.
+
+**Predicate**:
+A composable, parameterized boolean SQL fragment — the **Transpiled** form of a
+**Filter**. Its logical structure (`AND`/`OR`/`NOT`) is portable; its leaves are
+spelled by a **Dialect**. Owns precedence and placeholder numbering so a server
+can compose a user's **Filter** with its own predicates safely.
+_Avoid_: where clause, query, condition, expression.
+
+**Dialect**:
+The per-engine renderer that spells a **Predicate**'s leaves and numbers its
+placeholders (`?n` for SQLite, `$n` for Postgres), rendering a **Predicate** to
+`(sql, bind values)` in a single pass. SQLite first, then Postgres.
+_Avoid_: backend, driver, adapter.
+
+**Bind value**:
+An executor-agnostic literal lifted out of a **Filter** and bound as a SQL
+parameter — never spliced into SQL text (parameterize, never interpolate). The
+caller binds it to whatever driver it uses.
+_Avoid_: parameter (ambiguous), argument, literal.
+
+**Transpile**:
+To walk a primitive's native AST — a **Filter**, an **Order by** — into a
+**Predicate**. The `aip-sql` operation; distinct from **Filter** parsing and
+checking, which stay reflection-free and datastore-free.
+_Avoid_: compile, translate, convert.
+
 ### Reflection
 
 **Descriptor**:
@@ -176,6 +206,8 @@ _Avoid_: wrapper/inner, high-level/low-level (say facade/core).
 - An **Order by** is an ordered list of **Ordering fields**.
 - A **Filter** is checked against a **Declaration**; every **Identifier** it
   references must be declared.
+- A **Filter** is **Transpiled** into a **Predicate**; a **Dialect** renders a
+  **Predicate** to SQL text plus an ordered list of **Bind values**.
 - A **Field mask** is interpreted as either an **Update mask** or a **Read mask**.
 - A **Page token** is either an **Offset page token** or a **Cursor page token**.
 - A **Resource name** is an ordered sequence of **Segments** joined by `/`.

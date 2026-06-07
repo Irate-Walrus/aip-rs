@@ -25,6 +25,10 @@ aip-pagination   = { version = "0.1.0", path = "crates/aip-pagination" }
 aip-fieldmask    = { version = "0.1.0", path = "crates/aip-fieldmask" }
 aip-ordering     = { version = "0.1.0", path = "crates/aip-ordering" }
 aip-filtering    = { version = "0.1.0", path = "crates/aip-filtering" }
+# Optional SQL adapter (ADR-0005 / ADR-0008): transpiles the filter AST to a
+# parameterized, dialect-rendered Predicate. Not part of the core; depended on
+# directly by the example's default SQLite storage.
+aip-sql          = { version = "0.1.0", path = "crates/aip-sql" }
 
 # Test-only fixture harness (never published); dev-dependency of the reflective
 # crates. Path-only — no version, since it is unpublishable.
@@ -65,3 +69,7 @@ tonic-types = { version = "0.14", default-features = false }
 tonic-prost       = "0.14"
 tonic-prost-build = "0.14"
 tokio             = { version = "1", features = ["rt-multi-thread", "macros"] }
+# Real SQLite engine for the example's default Site storage, proving an AIP filter
+# travels end-to-end into a database (ADR-0008). `bundled` compiles a vendored
+# SQLite, so no system library is required (a C toolchain is). Example-only.
+rusqlite          = { version = "0.37", features = ["bundled"] }

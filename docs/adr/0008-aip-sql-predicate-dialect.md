@@ -72,3 +72,14 @@ datastore; the consumer binds the **Bind values** to whatever driver it uses.
   `ListSitesRequest` / `ListShipmentsRequest`, so `ListSites` / `ListShipments`
   compose scope + soft-delete + **Filter** → SQLite end-to-end.
 - v1 is transpiler-only; the `aip-sqlx` execution glue is deferred and optional.
+
+## Amendment (#39): the example defaults to in-memory SQLite
+
+The tracer bullet wired the example's Site store as a **default** in-memory
+SQLite database rather than behind a `sqlite` feature, so `cargo run -p
+freight-server` proves the filter → `Predicate` → SQLite path with no opt-in.
+This refines the "feature-gated storage" line above; the trade-off is that
+building the example now needs a C toolchain (rusqlite `bundled`). The core
+crates stay datastore-free (ADR-0005), and the slice still ships only `=`/`AND`
+over scalar columns with parent scoping in the service layer (`scope_to_parent`
+is #43).

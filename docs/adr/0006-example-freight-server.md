@@ -51,3 +51,14 @@ issue lands. The unimplemented methods return gRPC `Unimplemented`.
   An edit to the shared einride sources must be mirrored; the duplication is the
   cost of each crate building standalone. A shared top-level `proto/` is the
   alternative if that drift becomes a burden.
+
+## Amendment (ADR-0008, #39): Site storage is an in-memory SQLite database
+
+The Site store is now a real SQLite engine (`rusqlite`, bundled) opened
+**in-memory**, so an AIP-160 **Filter** travels end-to-end into a database by
+default: `ListSites` **Transpiles** its `filter` to a parameterized **Predicate**
+(`aip-sql`) and runs it inside SQLite. This is the default — `cargo run -p
+freight-server` exercises the path out of the box (no feature flag), at the cost
+of needing a C toolchain to build the bundled SQLite. Shippers keep their
+in-memory map. This narrowly amends "In-memory, database-agnostic storage" above
+for the example only; the core crates remain datastore-free (ADR-0005).

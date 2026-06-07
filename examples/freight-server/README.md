@@ -20,6 +20,11 @@ cargo run -p freight-server
 # freight-server (aip-rs demo) listening on 127.0.0.1:50051
 ```
 
+The Site store is backed by an in-memory SQLite database, so `ListSites`
+filtering works out of the box (`aip-sql` transpiles the `filter` to
+parameterized SQL and runs it there). Building the example therefore needs a C
+toolchain for the bundled SQLite.
+
 ## Try it
 
 With [`grpcurl`](https://github.com/fullstorydev/grpcurl) (no server reflection,
@@ -64,6 +69,12 @@ gc -d '{"parent":"shippers/$ID","orderBy":"display_name desc"}'   127.0.0.1:5005
 # BadRequest naming the offending field. grpcurl prints the details block.
 gc -d '{"parent":"shippers/$ID","orderBy":"bogus_field"}'         127.0.0.1:50051 $SVC/ListSites
 
+# AIP-160 filtering (#39): the filter is type-checked, transpiled to parameterized
+# SQL by `aip-sql`, and run in the in-memory SQLite store, so only matching sites
+# come back. This slice supports `=` and `AND` over the scalar `display_name` /
+# `name` columns.
+gc -d '{"parent":"shippers/$ID","filter":"display_name = \"Alpha\""}' 127.0.0.1:50051 $SVC/ListSites
+
 # A missing required field is rejected the same way (here the server's own
 # presence check, reason FIELD_REQUIRED / domain freight.example.com):
 gc -d '{"shipper":{}}'                                            127.0.0.1:50051 $SVC/CreateShipper
@@ -83,7 +94,7 @@ wired up.
 | `UpdateShipper`   | `fieldmask` (typed `update` over `update_mask`) | #8, #48   | wired       |
 | `DeleteShipper`   | `resourcename` (validate name)               | #4           | wired       |
 | `CreateSite`      | `resourceid` (generate), `resourcename` (parse parent + format) | #5, #3 | wired       |
-| `ListSites`       | `ordering` (parse/validate/sort) + `pagination` (offset + checksum guard) | #9, #10, #6, #7 | wired³ |
+| `ListSites`       | `ordering` (parse/validate/sort) + `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (→ in-memory SQLite) | #9, #10, #6, #7, #11, #39 | wired³ |
 | `GetSite` / `UpdateSite` / `DeleteSite`, `BatchGetSites`, `*Shipment` | the same primitives + `filtering` | #11–#15 | `Unimplemented` |
 
 ³ `ListSites` parses the `order_by` (`aip::ordering::parse_order_by`) and
@@ -94,9 +105,13 @@ allow-list in turn: a test checks every sortable path against the `Site`
 descriptor, so the allow-list can't silently drift from the proto. `ListSites`
 then applies the sort before paginating. Ordering composes with pagination:
 because `order_by` is a non-pagination field, changing it mid-pagination flips
-the request checksum and the now-stale page token is rejected. The remaining
-Site/Shipment handlers await the `filtering` crate (#11–#15) and a `filter`
-request field before they drop `Unimplemented`.
+the request checksum and the now-stale page token is rejected — and `filter` is a
+non-pagination field too, so it is covered by the same guard. `ListSites` also
+applies the AIP-160 `filter`: `aip::filtering` parses and type-checks it, `aip-sql`
+transpiles it to a parameterized `Predicate`, and the in-memory SQLite-backed Site
+store runs it (#39). This tracer-bullet slice handles `=` and `AND` over the
+scalar `display_name` / `name` columns. The remaining Site/Shipment handlers await
+their methods (#11–#15) before they drop `Unimplemented`.
 
 ² Real offset pagination through the `pagination` page-token codec (#6), with the
 request-checksum guard (#7) that rejects a token when a non-pagination field

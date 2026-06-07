@@ -1,0 +1,14 @@
+[package]
+name = "aip-sql"
+description = "Transpile AIP-160 filters into a parameterized, dialect-rendered SQL Predicate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+# The native Filter AST (ADR-0003) is the transpile input — the integration point
+# ADR-0005 named. No datastore dependency: this crate only emits `(sql, binds)`.
+aip-filtering.workspace = true
