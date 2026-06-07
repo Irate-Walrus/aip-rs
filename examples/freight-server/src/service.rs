@@ -656,4 +656,37 @@ mod tests {
             .expect_err("changing order_by mid-pagination invalidates the token");
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
     }
+
+    /// The fully-qualified `Site` message type, for its reflective descriptor.
+    const SITE_TYPE: &str = "einride.example.freight.v1.Site";
+
+    #[test]
+    fn sortable_site_paths_resolve_on_the_site_descriptor() {
+        // `ListSites` gates `order_by` with the curated `validate_for_paths`
+        // allow-list (#9), since the in-memory `sort_sites` only knows those
+        // paths. `validate_for_message` (#10) guards the allow-list itself: every
+        // sortable path must be a real `Site` field, so the allow-list can't
+        // silently drift from the proto.
+        let site = reflect::descriptor(SITE_TYPE);
+        let order_by: OrderBy = SORTABLE_SITE_PATHS
+            .join(",")
+            .parse()
+            .expect("the allow-list is valid order_by syntax");
+        order_by
+            .validate_for_message(&site)
+            .expect("every sortable Site path resolves on the Site descriptor");
+    }
+
+    #[test]
+    fn validate_for_message_rejects_unknown_site_path() {
+        let site = reflect::descriptor(SITE_TYPE);
+        let order_by: OrderBy = "not_a_field".parse().unwrap();
+        let err = order_by
+            .validate_for_message(&site)
+            .expect_err("a path that is not a Site field is rejected");
+        match err {
+            aip::ordering::Error::UnknownField(path) => assert_eq!(path, "not_a_field"),
+            other => panic!("expected UnknownField for `not_a_field`, got {other:?}"),
+        }
+    }
 }

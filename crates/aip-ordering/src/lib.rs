@@ -128,12 +128,27 @@ impl OrderBy {
 
     /// Validates every field path against a message type (via `aip-fieldmask`).
     ///
-    /// # Panics
+    /// Each [`OrderByField`]'s path is checked against `descriptor` by reusing
+    /// [`aip_fieldmask::validate`]: a path may descend through `.`-separated
+    /// [`Subfields`] into nested message fields, and the first path that does not
+    /// resolve yields [`Error::UnknownField`]. An empty [`OrderBy`] is valid
+    /// against any message. Direction (asc/desc) is irrelevant to validation.
     ///
-    /// Always panics — not yet implemented. Tracked in issue #10. Callers receive
-    /// a panic rather than `Err` until that issue lands.
-    pub fn validate_for_message(&self, _descriptor: &MessageDescriptor) -> Result<(), Error> {
-        todo!("convert paths to a FieldMask and call aip_fieldmask::validate")
+    /// [`Subfields`]: OrderByField::sub_fields
+    pub fn validate_for_message(&self, descriptor: &MessageDescriptor) -> Result<(), Error> {
+        let mask = prost_types::FieldMask {
+            paths: self.fields.iter().map(|f| f.path.clone()).collect(),
+        };
+        aip_fieldmask::validate(&mask, descriptor).map_err(|err| match err {
+            aip_fieldmask::Error::UnknownPath { path, .. } => Error::UnknownField(path),
+            // Neither remaining variant is reachable for an `order_by`: the
+            // full-replacement path `*` is rejected by the parser's character
+            // allowlist (so never `WildcardNotAlone`), and `TypeMismatch` is
+            // produced only by `update`, never `validate`. Surfaced defensively
+            // rather than panicking should that ever change.
+            other @ (aip_fieldmask::Error::WildcardNotAlone
+            | aip_fieldmask::Error::TypeMismatch { .. }) => Error::Syntax(other.to_string()),
+        })
     }
 }
 
