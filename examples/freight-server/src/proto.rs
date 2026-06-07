@@ -11,15 +11,16 @@ use std::sync::LazyLock;
 
 use prost_reflect::DescriptorPool;
 
-/// The freight `FileDescriptorSet` emitted by `build.rs`, embedded for runtime
-/// reflection (the reflective `aip::pagination::request_checksum` needs a
-/// descriptor pool).
+/// The freight `FileDescriptorSet` emitted by `build.rs`, embedded so the
+/// generated messages can resolve their own descriptors at runtime (the
+/// [`ReflectMessage`](prost_reflect::ReflectMessage) derives read [`DESCRIPTOR_POOL`]).
 static FILE_DESCRIPTOR_SET: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/freight_descriptor_set.bin"));
 
-/// Shared [`DescriptorPool`] over the freight protos. Used to transcode a
-/// concrete generated request into a `DynamicMessage` for reflective AIP
-/// primitives; cheaply cloned (it is reference-counted internally).
+/// Shared [`DescriptorPool`] over the freight protos. Backs the generated
+/// `ReflectMessage` derives — every Typed message resolves its own
+/// `MessageDescriptor` from this pool (ADR-0009); cheaply cloned (it is
+/// reference-counted internally).
 pub static DESCRIPTOR_POOL: LazyLock<DescriptorPool> = LazyLock::new(|| {
     DescriptorPool::decode(FILE_DESCRIPTOR_SET)
         .expect("the embedded freight descriptor set is well-formed")

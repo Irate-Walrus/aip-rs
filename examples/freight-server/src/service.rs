@@ -23,15 +23,10 @@ use crate::proto::einride::example::freight::v1::{
     ListSitesRequest, ListSitesResponse, Shipment, Shipper, Site, UpdateShipmentRequest,
     UpdateShipperRequest, UpdateSiteRequest,
 };
-use crate::reflect;
 use crate::storage::Storage;
 
 /// The shipper collection ID — the root segment of every shipper resource name.
 const SHIPPERS_COLLECTION: &str = "shippers";
-
-/// The fully-qualified `Shipper` message type, used to look up its reflective
-/// descriptor for field-mask validation and application.
-const SHIPPER_TYPE: &str = "einride.example.freight.v1.Shipper";
 
 /// Default page size when a `ListShippers` request leaves `page_size` unset —
 /// AIP-158 says the server picks an appropriate default.
@@ -156,21 +151,22 @@ impl FreightService for FreightServer {
             .ok_or_else(|| Status::not_found(format!("shipper `{}` not found", incoming.name)))?;
 
         // Apply the AIP-134 update mask via the field-mask primitive. The mask is
-        // validated against the `Shipper` descriptor, then the request's shipper
-        // is merged into the stored one: an empty mask copies the populated
-        // fields, `*` is a full replacement, and a named path absent from the
-        // request clears that field. The crate is reflective, so we transcode the
-        // generated `Shipper`s to `DynamicMessage` and back.
-        let descriptor = reflect::descriptor(SHIPPER_TYPE);
+        // validated against the `Shipper` descriptor — sourced from the type
+        // itself, since a Typed message carries its own (ADR-0009) — then the
+        // request's shipper is merged into the stored one: an empty mask copies
+        // the populated fields, `*` is a full replacement, and a named path absent
+        // from the request clears that field.
         let mask = req.update_mask.unwrap_or_default();
-        // An invalid mask path (or a type mismatch) converts via the crate's
-        // AIP-193 `From<Error> for Status` (#16): the client gets `INVALID_ARGUMENT`
-        // with an `ErrorInfo` and, for a bad path, a `BadRequest` naming it.
-        aip::fieldmask::validate(&mask, &descriptor)?;
-        let mut merged = reflect::to_dynamic(&descriptor, &existing);
-        let incoming = reflect::to_dynamic(&descriptor, &incoming);
-        aip::fieldmask::update(&mask, &mut merged, &incoming)?;
-        let mut shipper: Shipper = reflect::from_dynamic(&merged);
+        // An invalid mask path converts via the crate's AIP-193 `From<Error> for
+        // Status` (#16): the client gets `INVALID_ARGUMENT` with an `ErrorInfo`
+        // and, for a bad path, a `BadRequest` naming it.
+        aip::fieldmask::validate(&mask, &Shipper::default().descriptor())?;
+        // The typed `update` facade applies the mask straight on concrete
+        // `Shipper`s — `existing` is the destination, `incoming` the source — and
+        // transcodes through the dynamic core internally (ADR-0009), so the
+        // handler never builds a `DynamicMessage`.
+        let mut shipper = existing.clone();
+        aip::fieldmask::update(&mask, &mut shipper, &incoming)?;
 
         // The OUTPUT_ONLY timestamps are server-owned: a client mask must not move
         // `create_time`/`delete_time`, and every update stamps `update_time`.
@@ -766,17 +762,15 @@ mod tests {
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
     }
 
-    /// The fully-qualified `Site` message type, for its reflective descriptor.
-    const SITE_TYPE: &str = "einride.example.freight.v1.Site";
-
     #[test]
     fn sortable_site_paths_resolve_on_the_site_descriptor() {
         // `ListSites` gates `order_by` with the curated `validate_for_paths`
         // allow-list (#9), since the in-memory `sort_sites` only knows those
         // paths. `validate_for_message` (#10) guards the allow-list itself: every
         // sortable path must be a real `Site` field, so the allow-list can't
-        // silently drift from the proto.
-        let site = reflect::descriptor(SITE_TYPE);
+        // silently drift from the proto. The `Site` descriptor comes straight off
+        // the Typed message (ADR-0009), no by-name pool lookup.
+        let site = Site::default().descriptor();
         let order_by: OrderBy = SORTABLE_SITE_PATHS
             .join(",")
             .parse()
@@ -788,7 +782,7 @@ mod tests {
 
     #[test]
     fn validate_for_message_rejects_unknown_site_path() {
-        let site = reflect::descriptor(SITE_TYPE);
+        let site = Site::default().descriptor();
         let order_by: OrderBy = "not_a_field".parse().unwrap();
         let err = order_by
             .validate_for_message(&site)
@@ -797,6 +791,92 @@ mod tests {
             aip::ordering::Error::UnknownField(path) => assert_eq!(path, "not_a_field"),
             other => panic!("expected UnknownField for `not_a_field`, got {other:?}"),
         }
+    }
+
+    /// Builds a `prost_types::FieldMask` from the given paths.
+    fn field_mask(paths: &[&str]) -> prost_types::FieldMask {
+        prost_types::FieldMask {
+            paths: paths.iter().map(|p| (*p).to_owned()).collect(),
+        }
+    }
+
+    /// Creates a shipper with the given display name and returns the stored
+    /// resource (with its server-assigned name and timestamps).
+    async fn create_shipper(server: &FreightServer, display_name: &str) -> Shipper {
+        server
+            .create_shipper(Request::new(CreateShipperRequest {
+                shipper: Some(Shipper {
+                    display_name: display_name.to_owned(),
+                    ..Default::default()
+                }),
+            }))
+            .await
+            .expect("create_shipper succeeds")
+            .into_inner()
+    }
+
+    /// Applies an `UpdateShipper` with the given incoming shipper and mask,
+    /// returning the updated resource.
+    async fn update_shipper(server: &FreightServer, shipper: Shipper, mask: &[&str]) -> Shipper {
+        server
+            .update_shipper(Request::new(UpdateShipperRequest {
+                shipper: Some(shipper),
+                update_mask: Some(field_mask(mask)),
+            }))
+            .await
+            .expect("update_shipper succeeds")
+            .into_inner()
+    }
+
+    #[tokio::test]
+    async fn update_shipper_applies_update_mask_via_typed_facade() {
+        // Exercises the typed `update` facade (#48) end-to-end through the handler:
+        // a masked field changes, an unmasked field is untouched, and a masked
+        // field absent from the request is cleared.
+        let server = FreightServer::new();
+        let created = create_shipper(&server, "Acme").await;
+        let name = created.name.clone();
+
+        // (1) A masked field is changed; the OUTPUT_ONLY `create_time` survives the
+        // typed-facade round-trip untouched.
+        let changed = update_shipper(
+            &server,
+            Shipper {
+                name: name.clone(),
+                display_name: "Acme Corp".to_owned(),
+                ..Default::default()
+            },
+            &["display_name"],
+        )
+        .await;
+        assert_eq!(changed.display_name, "Acme Corp");
+        assert_eq!(changed.create_time, created.create_time);
+
+        // (2) An unmasked field is untouched: masking only `delete_time` leaves the
+        // stored `display_name` in place though the request carries a different one.
+        let untouched = update_shipper(
+            &server,
+            Shipper {
+                name: name.clone(),
+                display_name: "Ignored".to_owned(),
+                ..Default::default()
+            },
+            &["delete_time"],
+        )
+        .await;
+        assert_eq!(untouched.display_name, "Acme Corp");
+
+        // (3) A masked path absent from the request clears that field.
+        let cleared = update_shipper(
+            &server,
+            Shipper {
+                name: name.clone(),
+                ..Default::default()
+            },
+            &["display_name"],
+        )
+        .await;
+        assert_eq!(cleared.display_name, "");
     }
 
     #[tokio::test]

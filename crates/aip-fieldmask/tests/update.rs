@@ -1,7 +1,7 @@
 //! Ported from `go.einride.tech/aip/fieldmask`'s `update_test.go`.
 //!
 //! Each case builds `src`/`dst`/`expected` as [`DynamicMessage`] fixtures of
-//! `einride.example.syntax.v1.Message` from JSON, applies [`update`], and
+//! `einride.example.syntax.v1.Message` from JSON, applies [`update_dynamic`], and
 //! compares the result for equality. The JSON encoding makes proto3 presence
 //! explicit: a default-valued scalar (e.g. `bool: false`) is simply absent.
 //!
@@ -9,7 +9,7 @@
 //! (`[111]` is `"bw=="`, `[222]` is `"3g=="`), per the canonical protobuf JSON
 //! mapping.
 
-use aip_fieldmask::{update, Error};
+use aip_fieldmask::{update_dynamic, Error};
 use prost_reflect::DynamicMessage;
 use prost_types::FieldMask;
 
@@ -37,7 +37,7 @@ fn run(cases: &[Case]) {
         };
         let src = msg(case.src);
         let mut dst = msg(case.dst);
-        update(&mask, &mut dst, &src).expect("same-type update succeeds");
+        update_dynamic(&mask, &mut dst, &src).expect("same-type update succeeds");
         assert_eq!(dst, msg(case.expected), "case: {}", case.name);
     }
 }
@@ -47,7 +47,7 @@ fn type_mismatch_returns_error_instead_of_panicking() {
     // aip-go panics on differing src/dst types; we return `Error::TypeMismatch`.
     let mut dst = test_fixtures::from_json("einride.example.freight.v1.Shipper", "{}").unwrap();
     let src = test_fixtures::from_json("einride.example.freight.v1.Site", "{}").unwrap();
-    let err = update(&FieldMask::default(), &mut dst, &src).unwrap_err();
+    let err = update_dynamic(&FieldMask::default(), &mut dst, &src).unwrap_err();
     assert!(
         matches!(err, Error::TypeMismatch { .. }),
         "expected TypeMismatch, got {err:?}"

@@ -27,6 +27,7 @@ dependencies = [
 name = "aip-fieldmask"
 version = "0.1.0"
 dependencies = [
+ "prost",
  "prost-reflect",
  "prost-types",
  "test-fixtures",

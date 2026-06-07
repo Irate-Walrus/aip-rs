@@ -9,6 +9,9 @@ authors.workspace = true
 
 [dependencies]
 thiserror.workspace = true
+# `prost::Message` supplies `encode_to_vec`/`decode`, which the typed `update`
+# facade uses to transcode a message to/from a `DynamicMessage` (ADR-0009).
+prost.workspace = true
 prost-types.workspace = true
 prost-reflect.workspace = true
 tonic = { workspace = true, optional = true }
