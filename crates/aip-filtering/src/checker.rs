@@ -1,10 +1,11 @@
-//! Type-checker for the AIP-160 comparison slice.
+//! Type-checker for the AIP-160 filter grammar.
 //!
-//! Resolves every identifier against the [`Declarations`] allowlist, assigns a
-//! [`Type`] to each node, resolves the comparison operator's overload, and
-//! requires the whole filter to evaluate to a `bool`. Reflection-free: a member
-//! path (`book.author`) is matched against the declared identifier names, so
-//! map/message field typing is left to a later slice.
+//! Assigns a [`Type`] to each node: identifiers (and dotted member chains)
+//! resolve against the [`Declarations`] allowlist, calls resolve a declared
+//! function overload over their argument types, and the whole filter must
+//! evaluate to a `bool`. Reflection-free: a member path (`book.author`) is
+//! matched against the declared identifier names, with map-valued operands the
+//! one structural fallback (`com.google` where `com` is a `map`).
 
 use crate::{Constant, Declarations, Error, Expr, Type};
 
@@ -12,9 +13,7 @@ use crate::{Constant, Declarations, Error, Expr, Type};
 pub(crate) fn check(expr: &Expr, declarations: &Declarations) -> Result<(), Error> {
     let result = type_of(expr, declarations)?;
     if result != Type::Bool {
-        return Err(Error::Type(format!(
-            "filter must evaluate to a bool, but has type {result:?}"
-        )));
+        return Err(Error::Type("non-bool result type".to_string()));
     }
     Ok(())
 }
@@ -24,52 +23,43 @@ fn type_of(expr: &Expr, declarations: &Declarations) -> Result<Type, Error> {
     match expr {
         Expr::Const(constant) => Ok(constant_type(constant)),
         Expr::Ident(name) => lookup(name, declarations),
-        Expr::Select { .. } => {
-            let name = qualified_name(expr)
-                .ok_or_else(|| Error::Type("unsupported field selection".to_string()))?;
-            lookup(&name, declarations)
+        Expr::Select { operand, field } => {
+            // A fully-qualified member chain may be declared as one identifier.
+            if let Some(name) = qualified_name(expr) {
+                if let Some(ty) = declarations.lookup_ident(&name) {
+                    return Ok(ty.clone());
+                }
+            }
+            // Otherwise the operand must be a map, and selection yields its value.
+            match type_of(operand, declarations)? {
+                Type::Map(_, value) => Ok(*value),
+                other => Err(Error::Type(format!(
+                    "cannot select `{field}` on non-map type {other:?}"
+                ))),
+            }
         }
         Expr::Call { function, args } => check_call(function, args, declarations),
     }
 }
 
-/// Type-check a comparison call: both operands are checked, then the operator's
-/// overload is resolved over their types.
+/// Type-check a call: every argument is typed, then the function's overload set
+/// is searched for one whose parameters match the argument types exactly.
 fn check_call(function: &str, args: &[Expr], declarations: &Declarations) -> Result<Type, Error> {
-    let [lhs, rhs] = args else {
-        return Err(Error::Type(format!(
-            "comparison `{function}` expects 2 arguments, got {}",
-            args.len()
-        )));
-    };
-    let left = type_of(lhs, declarations)?;
-    let right = type_of(rhs, declarations)?;
-    resolve_comparison(function, &left, &right)
-}
-
-/// Resolve a comparison operator over its operand types, yielding `bool` or a
-/// type error. The overloads mirror `aip-go`'s standard primitives; timestamp,
-/// duration, and enum overloads arrive with their later slices.
-fn resolve_comparison(function: &str, left: &Type, right: &Type) -> Result<Type, Error> {
-    use Type::{Bool, Double, Int, String};
-    let matched = match function {
-        "=" | "!=" => matches!(
-            (left, right),
-            (Bool, Bool) | (Int, Int) | (Double, Double) | (Double, Int) | (String, String)
-        ),
-        "<" | "<=" | ">" | ">=" => matches!(
-            (left, right),
-            (Int, Int) | (Double, Double) | (Double, Int) | (String, String)
-        ),
-        _ => return Err(Error::Type(format!("undeclared function `{function}`"))),
-    };
-    if matched {
-        Ok(Bool)
-    } else {
-        Err(Error::Type(format!(
-            "no overload for `{function}` with ({left:?}, {right:?})"
-        )))
+    let arg_types = args
+        .iter()
+        .map(|arg| type_of(arg, declarations))
+        .collect::<Result<Vec<_>, _>>()?;
+    let overloads = declarations
+        .lookup_function(function)
+        .ok_or_else(|| Error::Type(format!("undeclared function '{function}'")))?;
+    for overload in overloads {
+        if overload.params == arg_types {
+            return Ok(overload.result.clone());
+        }
     }
+    Err(Error::Type(format!(
+        "no matching overload found for calling '{function}' with {arg_types:?}"
+    )))
 }
 
 /// Look an identifier up in the allowlist.

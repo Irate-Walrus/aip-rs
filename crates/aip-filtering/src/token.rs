@@ -57,8 +57,8 @@ impl TokenType {
     /// The AST function name a comparison operator maps to (`=`, `!=`, …), or
     /// `None` if this token is not a comparison operator.
     ///
-    /// The `:` (has) operator is also a comparator in the full grammar but is
-    /// out of scope for the comparison slice, so it deliberately yields `None`.
+    /// The `:` (has) operator is also a comparator in the full grammar but lands
+    /// with the has-operator slice, so it deliberately yields `None` here.
     pub(crate) fn comparison_function(self) -> Option<&'static str> {
         Some(match self {
             Self::Equals => "=",
@@ -71,9 +71,20 @@ impl TokenType {
         })
     }
 
+    /// True if the token is a comparator the parser accepts in a restriction.
+    pub(crate) fn is_comparator(self) -> bool {
+        self.comparison_function().is_some()
+    }
+
     /// True if the token can begin a member: a `TEXT` or a `STRING`.
     pub(crate) fn is_value(self) -> bool {
         matches!(self, Self::Text | Self::String)
+    }
+
+    /// True if the token can name a function: a `TEXT` or a keyword (a quoted
+    /// `STRING` cannot — unlike a member's value).
+    pub(crate) fn is_name(self) -> bool {
+        matches!(self, Self::Text) || self.is_keyword()
     }
 
     /// True if the token can name a field after a `.`: a value, a keyword, or a
