@@ -33,6 +33,13 @@ pub use aip_fieldbehavior as fieldbehavior;
 #[cfg(feature = "validation")]
 pub use aip_validation as validation;
 
+/// Resource-annotation reflection (issue #61) — default-on via the `reflect`
+/// feature: parse a [`ResourceType`](aip_reflect::ResourceType), iterate the
+/// `google.api.resource` descriptors in a file/package, and validate a message's
+/// `google.api.resource_reference` fields.
+#[cfg(feature = "reflect")]
+pub use aip_reflect as reflect;
+
 /// IAM primitives (ADR-0010) — opt-in via the non-default `iam` feature: parse and
 /// validate the `google.iam.v1` identity vocabulary (Member / Role / Permission).
 #[cfg(feature = "iam")]
