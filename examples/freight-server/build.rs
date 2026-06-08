@@ -20,11 +20,17 @@
 //! The example vendors its own copy of the freight protos and their googleapis
 //! imports under `proto/`, so it builds standalone without reaching into another
 //! crate's source.
+//!
+//! # Why `encode_file_descriptor_set` for the runtime binary
+//!
+//! `Compiler::file_descriptor_set()` returns a `prost_types::FileDescriptorSet`,
+//! which loses extension-field bytes (e.g. `google.api.field_behavior = 1052`)
+//! because prost-generated structs discard unknown/extension fields. The runtime
+//! `DescriptorPool` must see those bytes so that `field.options()` returns the
+//! annotations. `encode_file_descriptor_set()` encodes from the internal
+//! prost_reflect pool and preserves all extension bytes.
 
 use std::{env, path::PathBuf};
-
-use prost::Message as _;
-use prost_reflect::DescriptorPool;
 
 /// The freight `.proto` files to serve, relative to this crate's `proto/` root.
 /// Their imports (sibling freight protos, vendored `google/api` + `google/type`,
@@ -43,20 +49,27 @@ fn main() {
     // This crate's vendored proto tree (freight + googleapis imports).
     let proto_root = manifest_dir.join("proto");
 
-    let file_descriptor_set = protox::compile(
-        ROOT_PROTOS.iter().map(|p| proto_root.join(p)),
-        [&proto_root],
-    )
-    .expect("protox failed to compile the freight protos");
+    let mut compiler = protox::Compiler::new([&proto_root])
+        .expect("protox failed to initialise with the proto include path");
+    compiler
+        .include_imports(true)
+        .include_source_info(true)
+        .open_files(ROOT_PROTOS.iter().map(|p| proto_root.join(p)))
+        .expect("protox failed to compile the freight protos");
+
+    // Encode from the internal pool so extension bytes (e.g. field_behavior, tag
+    // 1052) are preserved in the runtime descriptor set.
+    let raw_bytes = compiler.encode_file_descriptor_set();
 
     // Persist the descriptor set so `proto.rs` can build a runtime reflection
-    // pool. Written before `compile_fds_with_config` consumes the set.
+    // pool with full extension support.
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is set by cargo"));
-    std::fs::write(
-        out_dir.join("freight_descriptor_set.bin"),
-        file_descriptor_set.encode_to_vec(),
-    )
-    .expect("write the freight descriptor set for runtime reflection");
+    std::fs::write(out_dir.join("freight_descriptor_set.bin"), &raw_bytes)
+        .expect("write the freight descriptor set for runtime reflection");
+
+    // The prost_types version (loses extensions) is only needed for code
+    // generation; tonic_prost_build doesn't need to read extension values.
+    let file_descriptor_set = compiler.file_descriptor_set();
 
     let mut config = tonic_prost_build::Config::new();
 
@@ -67,8 +80,10 @@ fn main() {
     // module docs). Messages that map to external types (the `prost_types`
     // well-known types) or to files we never mount have no generated type, so the
     // attribute is simply ignored — exactly as in `prost-reflect-build`.
-    let pool = DescriptorPool::from_file_descriptor_set(file_descriptor_set.clone())
-        .expect("the protox freight descriptor set forms a valid pool");
+    //
+    // Use the Compiler's internal DescriptorPool (has extension bytes) for
+    // message enumeration — both produce the same set of names.
+    let pool = compiler.descriptor_pool();
     for message in pool.all_messages() {
         let full_name = message.full_name();
         config

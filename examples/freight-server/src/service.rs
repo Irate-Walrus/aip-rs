@@ -9,6 +9,7 @@
 use std::cmp::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use aip::fieldbehavior::FieldBehavior;
 use aip::ordering::OrderByRequest;
 use aip::pagination::{PageRequest, PageToken};
 use prost_reflect::{Kind, ReflectMessage};
@@ -113,9 +114,13 @@ impl FreightService for FreightServer {
             .into_inner()
             .shipper
             .ok_or_else(|| Status::invalid_argument("shipper is required"))?;
-        if shipper.display_name.is_empty() {
-            return Err(required_field("shipper.display_name"));
-        }
+        // Ignore any OUTPUT_ONLY or IMMUTABLE values the client sent (AIP-161).
+        aip::fieldbehavior::clear_fields(
+            &mut shipper,
+            &[FieldBehavior::OutputOnly, FieldBehavior::Immutable],
+        );
+        // Validate that all REQUIRED fields are populated (AIP-203).
+        aip::fieldbehavior::validate_required(&shipper).map_err(Status::from)?;
         // Mint a system-assigned resource ID (a UUIDv4) per AIP-148.
         // `CreateShipperRequest` has no `shipper_id` field, so there is no
         // user-supplied id to validate here; `validate_user_settable` guards
@@ -167,11 +172,17 @@ impl FreightService for FreightServer {
         let mut shipper = existing.clone();
         aip::fieldmask::update(&mask, &mut shipper, &incoming)?;
 
-        // The OUTPUT_ONLY timestamps are server-owned: a client mask must not move
-        // `create_time`/`delete_time`, and every update stamps `update_time`.
-        shipper.create_time = existing.create_time;
+        // An update must not blank a REQUIRED field it names (AIP-203). Validate
+        // only the REQUIRED fields whose exact path is in the mask: an empty mask
+        // is a no-op (nothing on the wire can blank a field), and a field the mask
+        // does not name keeps its stored value.
+        aip::fieldbehavior::validate_required_with_mask(&shipper, &mask).map_err(Status::from)?;
+
+        // Restore all OUTPUT_ONLY fields from the stored record — the client must
+        // not move server-owned timestamps (AIP-161 / AIP-203).
+        aip::fieldbehavior::copy_fields(&mut shipper, &existing, &[FieldBehavior::OutputOnly]);
+        // Stamp the server-controlled update_time regardless of what was copied.
         shipper.update_time = Some(now());
-        shipper.delete_time = existing.delete_time;
         self.storage.put_shipper(shipper.clone());
         Ok(Response::new(shipper))
     }
@@ -1095,8 +1106,7 @@ mod tests {
     #[tokio::test]
     async fn update_shipper_applies_update_mask_via_typed_facade() {
         // Exercises the typed `update` facade (#48) end-to-end through the handler:
-        // a masked field changes, an unmasked field is untouched, and a masked
-        // field absent from the request is cleared.
+        // a masked field changes and an unmasked field is left untouched.
         let server = FreightServer::new();
         let created = create_shipper(&server, "Acme").await;
         let name = created.name.clone();
@@ -1129,27 +1139,59 @@ mod tests {
         )
         .await;
         assert_eq!(untouched.display_name, "Acme Corp");
+    }
 
-        // (3) A masked path absent from the request clears that field.
-        let cleared = update_shipper(
-            &server,
-            Shipper {
-                name: name.clone(),
-                ..Default::default()
-            },
-            &["display_name"],
-        )
-        .await;
-        assert_eq!(cleared.display_name, "");
+    #[tokio::test]
+    async fn update_shipper_rejects_blanking_required_display_name() {
+        use tonic_types::StatusExt as _;
+
+        // AIP-203: an update whose mask names `display_name` but whose request
+        // carries no value would blank a REQUIRED field. The `fieldbehavior`
+        // primitive rejects it with INVALID_ARGUMENT + AIP-193 details, and the
+        // stored resource is left untouched.
+        let server = FreightServer::new();
+        let created = create_shipper(&server, "Acme").await;
+        let name = created.name.clone();
+
+        let status = server
+            .update_shipper(Request::new(UpdateShipperRequest {
+                shipper: Some(Shipper {
+                    name: name.clone(),
+                    ..Default::default()
+                }),
+                update_mask: Some(field_mask(&["display_name"])),
+            }))
+            .await
+            .expect_err("blanking a required display_name is rejected");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+        let bad = status
+            .get_details_bad_request()
+            .expect("a BadRequest field violation is attached");
+        assert_eq!(bad.field_violations[0].field, "display_name");
+
+        let info = status
+            .get_details_error_info()
+            .expect("an ErrorInfo is attached (AIP-193 MUST)");
+        assert_eq!(info.reason, "FIELD_REQUIRED");
+        assert_eq!(info.domain, "aip-rs");
+
+        // The rejected update never reached storage: the stored display_name stands.
+        let stored = server
+            .get_shipper(Request::new(GetShipperRequest { name }))
+            .await
+            .expect("get_shipper succeeds")
+            .into_inner();
+        assert_eq!(stored.display_name, "Acme");
     }
 
     #[tokio::test]
     async fn create_shipper_missing_display_name_carries_aip193_details() {
         use tonic_types::StatusExt as _;
 
-        // The server's own presence check (no aip-rs primitive covers it) still
-        // emits AIP-193 details: a `BadRequest` naming the field plus an
-        // `ErrorInfo`.
+        // The fieldbehavior primitive validates REQUIRED fields and emits AIP-193
+        // details: a `BadRequest` naming the field path and an `ErrorInfo` with
+        // domain `"aip-rs"` (the primitive's own domain, not the service domain).
         let server = FreightServer::new();
         let status = server
             .create_shipper(Request::new(CreateShipperRequest {
@@ -1163,13 +1205,13 @@ mod tests {
             .get_details_bad_request()
             .expect("a BadRequest field violation is attached");
         assert_eq!(bad.field_violations.len(), 1);
-        assert_eq!(bad.field_violations[0].field, "shipper.display_name");
+        assert_eq!(bad.field_violations[0].field, "display_name");
 
         let info = status
             .get_details_error_info()
             .expect("an ErrorInfo is attached (AIP-193 MUST)");
         assert_eq!(info.reason, "FIELD_REQUIRED");
-        assert_eq!(info.domain, SERVICE_DOMAIN);
+        assert_eq!(info.domain, "aip-rs");
     }
 
     #[tokio::test]

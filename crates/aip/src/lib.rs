@@ -25,6 +25,9 @@ pub use aip_ordering as ordering;
 #[cfg(feature = "filtering")]
 pub use aip_filtering as filtering;
 
+#[cfg(feature = "fieldbehavior")]
+pub use aip_fieldbehavior as fieldbehavior;
+
 /// IAM primitives (ADR-0010) — opt-in via the non-default `iam` feature: parse and
 /// validate the `google.iam.v1` identity vocabulary (Member / Role / Permission).
 #[cfg(feature = "iam")]
