@@ -118,13 +118,15 @@ pub enum HasTest {
 /// *spelled* by a [`Dialect`](crate::Dialect), which numbers the placeholders.
 /// Build one with [`transpile_filter`](crate::transpile_filter) or the
 /// [`all`](Predicate::all) / [`any`](Predicate::any) / [`not`](Predicate::not) /
-/// [`eq`](Predicate::eq) constructors, then render it with
-/// [`Dialect::render`](crate::Dialect::render).
+/// [`eq`](Predicate::eq) / [`is_null`](Predicate::is_null) /
+/// [`scope_to_parent`](Predicate::scope_to_parent) / [`raw`](Predicate::raw)
+/// constructors, then render it with [`Dialect::render`](crate::Dialect::render).
 ///
 /// Centralizing precedence and placeholder numbering here is the whole point: a
-/// server can compose a user's filter with its own predicates without the
-/// bare-string footguns (`a OR b` silently re-binding as `a OR (b AND …)`, or two
-/// independently-numbered `?1` parameters colliding). See ADR-0008.
+/// server can compose a user's filter with its own predicates — parent scoping,
+/// tenancy, soft delete — without the bare-string footguns (`a OR b` silently
+/// re-binding as `a OR (b AND …)`, or two independently-numbered `?1` parameters
+/// colliding). See ADR-0008.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Predicate {
     /// Conjunction (`a AND b AND …`). An empty `All` is always true.
@@ -152,6 +154,27 @@ pub enum Predicate {
         /// Which presence/membership test to apply, plus its bound value.
         test: HasTest,
     },
+    /// A `column IS NULL` test, e.g. the soft-delete predicate `delete_time IS
+    /// NULL` a server composes alongside a user filter.
+    IsNull(String),
+    /// An AIP parent scope (`column LIKE ?n ESCAPE '\'`): a resource-name prefix
+    /// match keeping the rows under a parent. The bound pattern escapes the
+    /// parent's `LIKE` metacharacters (`%` / `_` / `\`) and appends the child
+    /// wildcard, so a parent containing `%` or `_` matches literally and is never
+    /// interpolated. Built with [`scope_to_parent`](Predicate::scope_to_parent).
+    Scope {
+        /// The resource-name column to scope (e.g. `name`).
+        column: String,
+        /// The parent resource name whose children to keep — escaped and bound at
+        /// render time, never spliced into SQL text.
+        parent: String,
+    },
+    /// A verbatim boolean SQL fragment — the escape hatch for a server predicate
+    /// the typed builders don't cover. It carries no bind values (so it never
+    /// perturbs the shared placeholder numbering) and is rendered as-is; because
+    /// its internal structure is opaque, it is always parenthesized when composed
+    /// under a combinator. Build with [`raw`](Predicate::raw).
+    Raw(String),
 }
 
 impl Predicate {
@@ -182,17 +205,53 @@ impl Predicate {
         }
     }
 
+    /// A `column IS NULL` test — e.g. the soft-delete predicate
+    /// `is_null("delete_time")`.
+    pub fn is_null(column: impl Into<String>) -> Self {
+        Predicate::IsNull(column.into())
+    }
+
+    /// An AIP parent scope on a resource-name `column`: a `LIKE` prefix keeping
+    /// the rows whose name lies under `parent`. The parent's `LIKE`
+    /// metacharacters are escaped and the whole pattern is bound, so a parent
+    /// containing `%` or `_` matches literally and is never interpolated
+    /// (ADR-0008).
+    pub fn scope_to_parent(column: impl Into<String>, parent: impl Into<String>) -> Self {
+        Predicate::Scope {
+            column: column.into(),
+            parent: parent.into(),
+        }
+    }
+
+    /// A verbatim boolean SQL fragment — the escape hatch for a server predicate
+    /// the typed builders don't cover. `sql` must carry no bind placeholders (it
+    /// does not participate in the shared numbering); anything needing a bound
+    /// value belongs in [`eq`](Predicate::eq) / [`is_null`](Predicate::is_null) /
+    /// [`scope_to_parent`](Predicate::scope_to_parent) or a composition of them.
+    pub fn raw(sql: impl Into<String>) -> Self {
+        Predicate::Raw(sql.into())
+    }
+
     /// Binding tightness, used by the renderer to parenthesize a child only when
     /// it binds looser than its parent. Higher binds tighter, mirroring SQL:
-    /// a leaf (comparison or has test) > `NOT` > `AND` > `OR`.
+    /// a leaf (comparison, has test, `IS NULL`, scope) > `NOT` > `AND` > `OR` >
+    /// a raw fragment.
     pub(crate) fn precedence(&self) -> u8 {
         match self {
             // A has leaf renders as a self-contained atom (`LIKE …`, `EXISTS
-            // (…)`, `… IS NOT NULL`), so it binds as tight as a comparison.
-            Predicate::Compare { .. } | Predicate::Has { .. } => 4,
+            // (…)`, `… IS NOT NULL`), so it binds as tight as a comparison; an
+            // `IS NULL` test and a `LIKE`-prefix scope are atoms too.
+            Predicate::Compare { .. }
+            | Predicate::Has { .. }
+            | Predicate::IsNull(_)
+            | Predicate::Scope { .. } => 4,
             Predicate::Not(_) => 3,
             Predicate::All(_) => 2,
             Predicate::Any(_) => 1,
+            // A raw fragment's internal structure is opaque, so it is treated as
+            // the loosest-binding node: it is always parenthesized when composed
+            // under any combinator, never silently re-associating.
+            Predicate::Raw(_) => 0,
         }
     }
 }

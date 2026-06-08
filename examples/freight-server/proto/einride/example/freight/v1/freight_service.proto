@@ -379,6 +379,12 @@ message ListShipmentsRequest {
   // [ListShipmentsResponse.next_page_token][einride.example.freight.v1.ListShipmentsResponse.next_page_token]
   // returned from the previous call to `ListShipments` method.
   string page_token = 3;
+
+  // An AIP-160 filter expression over the shipments' fields, e.g.
+  // `origin_site = "shippers/acme/sites/1"`. An unset value applies no filter.
+  // The demo composes it with the server's own parent-scope and soft-delete
+  // predicates and runs it against SQLite. See: https://google.aip.dev/160.
+  string filter = 4;
 }
 
 // Response message for FreightService.ListShipments.

@@ -94,9 +94,36 @@ gc -d '{"parent":"shippers/$ID","filter":"display_name:lph"}'     127.0.0.1:5005
 gc -d '{"parent":"shippers/$ID","filter":"annotations:owner"}'    127.0.0.1:50051 $SVC/ListSites
 gc -d '{"parent":"shippers/$ID","filter":"tags:refrigerated"}'    127.0.0.1:50051 $SVC/ListSites
 
+# Server-side predicate composition (#43): the user `filter` above is never run
+# alone. `aip::sql::Predicate` folds it together with the server's own predicates
+# — an AIP parent scope (`name LIKE 'shippers/$ID/%'`, the parent escaped + bound)
+# and a soft-delete (`delete_time IS NULL`) — into one fragment that owns
+# precedence and placeholder numbering, so a user `a OR b` can't re-associate
+# against the server's `AND`s. The scope runs in the SQL `WHERE`, so a site under
+# another shipper never leaks into this listing.
+gc -d '{"parent":"shippers/$ID","filter":"display_name = \"Alpha\" OR display_name = \"Bravo\""}' 127.0.0.1:50051 $SVC/ListSites
+
 # A missing required field is rejected the same way (here the server's own
 # presence check, reason FIELD_REQUIRED / domain freight.example.com):
 gc -d '{"shipper":{}}'                                            127.0.0.1:50051 $SVC/CreateShipper
+```
+
+Shipments live under a shipper too. `CreateShipment` mints a system-assigned id;
+`ListShipments` runs the **same** server-side composition as `ListSites` (#43) —
+parent scope + soft-delete + the user `filter` — against its own SQLite store, but
+carries no `order_by`, so results come back in resource-name order:
+
+```sh
+# Seed a couple of shipments between sites, each carrying `annotations` (a map).
+gc -d '{"parent":"shippers/$ID","shipment":{"origin_site":"shippers/$ID/sites/a","destination_site":"shippers/$ID/sites/b","annotations":{"priority":"high"}}}' 127.0.0.1:50051 $SVC/CreateShipment
+gc -d '{"parent":"shippers/$ID","shipment":{"origin_site":"shippers/$ID/sites/b","destination_site":"shippers/$ID/sites/a","annotations":{"region":"west"}}}'   127.0.0.1:50051 $SVC/CreateShipment
+
+# List all in-scope shipments, then filter: a `=` on a scalar column, and the has
+# operator over the `annotations` map (via SQLite `json_each`). The parent scope
+# and soft-delete are composed in automatically.
+gc -d '{"parent":"shippers/$ID"}'                                                            127.0.0.1:50051 $SVC/ListShipments
+gc -d '{"parent":"shippers/$ID","filter":"origin_site = \"shippers/$ID/sites/a\""}'          127.0.0.1:50051 $SVC/ListShipments
+gc -d '{"parent":"shippers/$ID","filter":"annotations:priority"}'                            127.0.0.1:50051 $SVC/ListShipments
 ```
 
 ## What it exercises (and where it's headed)
@@ -113,8 +140,10 @@ wired up.
 | `UpdateShipper`   | `fieldmask` (typed `update` over `update_mask`) | #8, #48   | wired       |
 | `DeleteShipper`   | `resourcename` (validate name)               | #4           | wired       |
 | `CreateSite`      | `resourceid` (generate), `resourcename` (parse parent + format) | #5, #3 | wired       |
-| `ListSites`       | `ordering` (parse/validate) + `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (filter + `ORDER BY`/`LIMIT`/`OFFSET` → in-memory SQLite) | #9, #10, #6, #7, #11, #39, #40, #41, #42 | wired³ |
-| `GetSite` / `UpdateSite` / `DeleteSite`, `BatchGetSites`, `*Shipment` | the same primitives + `filtering` | #11–#15 | `Unimplemented` |
+| `ListSites`       | `ordering` (parse/validate) + `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (filter + server-composed scope/soft-delete + `ORDER BY`/`LIMIT`/`OFFSET` → in-memory SQLite) | #9, #10, #6, #7, #11, #39, #40, #41, #42, #43 | wired³ |
+| `CreateShipment`  | `resourceid` (generate), `resourcename` (parse parent + format) | #5, #3 | wired⁴ |
+| `ListShipments`   | `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (filter + server-composed scope/soft-delete → in-memory SQLite) | #6, #7, #43 | wired⁴ |
+| `GetSite` / `UpdateSite` / `DeleteSite`, `BatchGetSites`, `GetShipment` / `UpdateShipment` / `DeleteShipment` | the same primitives | #11–#15 | `Unimplemented` |
 
 ³ `ListSites` parses the `order_by` (`aip::ordering::parse_order_by`) and
 validates it against an allow-list of sortable Site paths (`validate_for_paths`,
@@ -140,9 +169,26 @@ as RFC3339 text), the nested numeric `lat_lng.latitude`, the reflective enum
 `state` (bound as its value name), and the `annotations` map / `tags` list. The
 has operator `:` does substring on a string, key / element presence in the map /
 list (via SQLite `json_each`), and presence on a timestamp (`create_time:*`).
-Parent scoping is still an in-memory post-filter (`scope_to_parent` is #43). The
-remaining Site/Shipment handlers await their methods (#11–#15) before they drop
-`Unimplemented`.
+**Parent scoping now runs in the SQL `WHERE` too** (#43): rather than transpiling
+the user filter alone, `ListSites` composes it through `aip::sql::Predicate` with
+the server's own predicates — `Predicate::scope_to_parent("name", parent)` (a
+`LIKE` prefix with the parent escaped + bound) and the soft-delete
+`Predicate::is_null("delete_time")` — into one fragment that owns precedence and a
+single coherent placeholder numbering. So a user `a OR b` is parenthesized under
+the server's `AND`s instead of silently re-associating, and the page boundaries are
+computed over exactly the in-scope, non-deleted rows (no in-memory post-filter that
+could under-fill a page). The remaining Site/Shipment handlers await their methods
+(#11–#15) before they drop `Unimplemented`.
+
+⁴ `ListShipments` runs the **same** server-side composition as `ListSites` (#43)
+against its own in-memory SQLite store: `aip::filtering` parses + type-checks the
+AIP-160 `filter`, `aip::sql` transpiles it, and `scoped_predicate` folds it with
+the parent scope and soft-delete through one `Predicate`. It carries no `order_by`,
+so it orders by resource name for a total, stable page order, and the `filter` is a
+non-pagination field, so the request-checksum guard (#7) covers it. `CreateShipment`
+mirrors `CreateSite` — a system-assigned id (#5) formatted into the shipment
+pattern (#3) — so there is something to list and filter; the other shipment
+standard methods stay `Unimplemented` until their issues land.
 
 ² Real offset pagination through the `pagination` page-token codec (#6), with the
 request-checksum guard (#7) that rejects a token when a non-pagination field
