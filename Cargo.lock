@@ -21,6 +21,7 @@ dependencies = [
  "aip-iam",
  "aip-ordering",
  "aip-pagination",
+ "aip-reflect",
  "aip-resourceid",
  "aip-resourcename",
  "aip-sql",
@@ -103,6 +104,18 @@ dependencies = [
  "prost",
  "prost-reflect",
  "serde",
+ "test-fixtures",
+ "thiserror",
+ "tonic",
+ "tonic-types",
+]
+
+[[package]]
+name = "aip-reflect"
+version = "0.1.0"
+dependencies = [
+ "aip-resourcename",
+ "prost-reflect",
  "test-fixtures",
  "thiserror",
  "tonic",

@@ -32,6 +32,10 @@ aip-fieldbehavior = { version = "0.1.0", path = "crates/aip-fieldbehavior" }
 # Field-violation accumulator (issue #60): collects per-field failures into one
 # AIP-193 error. Default-on via the umbrella's `validation` feature.
 aip-validation   = { version = "0.1.0", path = "crates/aip-validation" }
+# Resource-annotation reflection (issue #61): ResourceType parsing, google.api
+# resource descriptor iteration, and resource_reference validation. Default-on
+# via the umbrella's `reflect` feature.
+aip-reflect      = { version = "0.1.0", path = "crates/aip-reflect" }
 # Optional SQL adapter (ADR-0005 / ADR-0008): transpiles the filter AST to a
 # parameterized, dialect-rendered Predicate. Not part of the core; depended on
 # directly by the example's default SQLite storage.

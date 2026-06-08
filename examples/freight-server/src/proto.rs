@@ -58,7 +58,9 @@ pub mod google {
 mod tests {
     use prost_reflect::ReflectMessage;
 
-    use super::einride::example::freight::v1::{ListShippersRequest, Shipper};
+    use super::einride::example::freight::v1::{
+        BatchGetSitesRequest, ListShippersRequest, Shipment, Shipper,
+    };
 
     /// ADR-0009 smoke check: a generated freight type is a **Typed message** — it
     /// resolves its own `MessageDescriptor` straight off the value, with no
@@ -72,6 +74,45 @@ mod tests {
         assert_eq!(
             ListShippersRequest::default().descriptor().full_name(),
             "einride.example.freight.v1.ListShippersRequest"
+        );
+    }
+
+    /// aip #61: the freight protos' `google.api.resource_reference` annotations
+    /// resolve against `aip::reflect::validate_resource_references`, run over the
+    /// real generated **Typed messages** (the typed facade, ADR-0009). A
+    /// well-formed reference passes; a value that names the wrong resource type
+    /// is rejected — proving the primitive bites against the example protos.
+    #[test]
+    fn freight_resource_references_resolve() {
+        // `origin_site`/`destination_site` reference Site; both are valid Sites.
+        let shipment = Shipment {
+            origin_site: "shippers/1/sites/1".to_owned(),
+            destination_site: "shippers/1/sites/2".to_owned(),
+            ..Default::default()
+        };
+        aip::reflect::validate_resource_references(&shipment)
+            .expect("both sites are valid Site references");
+
+        // Repeated `names` reference Site, `parent` references Shipper.
+        let batch = BatchGetSitesRequest {
+            parent: "shippers/1".to_owned(),
+            names: vec![
+                "shippers/1/sites/1".to_owned(),
+                "shippers/1/sites/2".to_owned(),
+            ],
+        };
+        aip::reflect::validate_resource_references(&batch)
+            .expect("parent is a Shipper and every name is a Site");
+
+        // `shippers/1` is a Shipper name, not a Site — `origin_site` must reject it.
+        let bad = Shipment {
+            origin_site: "shippers/1".to_owned(),
+            destination_site: "shippers/1/sites/2".to_owned(),
+            ..Default::default()
+        };
+        assert!(
+            aip::reflect::validate_resource_references(&bad).is_err(),
+            "origin_site does not name a Site",
         );
     }
 }

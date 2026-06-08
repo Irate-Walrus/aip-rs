@@ -1,0 +1,28 @@
+[package]
+name = "aip-reflect"
+description = "AIP resource-annotation reflection: ResourceType parsing, google.api.resource descriptor iteration, and resource_reference validation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+# `ReflectMessage` (and its `prost::Message` supertrait's `encode_to_vec`) drives
+# the typed facade's transcode into a `DynamicMessage` (ADR-0009).
+prost-reflect.workspace = true
+# Pattern matching for `validate_resource_references`: a value is a valid
+# reference iff it matches one of the referenced resource's declared patterns.
+aip-resourcename.workspace = true
+tonic = { workspace = true, optional = true }
+tonic-types = { workspace = true, optional = true }
+
+[features]
+# Adds `From<Error> for tonic::Status` (INVALID_ARGUMENT) with AIP-193 standard
+# error details (ErrorInfo + BadRequest). See docs/adr/0007-aip193-error-details.md.
+tonic = ["dep:tonic", "dep:tonic-types"]
+
+[dev-dependencies]
+# Shared DescriptorPool + JSON -> DynamicMessage fixtures for reflective tests.
+test-fixtures.workspace = true

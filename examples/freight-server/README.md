@@ -287,6 +287,16 @@ descriptor (#47), and `UpdateShipper` applies its `update_mask` with the typed
 `fieldmask::update` facade (#48) — so the server holds no `DynamicMessage` of its
 own and the hand-rolled `reflect.rs` bridge is gone.
 
+The same Typed messages and descriptor pool back `aip::reflect` (#61), which
+reflects over the protos' **resource annotations** rather than their data: it
+reads the `google.api.resource` / `google.api.resource_reference` options off the
+descriptors. Because this is descriptor-time validation, not a request-path
+primitive, it is proven by a test rather than wired into a handler — `proto.rs`'s
+`freight_resource_references_resolve` runs `validate_resource_references` over the
+generated `Shipment` / `BatchGetSitesRequest` and asserts a well-formed reference
+(`origin_site` naming a `Site`) resolves while a mismatched one (a `Shipper` name
+where a `Site` is required) is rejected.
+
 The freight protos and their vendored googleapis imports live under
 [`proto/`](proto), so the example builds standalone. The freight sources are a
 copy of the same einride sources used by
