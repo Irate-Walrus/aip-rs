@@ -1,0 +1,27 @@
+[package]
+name = "aip-fieldbehavior"
+description = "AIP-161/AIP-203 field behavior: read/clear/copy by annotation, validate REQUIRED/IMMUTABLE"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+# `prost::Message` supplies `encode_to_vec`/`decode`, used by the typed facades
+# to transcode a concrete message to/from a `DynamicMessage` (ADR-0009).
+prost.workspace = true
+prost-types.workspace = true
+prost-reflect.workspace = true
+tonic = { workspace = true, optional = true }
+tonic-types = { workspace = true, optional = true }
+
+[features]
+# Adds `From<Error> for tonic::Status` (INVALID_ARGUMENT) with AIP-193 standard
+# error details (ErrorInfo + BadRequest). See docs/adr/0007-aip193-error-details.md.
+tonic = ["dep:tonic", "dep:tonic-types"]
+
+[dev-dependencies]
+# Shared DescriptorPool + JSON -> DynamicMessage fixtures for reflective tests.
+test-fixtures.workspace = true

@@ -136,8 +136,8 @@ wired up.
 | ----------------- | -------------------------------------------- | ------------ | ----------- |
 | `GetShipper`      | `resourcename` (validate name)               | #4           | wired       |
 | `ListShippers`    | `pagination` (offset page-token codec + request-checksum guard) | #6, #7 | wired² |
-| `CreateShipper`   | `resourceid` (generate), `resourcename` (format) | #5, #3   | wired       |
-| `UpdateShipper`   | `fieldmask` (typed `update` over `update_mask`) | #8, #48   | wired       |
+| `CreateShipper`   | `resourceid` (generate), `resourcename` (format), `fieldbehavior` (clear OUTPUT_ONLY/IMMUTABLE, validate REQUIRED) | #5, #3, #59 | wired       |
+| `UpdateShipper`   | `fieldmask` (typed `update` over `update_mask`), `fieldbehavior` (copy OUTPUT_ONLY from existing) | #8, #48, #59 | wired       |
 | `DeleteShipper`   | `resourcename` (validate name)               | #4           | wired       |
 | `CreateSite`      | `resourceid` (generate), `resourcename` (parse parent + format) | #5, #3 | wired       |
 | `ListSites`       | `ordering` (parse/validate) + `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (filter + server-composed scope/soft-delete + `ORDER BY`/`LIMIT`/`OFFSET` → in-memory SQLite) | #9, #10, #6, #7, #11, #39, #40, #41, #42, #43 | wired³ |

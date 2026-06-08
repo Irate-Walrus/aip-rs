@@ -6,10 +6,17 @@
 //! include path: it holds the human-readable einride example sources *and* the
 //! vendored `google/api` + `google/type` imports. The `google/protobuf/*`
 //! well-known types are supplied by `protox` itself.
+//!
+//! # Why `encode_file_descriptor_set` not `compile`
+//!
+//! `protox::compile` returns `prost_types::FileDescriptorSet`, which cannot
+//! represent extension fields (such as `google.api.field_behavior`) — prost
+//! drops unknown/extension bytes when it decodes into a generated struct.
+//! `Compiler::encode_file_descriptor_set` encodes from the internal
+//! prost_reflect pool, which preserves all extension bytes, so the resulting
+//! binary correctly contains field 1052 and similar annotations.
 
 use std::{env, path::PathBuf};
-
-use prost::Message;
 
 /// The example `.proto` files under test, relative to `proto/`. Their imports
 /// (sibling einride protos, vendored googleapis protos, and the well-known
@@ -29,15 +36,16 @@ fn main() {
     let proto_root = manifest_dir.join("proto");
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is set by cargo"));
 
-    let file_descriptor_set = protox::compile(
-        ROOT_PROTOS.iter().map(|p| proto_root.join(p)),
-        [&proto_root],
-    )
-    .expect("protox failed to compile the vendored example protos");
+    let bytes = protox::Compiler::new([&proto_root])
+        .expect("protox failed to initialise with the proto include path")
+        .include_imports(true)
+        .include_source_info(true)
+        .open_files(ROOT_PROTOS.iter().map(|p| proto_root.join(p)))
+        .expect("protox failed to compile the vendored example protos")
+        .encode_file_descriptor_set();
 
     let out_path = out_dir.join("file_descriptor_set.bin");
-    std::fs::write(&out_path, file_descriptor_set.encode_to_vec())
-        .expect("failed to write file descriptor set");
+    std::fs::write(&out_path, bytes).expect("failed to write file descriptor set");
 
     // Recompile whenever any vendored proto changes.
     println!("cargo:rerun-if-changed={}", proto_root.display());

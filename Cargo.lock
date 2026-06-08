@@ -15,6 +15,7 @@ dependencies = [
 name = "aip"
 version = "0.1.0"
 dependencies = [
+ "aip-fieldbehavior",
  "aip-fieldmask",
  "aip-filtering",
  "aip-iam",
@@ -23,6 +24,19 @@ dependencies = [
  "aip-resourceid",
  "aip-resourcename",
  "aip-sql",
+]
+
+[[package]]
+name = "aip-fieldbehavior"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "prost-reflect",
+ "prost-types",
+ "test-fixtures",
+ "thiserror",
+ "tonic",
+ "tonic-types",
 ]
 
 [[package]]

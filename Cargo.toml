@@ -28,6 +28,7 @@ aip-filtering    = { version = "0.1.0", path = "crates/aip-filtering" }
 # IAM primitives (ADR-0010): Member/Role/Permission parsing + Policy structure.
 # Opt-in via the umbrella's `iam` feature while the slice matures.
 aip-iam          = { version = "0.1.0", path = "crates/aip-iam" }
+aip-fieldbehavior = { version = "0.1.0", path = "crates/aip-fieldbehavior" }
 # Optional SQL adapter (ADR-0005 / ADR-0008): transpiles the filter AST to a
 # parameterized, dialect-rendered Predicate. Not part of the core; depended on
 # directly by the example's default SQLite storage.
