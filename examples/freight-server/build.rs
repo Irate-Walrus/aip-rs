@@ -76,6 +76,51 @@ fn main() {
 
     let mut config = tonic_prost_build::Config::new();
 
+    // Share the `google.iam.v1` *message* layer with `aip::iam::proto` (aip #65):
+    // map the Policy structure (and the `google.type.Expr` condition) onto the
+    // crate's generated types so the `IAMPolicy` service we still generate locally
+    // uses the very `Policy` / `Binding` the structural read-modify-write helpers
+    // operate on — one type, not a structurally-identical duplicate. Only these
+    // messages are externed; the service trait and its request types
+    // (`SetIamPolicyRequest`, `GetPolicyOptions`, …) are still generated here, and
+    // `google.type.LatLng` (the freight `Site` location) stays local.
+    for (proto_path, rust_path) in [
+        (
+            ".google.iam.v1.Policy",
+            "::aip::iam::proto::google::iam::v1::Policy",
+        ),
+        (
+            ".google.iam.v1.Binding",
+            "::aip::iam::proto::google::iam::v1::Binding",
+        ),
+        (
+            ".google.iam.v1.AuditConfig",
+            "::aip::iam::proto::google::iam::v1::AuditConfig",
+        ),
+        (
+            ".google.iam.v1.AuditLogConfig",
+            "::aip::iam::proto::google::iam::v1::AuditLogConfig",
+        ),
+        (
+            ".google.iam.v1.PolicyDelta",
+            "::aip::iam::proto::google::iam::v1::PolicyDelta",
+        ),
+        (
+            ".google.iam.v1.BindingDelta",
+            "::aip::iam::proto::google::iam::v1::BindingDelta",
+        ),
+        (
+            ".google.iam.v1.AuditConfigDelta",
+            "::aip::iam::proto::google::iam::v1::AuditConfigDelta",
+        ),
+        (
+            ".google.type.Expr",
+            "::aip::iam::proto::google::r#type::Expr",
+        ),
+    ] {
+        config.extern_path(proto_path, rust_path);
+    }
+
     // ADR-0009 Typed messages: derive `ReflectMessage` for every generated message
     // so it carries its own descriptor, resolved from the embedded
     // `crate::proto::DESCRIPTOR_POOL`. This mirrors `prost-reflect-build`'s

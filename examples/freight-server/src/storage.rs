@@ -1,10 +1,12 @@
 //! Datastore backing the demo.
 //!
 //! Shippers live in an in-memory map (ADR-0005); the gRPC layer — not the store —
-//! is what exercises those primitives. Sites are backed by an **in-memory SQLite
-//! database** so an AIP-160 **Filter** travels end-to-end into a real SQL engine
-//! (ADR-0008): this is the default store, no feature flag. State lives for the
-//! life of the process and resets on restart.
+//! is what exercises those primitives. Sites and shipments are backed by an
+//! **in-memory SQLite database** so an AIP-160 **Filter** travels end-to-end into a
+//! real SQL engine (ADR-0008): this is the default store, no feature flag. IAM
+//! **Policies** are likewise SQLite-backed, decomposed into the `iam_policy_bindings`
+//! table the way iam-go's `iamspanner` stores them (see [`PolicyStore`], aip #65).
+//! State lives for the life of the process and resets on restart.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -13,7 +15,10 @@ use aip::sql::Dialect as _;
 use prost::Message as _;
 
 use crate::proto::einride::example::freight::v1::{site::State, Shipment, Shipper, Site};
-use crate::proto::google::iam::v1::Policy;
+// The `google.iam.v1.Policy` message layer is shared with the structural helpers
+// via `extern_path` (aip #65), so it comes from `aip::iam::proto`, not the locally
+// generated `crate::proto::google::iam::v1`.
+use aip::iam::proto::{Binding, Policy};
 
 /// Process-lifetime store. Shippers are a `BTreeMap` keyed by resource name,
 /// which keeps listings in a stable order (the deterministic tie-break behind a
@@ -299,38 +304,212 @@ fn rfc3339(ts: &prost_types::Timestamp) -> String {
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
-/// Process-lifetime store of `google.iam.v1.Policy` keyed by **Resource name**,
-/// backing the demo's `IAMPolicy` service (aip #64). A `Policy` attaches to the
-/// resource it governs (a shipper / site / shipment name), so the resource name
-/// is the key; state resets on restart, like the rest of [`Storage`].
+/// Process-lifetime store of `google.iam.v1.Policy`, backing the demo's
+/// `IAMPolicy` service (aip #64, #65). Like a real IAM backend (and mirroring
+/// iam-go's `iamspanner`), a **Policy** is stored *decomposed* into the
+/// `iam_policy_bindings` table — one row per (resource, **Binding**, **Member**) —
+/// rather than as an opaque blob; the **Policy** is reconstructed on read and its
+/// `etag` is a content digest computed from that canonical form (ADR-0010).
 ///
-/// Kept separate from [`Storage`] (which owns the freight resources) because the
-/// tracer bullet only needs a Member to travel request → validate → store →
-/// response; cross-referencing a policy against the resource it names is a later
-/// slice (the AIP-211 NOT_FOUND-via-parent path, #67).
-#[derive(Default)]
+/// `version` and a **Binding**'s **Condition** are deliberately *not* persisted by
+/// this schema (exactly as iam-go's `iamspanner` does not): the
+/// *conditions ⟹ version 3* invariant is enforced by
+/// [`aip::iam::policy::validate`] in the handler *before* a write, so a conditional
+/// binding on an old version is rejected, while accepted policies round-trip as
+/// their `(role, members)` grants. State lives for the process and resets on
+/// restart, like the rest of [`Storage`].
 pub struct PolicyStore {
-    policies: Mutex<BTreeMap<String, Policy>>,
+    /// One in-memory SQLite connection holding the `iam_policy_bindings` table.
+    bindings: Mutex<rusqlite::Connection>,
+}
+
+impl Default for PolicyStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PolicyStore {
-    /// An empty policy store.
+    /// An empty policy store with a fresh in-memory `iam_policy_bindings` table.
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            bindings: Mutex::new(new_policies_db()),
+        }
     }
 
     /// The policy attached to `resource`, or `None` when none is set — the caller
     /// turns that into the empty `Policy` `GetIamPolicy` returns (AIP / IAM: an
-    /// unset policy is not an error).
+    /// unset policy is not an error). The reconstructed policy carries the content
+    /// `etag` ([`compute_etag`](aip::iam::policy::compute_etag)), so a client can
+    /// round-trip it back as its read-modify-write token.
     pub fn get(&self, resource: &str) -> Option<Policy> {
-        self.policies.lock().unwrap().get(resource).cloned()
+        let conn = self.bindings.lock().unwrap();
+        let bindings = read_bindings(&conn, resource);
+        if bindings.is_empty() {
+            return None;
+        }
+        let mut policy = Policy {
+            bindings,
+            ..Policy::default()
+        };
+        policy.etag = aip::iam::policy::compute_etag(&policy);
+        Some(policy)
     }
 
-    /// Attach `policy` to `resource`, replacing any existing one (the IAM
-    /// `SetIamPolicy` replace semantics).
-    pub fn set(&self, resource: String, policy: Policy) {
-        self.policies.lock().unwrap().insert(resource, policy);
+    /// Apply `SetIamPolicy` read-modify-write semantics atomically, the way a real
+    /// IAM backend does it inside a transaction (aip #65).
+    ///
+    /// The supplied `policy.etag` is the client's optimistic-concurrency token: it
+    /// is checked against the canonical stored policy via
+    /// [`aip::iam::policy::check_etag`] and a stale token is rejected with
+    /// [`PolicyEtagMismatch`](aip::iam::Error::PolicyEtagMismatch) (`ABORTED`)
+    /// rather than blind-overwriting. The accepted policy is folded into canonical
+    /// form ([`normalize`](aip::iam::policy::normalize)) and its `(resource,
+    /// binding, member)` rows replace the resource's previous rows in one
+    /// transaction. The stored policy — `(role, members)` grants, with a fresh
+    /// content `etag` — is returned so the caller can echo the new `etag`.
+    ///
+    /// The freshness check and the write share one lock acquisition, so two
+    /// concurrent writers cannot both pass the check (no read-modify-write race).
+    pub fn set_checked(
+        &self,
+        resource: String,
+        mut policy: Policy,
+    ) -> Result<Policy, aip::iam::Error> {
+        // The client's etag is a concurrency token, not policy content.
+        let supplied = std::mem::take(&mut policy.etag);
+        let mut conn = self.bindings.lock().unwrap();
+
+        // Freshness check against the canonical stored form (etag computed from the
+        // reconstructed bindings — the same form `get` and the write below produce).
+        let current = {
+            let bindings = read_bindings(&conn, &resource);
+            (!bindings.is_empty()).then(|| {
+                let mut policy = Policy {
+                    bindings,
+                    ..Policy::default()
+                };
+                policy.etag = aip::iam::policy::compute_etag(&policy);
+                policy
+            })
+        };
+        aip::iam::policy::check_etag(&supplied, current.as_ref())?;
+
+        // Canonicalise, then replace the resource's rows atomically.
+        aip::iam::policy::normalize(&mut policy);
+        let tx = conn.transaction().expect("begin policy transaction");
+        tx.execute(
+            "DELETE FROM iam_policy_bindings WHERE resource = ?1",
+            [&resource],
+        )
+        .expect("clear existing policy rows");
+        for (binding_index, binding) in policy.bindings.iter().enumerate() {
+            for (member_index, member) in binding.members.iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO iam_policy_bindings \
+                     (resource, binding_index, role, member_index, member) \
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![
+                        resource,
+                        binding_index as i64,
+                        binding.role,
+                        member_index as i64,
+                        member
+                    ],
+                )
+                .expect("insert policy binding row");
+            }
+        }
+        tx.commit().expect("commit policy transaction");
+
+        // Return the canonical stored form the schema preserves — `(role, members)`
+        // grants (no `version` / `condition`) — matching what `get` reconstructs,
+        // with a fresh content `etag`.
+        let stored_bindings: Vec<Binding> = policy
+            .bindings
+            .into_iter()
+            .map(|binding| Binding {
+                role: binding.role,
+                members: binding.members,
+                condition: None,
+            })
+            .collect();
+        let mut stored = Policy {
+            bindings: stored_bindings,
+            ..Policy::default()
+        };
+        if !stored.bindings.is_empty() {
+            stored.etag = aip::iam::policy::compute_etag(&stored);
+        }
+        Ok(stored)
     }
+}
+
+/// Open an in-memory SQLite database with the `iam_policy_bindings` table — the
+/// decomposed IAM **Policy** store, one row per (resource, **Binding**, **Member**),
+/// mirroring iam-go's `iamspanner` schema (aip #65). The primary key orders rows by
+/// `(resource, binding_index, role, member_index, member)` so a policy reconstructs
+/// in canonical order. Spanner's `STRING(MAX)`/`INT64` map to SQLite `TEXT`/
+/// `INTEGER`; the member-keyed reverse indexes iam-go also defines back the
+/// member→resource lookup `TestIamPermissions` needs and are deferred to that slice
+/// (#68).
+fn new_policies_db() -> rusqlite::Connection {
+    let conn = rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
+    conn.execute_batch(
+        "CREATE TABLE iam_policy_bindings (
+            resource      TEXT    NOT NULL,
+            binding_index INTEGER NOT NULL,
+            role          TEXT    NOT NULL,
+            member_index  INTEGER NOT NULL,
+            member        TEXT    NOT NULL,
+            PRIMARY KEY (resource, binding_index, role, member_index, member)
+        );",
+    )
+    .expect("create iam_policy_bindings table");
+    conn
+}
+
+/// Reconstruct a resource's **Bindings** from `iam_policy_bindings`, in canonical
+/// order. Rows are grouped by `binding_index` (each carries one **Role**); the
+/// `ORDER BY` makes the grouping contiguous and the **Members** deterministic. The
+/// schema persists no **Condition**, so every reconstructed **Binding** is
+/// unconditional.
+fn read_bindings(conn: &rusqlite::Connection, resource: &str) -> Vec<Binding> {
+    let mut statement = conn
+        .prepare(
+            "SELECT binding_index, role, member FROM iam_policy_bindings \
+             WHERE resource = ?1 ORDER BY binding_index, member_index",
+        )
+        .expect("prepare policy read");
+    let rows = statement
+        .query_map([resource], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .expect("query policy bindings");
+
+    let mut bindings: Vec<Binding> = Vec::new();
+    let mut current: Option<i64> = None;
+    for row in rows {
+        let (binding_index, role, member) = row.expect("read policy binding row");
+        if current != Some(binding_index) {
+            bindings.push(Binding {
+                role,
+                members: Vec::new(),
+                condition: None,
+            });
+            current = Some(binding_index);
+        }
+        bindings
+            .last_mut()
+            .expect("a binding was just pushed")
+            .members
+            .push(member);
+    }
+    bindings
 }
 
 /// Map an aip-sql bind [`Value`](aip::sql::Value) onto rusqlite's owned value type

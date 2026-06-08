@@ -20,6 +20,13 @@ pub use member::Member;
 pub use permission::Permission;
 pub use role::Role;
 
+/// Structural read-modify-write ops over a [`google.iam.v1.Policy`](proto::Policy)
+/// — opt-in via the non-default `iam-proto` feature (ADR-0010). Binding
+/// add/remove, dedupe/normalise, the `etag` optimistic-concurrency cycle, and the
+/// *conditions ⟹ version 3* invariant.
+#[cfg(feature = "iam-proto")]
+pub mod policy;
+
 /// The generated `google.iam.v1` Policy structure — opt-in via the non-default
 /// `iam-proto` feature (ADR-0010).
 ///
@@ -93,6 +100,23 @@ pub enum Error {
         /// The offending permission name.
         permission: String,
     },
+    /// A [`Policy`](proto::Policy) carried a **Binding** with a **Condition** but
+    /// its schema `version` was not `3`. IAM requires policy version `3` for any
+    /// conditional binding (the *conditions ⟹ version 3* invariant; ADR-0010).
+    #[error(
+        "a conditional binding requires policy version 3, but the policy is version {version}"
+    )]
+    PolicyConditionRequiresVersion3 {
+        /// The policy's `version` field as supplied.
+        version: i32,
+    },
+    /// The `etag` supplied to a read-modify-write [`SetIamPolicy`] did not match
+    /// the [`Policy`](proto::Policy) currently stored — a concurrent modification
+    /// intervened. The caller must re-read the policy and retry (ADR-0010).
+    ///
+    /// [`SetIamPolicy`]: https://google.aip.dev/211
+    #[error("policy etag mismatch: the policy was modified concurrently; re-read and retry")]
+    PolicyEtagMismatch,
 }
 
 /// The AIP-193 `ErrorInfo.domain` for every error this crate maps. Reason codes
@@ -102,39 +126,62 @@ const ERROR_DOMAIN: &str = "aip-rs";
 
 #[cfg(feature = "tonic")]
 impl From<Error> for tonic::Status {
-    /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details: an `ErrorInfo`
+    /// Maps to a canonical gRPC code with AIP-193 standard details: an `ErrorInfo`
     /// carrying a machine-readable `IAM_*` `reason` + [`domain`](ERROR_DOMAIN) and
-    /// the error's dynamic values as `metadata`. These are *validation* errors; the
-    /// AIP-211 `PERMISSION_DENIED` authorization-failure shape is a separate helper
-    /// (see `docs/adr/0010-iam-primitives.md`). A member/role/permission is an
-    /// opaque value, not a request field path, so no `BadRequest` is attached.
+    /// the error's dynamic values as `metadata`.
+    ///
+    /// Most are *validation* errors and map to `INVALID_ARGUMENT`; the
+    /// read-modify-write [`PolicyEtagMismatch`](Error::PolicyEtagMismatch) maps to
+    /// `ABORTED`, matching the IAM optimistic-concurrency contract — a stale `etag`
+    /// is a concurrency conflict, not a malformed request (ADR-0010). The AIP-211
+    /// `PERMISSION_DENIED` authorization-failure shape is a separate helper. A
+    /// member/role/permission is an opaque value, not a request field path, so no
+    /// `BadRequest` is attached.
     fn from(err: Error) -> Self {
         use std::collections::HashMap;
         use tonic_types::{ErrorDetails, StatusExt};
 
         let message = err.to_string();
-        let (reason, metadata): (&str, HashMap<String, String>) = match &err {
-            Error::MemberEmpty => ("IAM_MEMBER_EMPTY", HashMap::new()),
+        let (code, reason, metadata): (tonic::Code, &str, HashMap<String, String>) = match &err {
+            Error::MemberEmpty => (
+                tonic::Code::InvalidArgument,
+                "IAM_MEMBER_EMPTY",
+                HashMap::new(),
+            ),
             Error::MemberUnknownType { prefix } => (
+                tonic::Code::InvalidArgument,
                 "IAM_MEMBER_UNKNOWN_TYPE",
                 HashMap::from([("prefix".to_owned(), prefix.clone())]),
             ),
             Error::MemberEmptyValue { kind } => (
+                tonic::Code::InvalidArgument,
                 "IAM_MEMBER_EMPTY_VALUE",
                 HashMap::from([("kind".to_owned(), kind.clone())]),
             ),
             Error::RoleMalformed { role } => (
+                tonic::Code::InvalidArgument,
                 "IAM_ROLE_MALFORMED",
                 HashMap::from([("role".to_owned(), role.clone())]),
             ),
             Error::PermissionMalformed { permission } => (
+                tonic::Code::InvalidArgument,
                 "IAM_PERMISSION_MALFORMED",
                 HashMap::from([("permission".to_owned(), permission.clone())]),
+            ),
+            Error::PolicyConditionRequiresVersion3 { version } => (
+                tonic::Code::InvalidArgument,
+                "IAM_POLICY_CONDITION_REQUIRES_VERSION_3",
+                HashMap::from([("version".to_owned(), version.to_string())]),
+            ),
+            Error::PolicyEtagMismatch => (
+                tonic::Code::Aborted,
+                "IAM_POLICY_ETAG_MISMATCH",
+                HashMap::new(),
             ),
         };
         let mut details = ErrorDetails::new();
         details.set_error_info(reason, ERROR_DOMAIN, metadata);
-        tonic::Status::with_error_details(tonic::Code::InvalidArgument, message, details)
+        tonic::Status::with_error_details(code, message, details)
     }
 }
 
@@ -163,6 +210,21 @@ mod tonic_tests {
 
         // A member is an opaque value, not a request field path.
         assert!(status.get_details_bad_request().is_none());
+    }
+
+    #[test]
+    fn etag_mismatch_maps_to_aborted() {
+        // A stale etag is an optimistic-concurrency conflict, not a malformed
+        // request, so it maps to ABORTED (the IAM read-modify-write contract) —
+        // unlike every other (validation) error, which is INVALID_ARGUMENT.
+        let status: tonic::Status = Error::PolicyEtagMismatch.into();
+        assert_eq!(status.code(), tonic::Code::Aborted);
+
+        let info = status
+            .get_details_error_info()
+            .expect("an ErrorInfo is always attached (AIP-193)");
+        assert_eq!(info.reason, "IAM_POLICY_ETAG_MISMATCH");
+        assert_eq!(info.domain, ERROR_DOMAIN);
     }
 }
 

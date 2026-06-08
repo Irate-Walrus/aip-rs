@@ -1,10 +1,21 @@
-//! The `google.iam.v1.IAMPolicy` service — the IAM tracer bullet (aip #64).
+//! The `google.iam.v1.IAMPolicy` service — driving the `aip::iam` Policy toolkit.
 //!
-//! Proves a **Member** string round-trips through the IAM standard methods, the
-//! way #39 drove a **Filter** into SQLite. `SetIamPolicy` validates every Member
-//! of every **Binding** via `aip::iam`, stores the **Policy** keyed by **Resource
-//! name**, and `GetIamPolicy` returns it (an empty Policy when none is set). So a
-//! Member travels request → validate → store → response.
+//! Started as the IAM tracer bullet (aip #64): a **Member** string round-trips
+//! through the standard methods, the way #39 drove a **Filter** into SQLite. With
+//! the structural read-modify-write ops in place (aip #65), `SetIamPolicy` now
+//! mutates policies *through* the helpers rather than blind-overwriting:
+//!
+//! 1. every **Member** of every **Binding** is parsed via `aip::iam` (validate);
+//! 2. the *conditions ⟹ version 3* invariant is enforced
+//!    ([`aip::iam::policy::validate`]);
+//! 3. the supplied `etag` is checked against the stored policy — a stale token is
+//!    rejected with `ABORTED` ([`aip::iam::policy::check_etag`]) — then the policy
+//!    is normalised, re-stamped with a fresh `etag`, and stored atomically
+//!    ([`PolicyStore::set_checked`]).
+//!
+//! `GetIamPolicy` returns the stored policy (carrying its `etag`), or an empty
+//! Policy when none is set. The `Policy` / `Binding` types are the very ones the
+//! helpers operate on — shared from `aip::iam::proto` via `extern_path` (aip #65).
 //!
 //! `TestIamPermissions` is left as a `TODO(aip #68)` seam: it decides the held
 //! permission subset *through* the opt-in cel-backed `eval` adapter (#66), which
@@ -12,11 +23,15 @@
 
 use tonic::{Request, Response, Status};
 
+// The `IAMPolicy` service trait and its request/response messages are generated
+// locally; the `Policy` / `Binding` message layer is shared with the structural
+// helpers via `extern_path` (aip #65), so it comes from `aip::iam::proto`.
 use crate::proto::google::iam::v1::{
-    iam_policy_server::IamPolicy, GetIamPolicyRequest, Policy, SetIamPolicyRequest,
+    iam_policy_server::IamPolicy, GetIamPolicyRequest, SetIamPolicyRequest,
     TestIamPermissionsRequest, TestIamPermissionsResponse,
 };
 use crate::storage::PolicyStore;
+use aip::iam::proto::Policy;
 
 /// Serves `IAMPolicy` over an in-memory, resource-name-keyed [`PolicyStore`].
 #[derive(Default)]
@@ -57,10 +72,16 @@ impl IamPolicy for IamServer {
             }
         }
 
-        // Replace any existing policy (IAM `SetIamPolicy` semantics), then echo
-        // the stored policy back so the round-trip is observable in one call.
-        self.policies.set(req.resource, policy.clone());
-        Ok(Response::new(policy))
+        // Enforce the conditions ⟹ version-3 invariant (INVALID_ARGUMENT via the
+        // same AIP-193 mapping) before the policy is stored.
+        aip::iam::policy::validate(&policy)?;
+
+        // Read-modify-write through the helpers: a stale `etag` is rejected with
+        // `ABORTED`, the accepted policy is normalised and re-stamped with a fresh
+        // `etag`, and stored atomically. Echo the stored policy so the new `etag`
+        // is observable in one call.
+        let stored = self.policies.set_checked(req.resource, policy)?;
+        Ok(Response::new(stored))
     }
 
     async fn get_iam_policy(
@@ -94,12 +115,13 @@ impl IamPolicy for IamServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::google::iam::v1::Binding;
+    use aip::iam::proto::google::r#type::Expr;
+    use aip::iam::proto::Binding;
 
     /// A freight resource name a policy attaches to.
     const RESOURCE: &str = "shippers/acme";
 
-    /// A policy granting `role` to `members`.
+    /// A version-1 policy granting `role` to `members`, with no `etag`.
     fn policy(role: &str, members: &[&str]) -> Policy {
         Policy {
             version: 1,
@@ -113,37 +135,66 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn set_then_get_round_trips_a_well_formed_policy() {
-        // A Member travels request → validate → store → response: a well-formed
-        // policy is accepted by `SetIamPolicy` and read back identically by
-        // `GetIamPolicy`.
-        let server = IamServer::new();
-        let stored = policy(
-            "roles/viewer",
-            &["user:alice@example.com", "group:ops@example.com"],
-        );
-
-        let set = server
+    /// Drive `SetIamPolicy`, returning the stored policy (or the `Status`).
+    async fn set(server: &IamServer, policy: Policy) -> Result<Policy, Status> {
+        server
             .set_iam_policy(Request::new(SetIamPolicyRequest {
                 resource: RESOURCE.to_owned(),
-                policy: Some(stored.clone()),
+                policy: Some(policy),
                 update_mask: None,
             }))
             .await
-            .expect("a well-formed policy is accepted")
-            .into_inner();
-        assert_eq!(set, stored);
+            .map(Response::into_inner)
+    }
 
-        let got = server
+    /// Drive `GetIamPolicy` for `resource`.
+    async fn get(server: &IamServer, resource: &str) -> Policy {
+        server
             .get_iam_policy(Request::new(GetIamPolicyRequest {
-                resource: RESOURCE.to_owned(),
+                resource: resource.to_owned(),
                 options: None,
             }))
             .await
             .expect("get succeeds")
-            .into_inner();
-        assert_eq!(got, stored);
+            .into_inner()
+    }
+
+    #[tokio::test]
+    async fn set_normalises_and_stamps_an_etag_then_get_round_trips() {
+        // A Member travels request → validate → store → response. The policy is
+        // normalised (members in canonical order) and stamped with a fresh `etag`
+        // before storage, and `GetIamPolicy` reads back exactly what was stored.
+        let server = IamServer::new();
+        let stored = set(
+            &server,
+            policy(
+                "roles/viewer",
+                &["user:alice@example.com", "group:ops@example.com"],
+            ),
+        )
+        .await
+        .expect("a well-formed policy is accepted");
+
+        assert_eq!(
+            stored.bindings,
+            vec![Binding {
+                role: "roles/viewer".to_owned(),
+                // Sorted: "group:…" precedes "user:…".
+                members: vec![
+                    "group:ops@example.com".to_owned(),
+                    "user:alice@example.com".to_owned(),
+                ],
+                condition: None,
+            }],
+            "members come back in canonical order",
+        );
+        assert!(!stored.etag.is_empty(), "the server stamps a fresh etag");
+
+        assert_eq!(
+            get(&server, RESOURCE).await,
+            stored,
+            "get round-trips the stored policy"
+        );
     }
 
     #[tokio::test]
@@ -151,15 +202,7 @@ mod tests {
         // `GetIamPolicy` on a resource with no policy is not an error — it returns
         // the empty `Policy`.
         let server = IamServer::new();
-        let got = server
-            .get_iam_policy(Request::new(GetIamPolicyRequest {
-                resource: "shippers/never-set".to_owned(),
-                options: None,
-            }))
-            .await
-            .expect("an unset policy is not an error")
-            .into_inner();
-        assert_eq!(got, Policy::default());
+        assert_eq!(get(&server, "shippers/never-set").await, Policy::default());
     }
 
     #[tokio::test]
@@ -170,12 +213,7 @@ mod tests {
         // `INVALID_ARGUMENT` carrying an `IAM_*` `ErrorInfo` under the `aip-rs`
         // domain. The policy never reaches the store.
         let server = IamServer::new();
-        let status = server
-            .set_iam_policy(Request::new(SetIamPolicyRequest {
-                resource: RESOURCE.to_owned(),
-                policy: Some(policy("roles/viewer", &["robot:r2d2"])),
-                update_mask: None,
-            }))
+        let status = set(&server, policy("roles/viewer", &["robot:r2d2"]))
             .await
             .expect_err("a malformed member is rejected");
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
@@ -187,16 +225,72 @@ mod tests {
         assert_eq!(info.domain, "aip-rs");
 
         // The rejected policy was not stored.
+        assert_eq!(get(&server, RESOURCE).await, Policy::default());
+    }
+
+    #[tokio::test]
+    async fn set_rejects_a_conditional_binding_below_version_3() {
+        use tonic_types::StatusExt as _;
+
+        // The conditions ⟹ version-3 invariant: a conditional binding on a
+        // version-1 policy is `INVALID_ARGUMENT` with its own `IAM_*` reason.
+        let server = IamServer::new();
+        let mut conditional = policy("roles/viewer", &["user:alice@example.com"]);
+        conditional.bindings[0].condition = Some(Expr {
+            expression: "request.time < timestamp(\"2030-01-01T00:00:00Z\")".to_owned(),
+            ..Expr::default()
+        });
+
+        let status = set(&server, conditional)
+            .await
+            .expect_err("a conditional version-1 policy is rejected");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
         assert_eq!(
-            server
-                .get_iam_policy(Request::new(GetIamPolicyRequest {
-                    resource: RESOURCE.to_owned(),
-                    options: None,
-                }))
-                .await
-                .expect("get succeeds")
-                .into_inner(),
-            Policy::default(),
+            status
+                .get_details_error_info()
+                .expect("an ErrorInfo is attached")
+                .reason,
+            "IAM_POLICY_CONDITION_REQUIRES_VERSION_3",
         );
+    }
+
+    #[tokio::test]
+    async fn set_rejects_a_stale_etag_with_aborted() {
+        use tonic_types::StatusExt as _;
+
+        // The read-modify-write contract: the first write (no etag, unconditional)
+        // is accepted and stamped; a follow-up carrying that etag is accepted and
+        // advances it; replaying the now-stale etag is rejected with `ABORTED`.
+        let server = IamServer::new();
+        let first = set(&server, policy("roles/viewer", &["user:alice@example.com"]))
+            .await
+            .expect("the first write is accepted");
+
+        let mut second = policy(
+            "roles/viewer",
+            &["user:alice@example.com", "group:ops@example.com"],
+        );
+        second.etag = first.etag.clone();
+        let second = set(&server, second)
+            .await
+            .expect("a fresh etag is accepted");
+        assert_ne!(second.etag, first.etag, "the etag advances on each write");
+
+        let mut stale = policy("roles/editor", &["user:bob@example.com"]);
+        stale.etag = first.etag.clone();
+        let status = set(&server, stale)
+            .await
+            .expect_err("replaying a stale etag is rejected");
+        assert_eq!(status.code(), tonic::Code::Aborted);
+        assert_eq!(
+            status
+                .get_details_error_info()
+                .expect("an ErrorInfo is attached")
+                .reason,
+            "IAM_POLICY_ETAG_MISMATCH",
+        );
+
+        // The stale write did not take effect — the second write still stands.
+        assert_eq!(get(&server, RESOURCE).await, second);
     }
 }
