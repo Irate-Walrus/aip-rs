@@ -4,3 +4,6 @@
 [submodule "reference/google.aip.dev"]
 	path = reference/google.aip.dev
 	url = https://github.com/aip-dev/google.aip.dev
+[submodule "reference/iam-go"]
+	path = reference/iam-go
+	url = https://github.com/einride/iam-go.git
