@@ -170,9 +170,9 @@ wired up.
 | `CreateShipper`   | `resourceid` (generate), `resourcename` (format), `fieldbehavior` (clear OUTPUT_ONLY/IMMUTABLE, validate REQUIRED) | #5, #3, #59 | wired       |
 | `UpdateShipper`   | `fieldmask` (typed `update` over `update_mask`), `fieldbehavior` (copy OUTPUT_ONLY from existing, validate REQUIRED in mask) | #8, #48, #59 | wired       |
 | `DeleteShipper`   | `resourcename` (validate name)               | #4           | wired       |
-| `CreateSite`      | `resourceid` (generate), `resourcename` (parse parent + format) | #5, #3 | wired       |
+| `CreateSite`      | `resourceid` (generate), `resourcename` (parse parent + format), `validation` (accumulate REQUIRED-field violations → AIP-193) | #5, #3, #60 | wired       |
 | `ListSites`       | `ordering` (parse/validate) + `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (filter + server-composed scope/soft-delete + `ORDER BY`/`LIMIT`/`OFFSET` → in-memory SQLite) | #9, #10, #6, #7, #11, #39, #40, #41, #42, #43 | wired³ |
-| `CreateShipment`  | `resourceid` (generate), `resourcename` (parse parent + format) | #5, #3 | wired⁴ |
+| `CreateShipment`  | `resourceid` (generate), `resourcename` (parse parent + format), `validation` (accumulate both REQUIRED endpoints → one AIP-193 response) | #5, #3, #60 | wired⁴ |
 | `ListShipments`   | `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (filter + server-composed scope/soft-delete → in-memory SQLite) | #6, #7, #43 | wired⁴ |
 | `IAMPolicy.GetIamPolicy` / `SetIamPolicy` | `iam` (Member validation) over a resource-name-keyed policy store | #64 | wired⁵ |
 | `GetSite` / `UpdateSite` / `DeleteSite`, `BatchGetSites`, `GetShipment` / `UpdateShipment` / `DeleteShipment` | the same primitives | #11–#15 | `Unimplemented` |
@@ -259,9 +259,12 @@ field path, a `BadRequest` field violation — see
 [`docs/adr/0007-aip193-error-details.md`](../../docs/adr/0007-aip193-error-details.md).
 So `UpdateShipper`'s bad `update_mask` path, `ListSites`'s unknown `order_by`
 field, and a stale page token all surface as structured errors with no per-call
-wiring. The server's own presence and policy checks (e.g. a required
-`display_name`, the shipper-name pattern) build the same details with
-`tonic-types` directly, under the service's own domain.
+wiring. The server's own presence and policy checks — the ones no aip-rs
+primitive covers (e.g. a required `display_name`, both shipment endpoints, the
+shipper-name pattern) — accumulate into an `aip::validation::Validator` (#60),
+which resolves to the same AIP-193 details under the service's own domain. So a
+`CreateShipment` missing both endpoints comes back with every violation in one
+`BadRequest`, rather than one error per round-trip.
 
 ## How the proto types are built
 

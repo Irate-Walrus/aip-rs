@@ -24,6 +24,7 @@ dependencies = [
  "aip-resourceid",
  "aip-resourcename",
  "aip-sql",
+ "aip-validation",
 ]
 
 [[package]]
@@ -134,6 +135,14 @@ dependencies = [
  "aip-filtering",
  "aip-ordering",
  "thiserror",
+]
+
+[[package]]
+name = "aip-validation"
+version = "0.1.0"
+dependencies = [
+ "tonic",
+ "tonic-types",
 ]
 
 [[package]]

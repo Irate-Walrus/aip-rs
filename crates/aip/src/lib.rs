@@ -28,6 +28,11 @@ pub use aip_filtering as filtering;
 #[cfg(feature = "fieldbehavior")]
 pub use aip_fieldbehavior as fieldbehavior;
 
+/// Field-violation accumulator (issue #60): collects per-field validation
+/// failures into one AIP-193 error. Default-on via the `validation` feature.
+#[cfg(feature = "validation")]
+pub use aip_validation as validation;
+
 /// IAM primitives (ADR-0010) — opt-in via the non-default `iam` feature: parse and
 /// validate the `google.iam.v1` identity vocabulary (Member / Role / Permission).
 #[cfg(feature = "iam")]
