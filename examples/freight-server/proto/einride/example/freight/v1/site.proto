@@ -30,4 +30,16 @@ message Site {
   string display_name = 5 [(google.api.field_behavior) = REQUIRED];
   // The geographic location of the site.
   google.type.LatLng lat_lng = 6;
+  // The operational state of the site. Filterable as an AIP-160 enum (#40).
+  State state = 7;
+
+  // The operational state of a [site][einride.example.freight.v1.Site].
+  enum State {
+    // The state is unspecified.
+    STATE_UNSPECIFIED = 0;
+    // The site is active and accepting freight.
+    STATE_ACTIVE = 1;
+    // The site is inactive.
+    STATE_INACTIVE = 2;
+  }
 }

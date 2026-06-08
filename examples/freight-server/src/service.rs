@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use aip::ordering::{OrderBy, OrderByRequest};
 use aip::pagination::{PageRequest, PageToken};
-use prost_reflect::ReflectMessage;
+use prost_reflect::{Kind, ReflectMessage};
 use prost_types::Timestamp;
 use tonic::{Request, Response, Status};
 
@@ -224,11 +224,14 @@ impl FreightService for FreightServer {
         let predicate = if req.filter.is_empty() {
             None
         } else {
-            // An invalid/unsupported filter converts to `INVALID_ARGUMENT`:
-            // `check` via `aip-filtering`'s AIP-193 `From<Error>` (#16), and a
-            // construct beyond this slice's `=`/`AND` transpiler explicitly.
-            let filter = aip::filtering::check(&req.filter, &site_declarations())?;
-            let predicate = aip_sql::transpile_filter(&filter, &site_schema())
+            // An invalid filter converts to `INVALID_ARGUMENT`: `check` via
+            // `aip-filtering`'s AIP-193 `From<Error>` (#16), and any construct the
+            // transpiler can't lower yet (the has operator `:`, #41) explicitly.
+            // The same declarations drive the check and the transpiler's type
+            // recovery — it recovers enum/timestamp/map typing from them (ADR-0008).
+            let declarations = site_declarations();
+            let filter = aip::filtering::check(&req.filter, &declarations)?;
+            let predicate = aip_sql::transpile_filter(&filter, &declarations, &site_schema())
                 .map_err(|e| Status::invalid_argument(format!("filter: {e}")))?;
             Some(predicate)
         };
@@ -448,34 +451,50 @@ fn longitude(site: &Site) -> f64 {
     site.lat_lng.as_ref().map_or(0.0, |ll| ll.longitude)
 }
 
-/// The AIP-160 declarations a `ListSites` filter is checked against: the scalar
-/// string columns `display_name` and `name`, with `=` and `AND`. Deliberately
-/// narrower than `standard_functions` so the checker rejects anything this
-/// slice's transpiler can't lower (e.g. `OR`, `!=`) with a clean
-/// `INVALID_ARGUMENT`, rather than failing later in transpile.
+/// The AIP-160 declarations a `ListSites` filter is checked against: the full
+/// standard operator set (#40) over one identifier of each filterable shape — the
+/// string `display_name` / `name`, the timestamp `create_time`, the nested
+/// numeric `lat_lng.latitude`, and the reflective enum `state`. The transpiler is
+/// the gate for the constructs it can't lower yet (the has operator `:`, #41),
+/// which still surface as a clean `INVALID_ARGUMENT`.
 fn site_declarations() -> aip::filtering::Declarations {
-    use aip::filtering::{function, Overload, Type};
-    aip::filtering::Declarations::builder()
+    use aip::filtering::{Declarations, Type};
+
+    // The `Site.state` enum descriptor, taken from the field itself — a Typed
+    // message carries its own descriptor (ADR-0009), so there is no by-name pool
+    // lookup. `enum_ident` declares the field, each value name, and the enum
+    // `=`/`!=` overloads.
+    let state_enum = match Site::default()
+        .descriptor()
+        .get_field_by_name("state")
+        .expect("Site has a `state` field")
+        .kind()
+    {
+        Kind::Enum(descriptor) => descriptor,
+        other => unreachable!("the `state` field is an enum, found {other:?}"),
+    };
+
+    Declarations::builder()
+        .standard_functions()
         .ident("display_name", Type::String)
         .ident("name", Type::String)
-        .function(
-            function::EQUALS,
-            vec![Overload::new(Type::Bool, vec![Type::String, Type::String])],
-        )
-        .function(
-            function::AND,
-            vec![Overload::new(Type::Bool, vec![Type::Bool, Type::Bool])],
-        )
+        .ident("create_time", Type::Timestamp)
+        .ident("lat_lng.latitude", Type::Double)
+        .enum_ident("state", state_enum)
         .build()
         .expect("site filter declarations are valid")
 }
 
-/// Maps the filterable Site identifiers onto their SQLite columns (#39). Both map
+/// Maps the filterable Site identifiers onto their SQLite columns (#39, #40). The
+/// nested `lat_lng.latitude` path flattens to the `latitude` column; the rest map
 /// to identically-named columns in the `sites` table.
 fn site_schema() -> aip_sql::Schema {
     aip_sql::Schema::builder()
         .column("display_name", "display_name")
         .column("name", "name")
+        .column("create_time", "create_time")
+        .column("lat_lng.latitude", "latitude")
+        .column("state", "state")
         .build()
 }
 
@@ -598,6 +617,7 @@ fn now() -> prost_types::Timestamp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::einride::example::freight::v1::site;
     use crate::proto::google::r#type::LatLng;
 
     /// A shipper parent name; the demo does not require the shipper to exist in
@@ -618,6 +638,22 @@ mod tests {
             .create_site(Request::new(CreateSiteRequest {
                 parent: PARENT.to_owned(),
                 site: Some(site),
+            }))
+            .await
+            .expect("create_site succeeds");
+    }
+
+    /// Creates a site under `PARENT` with the given display name and operational
+    /// state, for the enum-filter test.
+    async fn seed_site_with_state(server: &FreightServer, display_name: &str, state: site::State) {
+        server
+            .create_site(Request::new(CreateSiteRequest {
+                parent: PARENT.to_owned(),
+                site: Some(Site {
+                    display_name: display_name.to_owned(),
+                    state: state as i32,
+                    ..Default::default()
+                }),
             }))
             .await
             .expect("create_site succeeds");
@@ -1053,19 +1089,87 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn filter_beyond_the_slice_is_invalid_argument() {
-        // `OR` is outside this slice's declarations, so the checker rejects it with
-        // `INVALID_ARGUMENT` before it ever reaches the transpiler.
+    async fn filter_disjunction_matches_either_branch() {
+        // `OR` now lowers to SQL (#40): a disjunction returns the union of its
+        // branches.
+        let server = FreightServer::new();
+        for name in ["Alpha", "Bravo", "Charlie"] {
+            seed_site(&server, name, 0.0).await;
+        }
+        assert_eq!(
+            list_filtered_display_names(
+                &server,
+                r#"display_name = "Alpha" OR display_name = "Charlie""#,
+            )
+            .await,
+            ["Alpha", "Charlie"],
+        );
+    }
+
+    #[tokio::test]
+    async fn filter_by_numeric_latitude() {
+        // A numeric comparison over the nested `lat_lng.latitude` path: `> 0`
+        // keeps only the northern sites. The `Double > Int` overload lets the
+        // bare `0` literal compare against the double column.
+        let server = FreightServer::new();
+        seed_site(&server, "north", 60.0).await;
+        seed_site(&server, "south", -30.0).await;
+        seed_site(&server, "equator", 0.0).await;
+        assert_eq!(
+            list_filtered_display_names(&server, "lat_lng.latitude > 0").await,
+            ["north"],
+        );
+    }
+
+    #[tokio::test]
+    async fn filter_by_timestamp_create_time() {
+        // `create_time` is server-set to `now()` and stored as RFC3339 text, so a
+        // far-past bound matches every site and a far-future bound matches none —
+        // proving the bound timestamp literal runs inside SQLite.
+        let server = FreightServer::new();
+        for name in ["Alpha", "Bravo"] {
+            seed_site(&server, name, 0.0).await;
+        }
+        assert_eq!(
+            list_filtered_display_names(&server, r#"create_time > "2000-01-01T00:00:00Z""#).await,
+            ["Alpha", "Bravo"],
+        );
+        assert!(
+            list_filtered_display_names(&server, r#"create_time > "2999-01-01T00:00:00Z""#)
+                .await
+                .is_empty(),
+        );
+    }
+
+    #[tokio::test]
+    async fn filter_by_enum_state() {
+        // A reflective enum filter: `state = STATE_ACTIVE` binds the value name
+        // and returns only the active sites.
+        let server = FreightServer::new();
+        seed_site_with_state(&server, "Alpha", site::State::Active).await;
+        seed_site_with_state(&server, "Bravo", site::State::Inactive).await;
+        seed_site_with_state(&server, "Charlie", site::State::Active).await;
+        assert_eq!(
+            list_filtered_display_names(&server, "state = STATE_ACTIVE").await,
+            ["Alpha", "Charlie"],
+        );
+    }
+
+    #[tokio::test]
+    async fn filter_with_has_operator_is_invalid_argument() {
+        // The has operator `:` type-checks (it is in the standard set) but is the
+        // next slice (#41), so the transpiler is the gate that rejects it with
+        // `INVALID_ARGUMENT`.
         let server = FreightServer::new();
         seed_site(&server, "Alpha", 0.0).await;
         let status = server
             .list_sites(Request::new(ListSitesRequest {
                 parent: PARENT.to_owned(),
-                filter: r#"display_name = "Alpha" OR display_name = "Bravo""#.to_owned(),
+                filter: r#"display_name : "Alpha""#.to_owned(),
                 ..Default::default()
             }))
             .await
-            .expect_err("an unsupported filter is rejected");
+            .expect_err("the has operator is not supported yet");
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
     }
 }

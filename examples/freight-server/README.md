@@ -58,8 +58,8 @@ Sites live under a shipper, and `ListSites` honors an AIP-132 `order_by`.
 
 ```sh
 # Seed a couple of sites under the shipper, then list them ordered by name.
-gc -d '{"parent":"shippers/$ID","site":{"display_name":"Bravo"}}' 127.0.0.1:50051 $SVC/CreateSite
-gc -d '{"parent":"shippers/$ID","site":{"display_name":"Alpha"}}' 127.0.0.1:50051 $SVC/CreateSite
+gc -d '{"parent":"shippers/$ID","site":{"display_name":"Bravo","state":"STATE_ACTIVE"}}'   127.0.0.1:50051 $SVC/CreateSite
+gc -d '{"parent":"shippers/$ID","site":{"display_name":"Alpha","state":"STATE_INACTIVE"}}' 127.0.0.1:50051 $SVC/CreateSite
 gc -d '{"parent":"shippers/$ID","orderBy":"display_name"}'        127.0.0.1:50051 $SVC/ListSites
 gc -d '{"parent":"shippers/$ID","orderBy":"display_name desc"}'   127.0.0.1:50051 $SVC/ListSites
 
@@ -69,11 +69,14 @@ gc -d '{"parent":"shippers/$ID","orderBy":"display_name desc"}'   127.0.0.1:5005
 # BadRequest naming the offending field. grpcurl prints the details block.
 gc -d '{"parent":"shippers/$ID","orderBy":"bogus_field"}'         127.0.0.1:50051 $SVC/ListSites
 
-# AIP-160 filtering (#39): the filter is type-checked, transpiled to parameterized
-# SQL by `aip-sql`, and run in the in-memory SQLite store, so only matching sites
-# come back. This slice supports `=` and `AND` over the scalar `display_name` /
-# `name` columns.
-gc -d '{"parent":"shippers/$ID","filter":"display_name = \"Alpha\""}' 127.0.0.1:50051 $SVC/ListSites
+# AIP-160 filtering (#39, #40): the filter is type-checked, transpiled to
+# parameterized SQL by `aip-sql`, and run in the in-memory SQLite store, so only
+# matching sites come back. The full operator set lowers — `=` `!=` `<` `<=` `>`
+# `>=`, `AND` `OR` `NOT` — over the scalar `display_name`/`name`, the nested
+# numeric `lat_lng.latitude`, the timestamp `create_time`, and the enum `state`.
+gc -d '{"parent":"shippers/$ID","filter":"display_name = \"Alpha\" OR display_name = \"Bravo\""}' 127.0.0.1:50051 $SVC/ListSites
+gc -d '{"parent":"shippers/$ID","filter":"state = STATE_ACTIVE"}'                127.0.0.1:50051 $SVC/ListSites
+gc -d '{"parent":"shippers/$ID","filter":"create_time > \"2024-01-01T00:00:00Z\""}' 127.0.0.1:50051 $SVC/ListSites
 
 # A missing required field is rejected the same way (here the server's own
 # presence check, reason FIELD_REQUIRED / domain freight.example.com):
@@ -94,7 +97,7 @@ wired up.
 | `UpdateShipper`   | `fieldmask` (typed `update` over `update_mask`) | #8, #48   | wired       |
 | `DeleteShipper`   | `resourcename` (validate name)               | #4           | wired       |
 | `CreateSite`      | `resourceid` (generate), `resourcename` (parse parent + format) | #5, #3 | wired       |
-| `ListSites`       | `ordering` (parse/validate/sort) + `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (→ in-memory SQLite) | #9, #10, #6, #7, #11, #39 | wired³ |
+| `ListSites`       | `ordering` (parse/validate/sort) + `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (→ in-memory SQLite) | #9, #10, #6, #7, #11, #39, #40 | wired³ |
 | `GetSite` / `UpdateSite` / `DeleteSite`, `BatchGetSites`, `*Shipment` | the same primitives + `filtering` | #11–#15 | `Unimplemented` |
 
 ³ `ListSites` parses the `order_by` (`aip::ordering::parse_order_by`) and
@@ -109,9 +112,14 @@ the request checksum and the now-stale page token is rejected — and `filter` i
 non-pagination field too, so it is covered by the same guard. `ListSites` also
 applies the AIP-160 `filter`: `aip::filtering` parses and type-checks it, `aip-sql`
 transpiles it to a parameterized `Predicate`, and the in-memory SQLite-backed Site
-store runs it (#39). This tracer-bullet slice handles `=` and `AND` over the
-scalar `display_name` / `name` columns. The remaining Site/Shipment handlers await
-their methods (#11–#15) before they drop `Unimplemented`.
+store runs it (#39, #40). The transpiler lowers the full operator set the checker
+accepts — `=` `!=` `<` `<=` `>` `>=`, `AND` `OR` `NOT` — recovering each operand's
+type from the declarations and a column schema (ADR-0008): the scalar
+`display_name`/`name`, the timestamp `create_time` (bound as RFC3339 text), the
+nested numeric `lat_lng.latitude`, and the reflective enum `state` (bound as its
+value name). The has operator `:` is the next slice (#41). The remaining
+Site/Shipment handlers await their methods (#11–#15) before they drop
+`Unimplemented`.
 
 ² Real offset pagination through the `pagination` page-token codec (#6), with the
 request-checksum guard (#7) that rejects a token when a non-pagination field

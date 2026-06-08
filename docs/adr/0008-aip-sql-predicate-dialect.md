@@ -83,3 +83,40 @@ building the example now needs a C toolchain (rusqlite `bundled`). The core
 crates stay datastore-free (ADR-0005), and the slice still ships only `=`/`AND`
 over scalar columns with parent scoping in the service layer (`scope_to_parent`
 is #43).
+
+## Amendment (#40): full operator grammar and type recovery
+
+The transpiler now lowers the full operator set the checker accepts. Decisions
+fixed here, since `check()` discards types and the transpiler re-derives them:
+
+- **Signature.** `transpile_filter(&Filter, &Declarations, &Schema)`. The
+  `Schema` maps each **Identifier** to a column (and is the column allowlist);
+  the `Declarations` — the same set the filter was checked against — let the
+  transpiler recover an operand's type *without re-running the checker*. The one
+  case that needs them is telling a bare **enum value** (an `Ident` declared with
+  an `Enum` type but absent from the `Schema`) apart from a declared scalar
+  column that the caller forgot to map (→ `UnknownIdentifier`).
+- **Operators.** `=` `!=` `<` `<=` `>` `>=` lower to a `Predicate::Compare`
+  leaf carrying a `CmpOp`; `AND`/`OR`/`NOT` to the existing combinators. A
+  comparison is normalized to `column <op> value` — if the column sits on the
+  right, the operator is mirrored (`"x" < c` → `c > "x"`). The comparison
+  operators are standard SQL, so they are rendered directly, not per-`Dialect`.
+- **Enum** comparisons render the value **as its name (a `TEXT` bind)**, not its
+  number. This keeps the transpiler reflection-free (no `EnumDescriptor` needed
+  to map a name to an integer) and human-readable; the column is expected to
+  store the value name, which the example does via prost's `as_str_name()`.
+- **Timestamp** literals (a bare RFC3339 string, or one lifted by
+  `timestamp(...)`) bind as **text**; the column is expected to store sortable
+  RFC3339. **Duration** literals (`duration("3600s")`) bind as their **total
+  seconds (`Double`)** so they compare numerically; a non-seconds string is an
+  `InvalidDuration` error (the checker accepts any string argument).
+- **Member access** into a `map` column (`labels.env`) renders `column ->> ?`
+  with the **key bound** (it is filter input, never interpolated). `->>` is
+  shared by SQLite and Postgres, so it is not a per-`Dialect` leaf. A dotted path
+  the `Schema` declares as one column (`lat_lng.latitude`) instead maps straight
+  to that column.
+
+The has operator `:` and a comparison between two columns remain
+`Error::Unsupported` (`:` is #41). Per CLAUDE.md the example exercises this: a
+`Site.state` enum is added to the demo proto, and `ListSites` runs numeric,
+timestamp, and enum filters end-to-end through SQLite.

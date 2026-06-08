@@ -13,8 +13,17 @@
 //! never spliced into SQL text. This crate depends on no datastore — the caller
 //! binds the values to whatever driver it uses.
 //!
-//! This is the tracer-bullet slice: [`transpile_filter`] supports only `=` and
-//! `AND` over scalar columns. See `docs/adr/0008-aip-sql-predicate-dialect.md`.
+//! [`transpile_filter`] lowers the full AIP-160 operator set the checker
+//! accepts: the comparisons `=` / `!=` / `<` / `<=` / `>` / `>=`, the logical
+//! `AND` / `OR` / `NOT`, member access into `map` columns (`labels.env`), and
+//! the `timestamp(...)` / `duration(...)` constructors. Because [`check`] yields
+//! an *untyped* expression tree, it is handed the [`Declarations`] and a column
+//! [`Schema`] to recover each operand's type and map each identifier to a column
+//! (ADR-0008). The has operator `:` is the next slice (#41). See
+//! `docs/adr/0008-aip-sql-predicate-dialect.md`.
+//!
+//! [`check`]: aip_filtering::check
+//! [`Declarations`]: aip_filtering::Declarations
 
 mod dialect;
 mod predicate;
@@ -22,7 +31,7 @@ mod schema;
 mod transpile;
 
 pub use dialect::{Dialect, Sqlite};
-pub use predicate::{Predicate, Value};
+pub use predicate::{CmpOp, Column, Predicate, Value};
 pub use schema::Schema;
 pub use transpile::transpile_filter;
 
@@ -30,11 +39,15 @@ pub use transpile::transpile_filter;
 /// [`Predicate`].
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// A filter construct this slice's transpiler does not handle yet (anything
-    /// beyond `=` and `AND` over scalar columns).
+    /// A filter construct this transpiler does not handle (e.g. the has operator
+    /// `:`, or a comparison between two columns).
     #[error("unsupported filter construct: {0}")]
     Unsupported(String),
     /// A filter identifier with no column mapping in the [`Schema`].
     #[error("filter identifier `{0}` is not a filterable column")]
     UnknownIdentifier(String),
+    /// A `duration(...)` literal that is not a number of seconds (e.g. `"10m"`).
+    /// The checker accepts any string argument, so the format is validated here.
+    #[error("invalid duration literal `{0}`: expected a number of seconds like `3600s`")]
+    InvalidDuration(String),
 }
