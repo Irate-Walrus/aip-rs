@@ -64,15 +64,18 @@ impl Storage {
     }
 
     /// Insert or overwrite a site, keyed by its `name`. The full site is stored as
-    /// wire bytes alongside the columns an AIP-160 filter can address: the scalar
-    /// `display_name`, the timestamp `create_time` as sortable RFC3339 text, the
-    /// nested `lat_lng.latitude` flattened to a numeric column, the enum `state` as
-    /// its value name (matching the transpiler's enum rendering, #40), and the
-    /// `annotations` map / `tags` list as JSON the has operator queries with
-    /// `json_each` (#41).
+    /// wire bytes alongside the columns an AIP-160 filter can address or an
+    /// AIP-132 `order_by` can sort by: the scalar `display_name`, the timestamps
+    /// `create_time` / `update_time` as sortable RFC3339 text, the nested
+    /// `lat_lng.latitude` / `lat_lng.longitude` flattened to numeric columns, the
+    /// enum `state` as its value name (matching the transpiler's enum rendering,
+    /// #40), and the `annotations` map / `tags` list as JSON the has operator
+    /// queries with `json_each` (#41).
     pub fn put_site(&self, site: Site) {
         let create_time = site.create_time.as_ref().map(rfc3339);
+        let update_time = site.update_time.as_ref().map(rfc3339);
         let latitude = site.lat_lng.as_ref().map(|ll| ll.latitude);
+        let longitude = site.lat_lng.as_ref().map(|ll| ll.longitude);
         let state = State::try_from(site.state)
             .unwrap_or(State::Unspecified)
             .as_str_name();
@@ -85,13 +88,16 @@ impl Storage {
             .unwrap()
             .execute(
                 "INSERT OR REPLACE INTO sites \
-                 (name, display_name, create_time, latitude, state, annotations, tags, data) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 (name, display_name, create_time, update_time, latitude, longitude, \
+                  state, annotations, tags, data) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 rusqlite::params![
                     site.name,
                     site.display_name,
                     create_time,
+                    update_time,
                     latitude,
+                    longitude,
                     state,
                     annotations,
                     tags,
@@ -101,28 +107,46 @@ impl Storage {
             .expect("insert site");
     }
 
-    /// Sites matching `predicate`, in resource-name order, read from SQLite. A
-    /// `None` predicate returns every site. The predicate is rendered to
-    /// parameterized SQL by the SQLite [`Dialect`](aip::sql::Dialect) and its bind
-    /// values are passed as positional parameters — never spliced into the SQL
-    /// text (ADR-0005 / ADR-0008). Parent scoping and ordering stay in the service
-    /// layer this slice (`scope_to_parent` is #43; SQL `ORDER BY` is #42).
-    pub fn list_sites_matching(&self, predicate: Option<&aip::sql::Predicate>) -> Vec<Site> {
+    /// One page of sites matching `predicate`, sorted and paginated entirely in
+    /// SQLite (#42). A `None` predicate matches every site.
+    ///
+    /// The query is `SELECT data FROM sites [WHERE <predicate>] ORDER BY
+    /// <order_by> LIMIT <limit> OFFSET <offset>`: the predicate renders to
+    /// parameterized SQL through the SQLite [`Dialect`](aip::sql::Dialect) and its
+    /// bind values are bound positionally — never spliced into the SQL text
+    /// (ADR-0005 / ADR-0008). The `ORDER BY` columns come from the [`Schema`]
+    /// allowlist and the `LIMIT` / `OFFSET` are server-resolved integers, so both
+    /// are rendered directly (no binds) by [`aip::sql::render_order_by`] /
+    /// [`aip::sql::render_limit_offset`].
+    ///
+    /// Parent scoping still happens in the service layer this slice
+    /// (`scope_to_parent` is #43); for the demo's single-parent listings that
+    /// post-filter drops nothing, so the page boundaries match.
+    ///
+    /// [`Schema`]: aip::sql::Schema
+    pub fn list_sites_page(
+        &self,
+        predicate: Option<&aip::sql::Predicate>,
+        order_by: &[aip::sql::Order],
+        limit: u64,
+        offset: u64,
+    ) -> Vec<Site> {
         let conn = self.sites.lock().unwrap();
-        let (sql, params) = match predicate {
+        let (where_clause, params): (String, Vec<rusqlite::types::Value>) = match predicate {
             Some(predicate) => {
                 let (where_sql, binds) = aip::sql::Sqlite.render(predicate);
-                let params: Vec<rusqlite::types::Value> = binds.into_iter().map(to_sql).collect();
-                (
-                    format!("SELECT data FROM sites WHERE {where_sql} ORDER BY name"),
-                    params,
-                )
+                let params = binds.into_iter().map(to_sql).collect();
+                (format!("WHERE {where_sql} "), params)
             }
-            None => (
-                "SELECT data FROM sites ORDER BY name".to_string(),
-                Vec::new(),
-            ),
+            None => (String::new(), Vec::new()),
         };
+        let order_clause = if order_by.is_empty() {
+            String::new()
+        } else {
+            format!("ORDER BY {} ", aip::sql::render_order_by(order_by))
+        };
+        let page_clause = aip::sql::render_limit_offset(limit, offset);
+        let sql = format!("SELECT data FROM sites {where_clause}{order_clause}{page_clause}");
         let mut statement = conn.prepare(&sql).expect("prepare site query");
         let rows = statement
             .query_map(rusqlite::params_from_iter(params), |row| {
@@ -135,10 +159,11 @@ impl Storage {
 }
 
 /// Open an in-memory SQLite database with the `sites` table: the resource name as
-/// primary key, the filterable `display_name` / `create_time` / `latitude` /
-/// `state` columns the AIP-160 filter addresses (#40), the JSON `annotations` /
-/// `tags` columns the has operator queries with `json_each` (#41), and the full
-/// site as wire bytes for lossless round-trips.
+/// primary key, the `display_name` / `create_time` / `update_time` / `latitude` /
+/// `longitude` / `state` columns the AIP-160 filter addresses (#40) or the
+/// AIP-132 `order_by` sorts by (#42), the JSON `annotations` / `tags` columns the
+/// has operator queries with `json_each` (#41), and the full site as wire bytes
+/// for lossless round-trips.
 fn new_sites_db() -> rusqlite::Connection {
     let conn = rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
     conn.execute_batch(
@@ -146,7 +171,9 @@ fn new_sites_db() -> rusqlite::Connection {
             name         TEXT PRIMARY KEY,
             display_name TEXT NOT NULL,
             create_time  TEXT,
+            update_time  TEXT,
             latitude     REAL,
+            longitude    REAL,
             state        TEXT NOT NULL,
             annotations  TEXT NOT NULL,
             tags         TEXT NOT NULL,

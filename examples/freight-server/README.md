@@ -64,6 +64,14 @@ gc -d '{"parent":"shippers/$ID","site":{"display_name":"Alpha","state":"STATE_IN
 gc -d '{"parent":"shippers/$ID","orderBy":"display_name"}'        127.0.0.1:50051 $SVC/ListSites
 gc -d '{"parent":"shippers/$ID","orderBy":"display_name desc"}'   127.0.0.1:50051 $SVC/ListSites
 
+# Sorting and paging happen in SQL (#42): an ORDER BY plus a LIMIT/OFFSET derived
+# from the page size and the offset page token. Ask for one site per page, then
+# pass the returned `nextPageToken` back to get the next — the page boundaries
+# stay stable because the resource name breaks ties. (Changing `orderBy` or
+# `filter` mid-pagination flips the request checksum and rejects the token.)
+gc -d '{"parent":"shippers/$ID","orderBy":"display_name","pageSize":1}'                       127.0.0.1:50051 $SVC/ListSites
+gc -d '{"parent":"shippers/$ID","orderBy":"display_name","pageSize":1,"pageToken":"<TOKEN>"}' 127.0.0.1:50051 $SVC/ListSites
+
 # Bad syntax or an unknown ordering field is rejected with InvalidArgument —
 # and the status carries AIP-193 details (#16): an ErrorInfo with a
 # machine-readable reason (ORDER_BY_UNKNOWN_FIELD / domain aip-rs) plus a
@@ -105,31 +113,35 @@ wired up.
 | `UpdateShipper`   | `fieldmask` (typed `update` over `update_mask`) | #8, #48   | wired       |
 | `DeleteShipper`   | `resourcename` (validate name)               | #4           | wired       |
 | `CreateSite`      | `resourceid` (generate), `resourcename` (parse parent + format) | #5, #3 | wired       |
-| `ListSites`       | `ordering` (parse/validate/sort) + `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (→ in-memory SQLite) | #9, #10, #6, #7, #11, #39, #40, #41 | wired³ |
+| `ListSites`       | `ordering` (parse/validate) + `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (filter + `ORDER BY`/`LIMIT`/`OFFSET` → in-memory SQLite) | #9, #10, #6, #7, #11, #39, #40, #41, #42 | wired³ |
 | `GetSite` / `UpdateSite` / `DeleteSite`, `BatchGetSites`, `*Shipment` | the same primitives + `filtering` | #11–#15 | `Unimplemented` |
 
 ³ `ListSites` parses the `order_by` (`aip::ordering::parse_order_by`) and
 validates it against an allow-list of sortable Site paths (`validate_for_paths`,
-#9) — the right gate here, because the in-memory `sort_sites` only knows those
-curated paths. The descriptor-based `validate_for_message` (#10) guards that
-allow-list in turn: a test checks every sortable path against the `Site`
-descriptor, so the allow-list can't silently drift from the proto. `ListSites`
-then applies the sort before paginating. Ordering composes with pagination:
-because `order_by` is a non-pagination field, changing it mid-pagination flips
-the request checksum and the now-stale page token is rejected — and `filter` is a
-non-pagination field too, so it is covered by the same guard. `ListSites` also
-applies the AIP-160 `filter`: `aip::filtering` parses and type-checks it,
-`aip::sql` transpiles it to a parameterized `Predicate`, and the in-memory
-SQLite-backed Site store runs it (#39, #40, #41). The transpiler lowers the full
-operator set the checker accepts — `=` `!=` `<` `<=` `>` `>=`, `AND` `OR` `NOT`,
-and the has operator `:` — recovering each operand's type from the declarations
-and a column schema (ADR-0008): the scalar `display_name`/`name`, the timestamp
-`create_time` (bound as RFC3339 text), the nested numeric `lat_lng.latitude`, the
-reflective enum `state` (bound as its value name), and the `annotations` map /
-`tags` list. The has operator `:` does substring on a string, key / element
-presence in the map / list (via SQLite `json_each`), and presence on a timestamp
-(`create_time:*`). The remaining Site/Shipment handlers await their methods
-(#11–#15) before they drop
+#9). The descriptor-based `validate_for_message` (#10) guards that allow-list in
+turn: a test checks every sortable path against the `Site` descriptor, so the
+allow-list can't silently drift from the proto (and a sibling test checks every
+path maps to a column in the schema). It then **sorts and pages in SQL** (#42):
+`aip::sql::transpile_order_by` maps the validated `order_by` onto `ORDER BY`
+columns through the same column schema as the filter, a resource-name tie-break is
+appended for a total, stable order, and the SQLite store runs `ORDER BY …`
+`LIMIT`/`OFFSET` derived from the page size and the offset page token — replacing
+the old in-memory sort. Ordering composes with pagination: because `order_by` is a
+non-pagination field, changing it mid-pagination flips the request checksum and
+the now-stale page token is rejected — and `filter` is a non-pagination field too,
+so it is covered by the same guard. `ListSites` also applies the AIP-160 `filter`:
+`aip::filtering` parses and type-checks it, `aip::sql` transpiles it to a
+parameterized `Predicate`, and the in-memory SQLite-backed Site store runs it
+(#39, #40, #41). The transpiler lowers the full operator set the checker accepts —
+`=` `!=` `<` `<=` `>` `>=`, `AND` `OR` `NOT`, and the has operator `:` —
+recovering each operand's type from the declarations and a column schema
+(ADR-0008): the scalar `display_name`/`name`, the timestamp `create_time` (bound
+as RFC3339 text), the nested numeric `lat_lng.latitude`, the reflective enum
+`state` (bound as its value name), and the `annotations` map / `tags` list. The
+has operator `:` does substring on a string, key / element presence in the map /
+list (via SQLite `json_each`), and presence on a timestamp (`create_time:*`).
+Parent scoping is still an in-memory post-filter (`scope_to_parent` is #43). The
+remaining Site/Shipment handlers await their methods (#11–#15) before they drop
 `Unimplemented`.
 
 ² Real offset pagination through the `pagination` page-token codec (#6), with the

@@ -12,3 +12,6 @@ thiserror.workspace = true
 # The native Filter AST (ADR-0003) is the transpile input — the integration point
 # ADR-0005 named. No datastore dependency: this crate only emits `(sql, binds)`.
 aip-filtering.workspace = true
+# The parsed AIP-132 Order by is the second transpile input (ADR-0008):
+# `transpile_order_by` maps its fields onto SQL `ORDER BY` columns.
+aip-ordering.workspace = true

@@ -3,10 +3,15 @@
 //! ADR-0008 fixes: the full AIP-160 operator set (`=` `!=` `<` `<=` `>` `>=`,
 //! `AND` `OR` `NOT`, the has operator `:`), enum / timestamp / duration /
 //! map-member type recovery, single-pass placeholder numbering, and precedence
-//! parenthesization.
+//! parenthesization — plus the AIP-132 `order_by` → `ORDER BY` mapping and the
+//! `LIMIT` / `OFFSET` tail.
 
 use aip_filtering::{function, Declarations, Overload, Type};
-use aip_sql::{transpile_filter, Dialect, Predicate, Schema, Sqlite, Value};
+use aip_ordering::OrderBy;
+use aip_sql::{
+    render_limit_offset, render_order_by, transpile_filter, transpile_order_by, Dialect, Order,
+    Predicate, Schema, Sqlite, Value,
+};
 
 /// The enum type both the `category` field and its bare value names share.
 fn enum_type() -> Type {
@@ -380,4 +385,56 @@ fn unknown_identifier_is_rejected() {
         aip_sql::Error::UnknownIdentifier(ident) => assert_eq!(ident, "region"),
         other => panic!("expected UnknownIdentifier, got {other:?}"),
     }
+}
+
+/// Parse an `order_by` string and transpile it against [`schema`].
+fn order(order_by: &str) -> Vec<Order> {
+    let parsed: OrderBy = order_by.parse().expect("order_by parses");
+    transpile_order_by(&parsed, &schema()).expect("order_by transpiles")
+}
+
+#[test]
+fn order_by_renders_multi_field_ascending_and_descending() {
+    // A multi-field `order_by` maps each path to its column in priority order; the
+    // implicit and explicit `asc` render `ASC`, `desc` renders `DESC`.
+    let items = order("display_name, size desc");
+    assert_eq!(items, vec![Order::asc("display_name"), Order::desc("size")]);
+    assert_eq!(render_order_by(&items), "display_name ASC, size DESC");
+}
+
+#[test]
+fn order_by_maps_nested_path_to_its_column() {
+    // A `.`-nested path resolves through the schema to its flattened column.
+    let items = order("lat_lng.latitude desc");
+    assert_eq!(items, vec![Order::desc("latitude")]);
+    assert_eq!(render_order_by(&items), "latitude DESC");
+}
+
+#[test]
+fn empty_order_by_renders_nothing() {
+    // An empty `order_by` is valid and yields no items, so the caller emits no
+    // `ORDER BY` clause.
+    let items = order("");
+    assert!(items.is_empty());
+    assert_eq!(render_order_by(&items), "");
+}
+
+#[test]
+fn order_by_unmapped_path_is_rejected() {
+    // A path the schema does not map is rejected, the same gate the filter
+    // transpiler applies to an unmapped identifier.
+    let parsed: OrderBy = "ghost".parse().expect("order_by parses");
+    let err = transpile_order_by(&parsed, &schema()).expect_err("unmapped path");
+    match err {
+        aip_sql::Error::UnknownIdentifier(path) => assert_eq!(path, "ghost"),
+        other => panic!("expected UnknownIdentifier, got {other:?}"),
+    }
+}
+
+#[test]
+fn limit_offset_renders_from_page_size_and_offset() {
+    // The resolved page size and offset page-token offset render as a decimal
+    // `LIMIT` / `OFFSET` tail — no binds, since neither is free-form text.
+    assert_eq!(render_limit_offset(50, 100), "LIMIT 50 OFFSET 100");
+    assert_eq!(render_limit_offset(10, 0), "LIMIT 10 OFFSET 0");
 }

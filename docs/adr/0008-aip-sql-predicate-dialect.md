@@ -160,3 +160,34 @@ checker accepts. Unlike the comparisons, `:` is **the main per-engine divergence
 Per CLAUDE.md the example exercises this end-to-end: `Site` gains an
 `annotations` map and a `tags` list (stored as JSON), and `ListSites` runs
 substring, map-key, and list-element has filters through SQLite `json_each`.
+
+## Amendment (#42): ordering + pagination → `ORDER BY` / `LIMIT` / `OFFSET`
+
+The Order by half of the Decision is now implemented, alongside the page tail.
+
+- **Signature.** `transpile_order_by(&OrderBy, &Schema) -> Result<Vec<Order>, Error>`
+  maps each AIP-132 `order_by` field path to a column through the *same* `Schema`
+  the filter uses (the column allowlist), preserving priority order. A path the
+  `Schema` does not map is `Error::UnknownIdentifier`, the same gate the filter
+  transpiler applies. An `Order` is just a `{ column, desc }` pair.
+- **Rendered directly, not bound.** Unlike a `Filter`, an `order_by` carries no
+  attacker-controlled literals: a path is validated against the allowlist and
+  mapped to a fixed column name, and the direction is `ASC` / `DESC`. So
+  `render_order_by(&[Order]) -> String` writes the columns directly (like the
+  comparison operators, not via a `Dialect` leaf), and `render_limit_offset(limit,
+  offset) -> String` writes the page size and offset as decimal literals. The
+  offset comes from a forgeable page token, but as a `u64` it can only render as
+  digits — so "parameterize, never interpolate" still holds; there is nothing
+  splice-able to bind.
+- **Example pages in SQL.** `ListSites` transpiles the validated `order_by`,
+  appends a resource-name tie-break so the order is total and stable across pages,
+  and the SQLite store runs `ORDER BY <items> LIMIT <size+1> OFFSET <offset>` — the
+  `+1` row signals a further page (the AIP-158 `next_page_token`), replacing the
+  old in-memory `sort_sites` + slice. The `sites` table gains `update_time` /
+  `longitude` columns so every sortable allow-list path has a column.
+- **Parent scoping stays service-side.** Per the #41 split, parent scoping remains
+  an in-memory post-filter (`scope_to_parent` is #43). For the demo's
+  single-parent listings that post-filter drops nothing, so the SQL page
+  boundaries match the previous in-memory path; composing parent scope *into* the
+  SQL `WHERE` (so multi-parent paging is exact) lands with `scope_to_parent` in
+  #43.
