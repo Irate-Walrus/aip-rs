@@ -126,9 +126,10 @@ gc -d '{"parent":"shippers/$ID","filter":"origin_site = \"shippers/$ID/sites/a\"
 gc -d '{"parent":"shippers/$ID","filter":"annotations:priority"}'                            127.0.0.1:50051 $SVC/ListShipments
 ```
 
-The `google.iam.v1.IAMPolicy` service (#64) stores a **Policy** keyed by
-**Resource name**. Its protos are vendored under this example's
-[`proto/`](proto) (not the shared fixtures), so point grpcurl there:
+The `google.iam.v1.IAMPolicy` service (#64, #65) stores a **Policy** keyed by
+**Resource name** and mutates it through the `aip::iam` structural helpers. Its
+protos are vendored under this example's [`proto/`](proto) (not the shared
+fixtures), so point grpcurl there:
 
 ```sh
 IAM=examples/freight-server/proto
@@ -139,16 +140,34 @@ IAMSVC=google.iam.v1.IAMPolicy
 # GetIamPolicy on a resource with no policy returns an empty Policy (not an error).
 ic -d '{"resource":"shippers/acme"}' 127.0.0.1:50051 $IAMSVC/GetIamPolicy
 
-# SetIamPolicy validates every Member of every Binding via aip::iam, stores the
-# Policy, and echoes it back — a Member travels request → validate → store →
-# response. GetIamPolicy then reads the stored Policy.
+# SetIamPolicy validates every Member, enforces the conditions⟹version-3
+# invariant, normalises the Policy (dedupe + canonical member/binding order),
+# stamps a fresh content `etag`, and stores it through the aip::iam helpers (#65)
+# — then echoes the stored Policy. A first write may omit the etag.
 ic -d '{"resource":"shippers/acme","policy":{"version":1,"bindings":[{"role":"roles/viewer","members":["user:alice@example.com","group:ops@example.com"]}]}}' \
                                      127.0.0.1:50051 $IAMSVC/SetIamPolicy
+# GetIamPolicy returns the stored Policy carrying that etag (base64 in JSON).
 ic -d '{"resource":"shippers/acme"}' 127.0.0.1:50051 $IAMSVC/GetIamPolicy
+
+# Read-modify-write: send the etag from the response above back in. A matching
+# etag is accepted and the stored etag advances; replaying the now-stale one is
+# rejected with ABORTED (the IAM optimistic-concurrency contract). Paste the
+# base64 etag you got above:
+ETAG='<paste the etag field from the response above>'
+ic -d '{"resource":"shippers/acme","policy":{"version":1,"etag":"'"$ETAG"'","bindings":[{"role":"roles/viewer","members":["user:alice@example.com"]}]}}' \
+                                     127.0.0.1:50051 $IAMSVC/SetIamPolicy
+# Replaying the same (now-stale) etag fails with ABORTED.
+ic -d '{"resource":"shippers/acme","policy":{"version":1,"etag":"'"$ETAG"'","bindings":[{"role":"roles/editor","members":["user:bob@example.com"]}]}}' \
+                                     127.0.0.1:50051 $IAMSVC/SetIamPolicy
 
 # A malformed Member is rejected with InvalidArgument carrying an IAM_* ErrorInfo
 # (reason IAM_MEMBER_UNKNOWN_TYPE / domain aip-rs) — the AIP-193 mapping (#16).
 ic -d '{"resource":"shippers/acme","policy":{"bindings":[{"role":"roles/viewer","members":["robot:r2d2"]}]}}' \
+                                     127.0.0.1:50051 $IAMSVC/SetIamPolicy
+
+# A conditional Binding requires policy version 3 — version 1 is INVALID_ARGUMENT
+# (reason IAM_POLICY_CONDITION_REQUIRES_VERSION_3).
+ic -d '{"resource":"shippers/acme","policy":{"version":1,"bindings":[{"role":"roles/viewer","members":["user:alice@example.com"],"condition":{"expression":"request.time < timestamp(\"2030-01-01T00:00:00Z\")"}}]}}' \
                                      127.0.0.1:50051 $IAMSVC/SetIamPolicy
 
 # TestIamPermissions is the next slice (#68): it decides through the opt-in
@@ -174,7 +193,7 @@ wired up.
 | `ListSites`       | `ordering` (parse/validate) + `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (filter + server-composed scope/soft-delete + `ORDER BY`/`LIMIT`/`OFFSET` → in-memory SQLite) | #9, #10, #6, #7, #11, #39, #40, #41, #42, #43 | wired³ |
 | `CreateShipment`  | `resourceid` (generate), `resourcename` (parse parent + format), `validation` (accumulate both REQUIRED endpoints → one AIP-193 response) | #5, #3, #60 | wired⁴ |
 | `ListShipments`   | `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (filter + server-composed scope/soft-delete → in-memory SQLite) | #6, #7, #43 | wired⁴ |
-| `IAMPolicy.GetIamPolicy` / `SetIamPolicy` | `iam` (Member validation) over a resource-name-keyed policy store | #64 | wired⁵ |
+| `IAMPolicy.GetIamPolicy` / `SetIamPolicy` | `iam` (Member validation + structural read-modify-write: dedupe/normalise, `etag` optimistic concurrency, conditions⟹version-3) over a decomposed SQLite policy store (iam-go's `iam_policy_bindings` schema) | #64, #65 | wired⁵ |
 | `GetSite` / `UpdateSite` / `DeleteSite`, `BatchGetSites`, `GetShipment` / `UpdateShipment` / `DeleteShipment` | the same primitives | #11–#15 | `Unimplemented` |
 | `IAMPolicy.TestIamPermissions` | `iam` + the opt-in cel-backed `eval` adapter | #66, #68 | `Unimplemented` |
 
@@ -223,18 +242,30 @@ mirrors `CreateSite` — a system-assigned id (#5) formatted into the shipment
 pattern (#3) — so there is something to list and filter; the other shipment
 standard methods stay `Unimplemented` until their issues land.
 
-⁵ The IAM tracer bullet (#64): the `google.iam.v1.IAMPolicy` service over a
-resource-name-keyed in-memory policy store. `SetIamPolicy` validates every
-**Member** of every **Binding** via `aip::iam::Member` — a malformed member
+⁵ The `google.iam.v1.IAMPolicy` service (#64, #65) over an in-memory SQLite
+policy store. The **Policy** is stored *decomposed* into the `iam_policy_bindings`
+table — one row per (resource, **Binding**, **Member**) — mirroring iam-go's
+`iamspanner` schema, and reconstructed on read; its `etag` is a content digest
+(`compute_etag`, a CRC32 over the canonical form) computed from that
+reconstruction, not a stored column. `SetIamPolicy` runs the **Policy** through
+the `aip::iam` helpers rather than blind-overwriting: it validates every
+**Member** of every **Binding** via `aip::iam::Member` (a malformed member
 converts through the crate's AIP-193 `From<Error>` (#16) to `INVALID_ARGUMENT`
-with an `IAM_*` `ErrorInfo` — then stores and echoes the **Policy**;
-`GetIamPolicy` returns the stored Policy, or an empty one when none is set. So a
-Member string travels request → validate → store → response. The example vendors
-and generates its own `google.iam.v1` service types under `proto/`; `aip-iam`
-generates the same `Policy` / `Binding` structure behind its opt-in `iam-proto`
-feature, which the structural read-modify-write ops (#65) build on.
-`TestIamPermissions` is left as a seam — it decides the held subset *through* the
-opt-in cel-backed `eval` adapter (#66), wired in #68 (ADR-0010).
+with an `IAM_*` `ErrorInfo`), enforces the *conditions ⟹ version-3* invariant
+(`aip::iam::policy::validate`), then checks the request `etag` against the stored
+policy (`check_etag` — a stale token is `ABORTED`), normalises it
+(dedupe + canonical order), and replaces the resource's rows in one transaction,
+echoing the stored Policy back. `GetIamPolicy` reconstructs the stored Policy
+carrying its `etag`, or an empty one when none is set. Like iam-go's `iamspanner`,
+the schema persists neither `version` nor a **Binding**'s **Condition** — the
+version-3 invariant is enforced *before* the write, so a conditional binding is
+rejected up front while accepted policies round-trip as their `(role, members)`
+grants. The example generates its own `IAMPolicy` *service* trait + request types
+under `proto/`, but shares the `Policy` / `Binding` *message* layer with `aip-iam`
+via `extern_path` (its opt-in `iam-proto` feature), so the service operates on the
+very types the helpers mutate. `TestIamPermissions` is left as a seam — it decides
+the held subset *through* the opt-in cel-backed `eval` adapter (#66), wired in #68
+(ADR-0010).
 
 ² Real offset pagination through the `pagination` page-token codec (#6), with the
 request-checksum guard (#7) that rejects a token when a non-pagination field

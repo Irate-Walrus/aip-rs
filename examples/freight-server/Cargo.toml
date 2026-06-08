@@ -24,10 +24,14 @@ publish = false
 # The `tonic` feature turns on the crates' AIP-193 `From<Error> for tonic::Status`
 # mapping (#16), so a primitive's validation error reaches the client as a rich
 # `INVALID_ARGUMENT` (ErrorInfo + BadRequest) via `?`. The `iam` feature exposes
-# `aip::iam` for the `IAMPolicy` service's Member validation (aip #64); the demo
-# vendors and generates its own `google.iam.v1` service types, so it does not pull
-# the `iam-proto` feature.
-aip = { workspace = true, features = ["tonic", "sql", "iam"] }
+# `aip::iam` for the `IAMPolicy` service's Member validation; `iam-proto` adds the
+# generated `google.iam.v1.Policy` / `Binding` structure and the structural
+# read-modify-write ops (binding add/remove, dedupe, the `etag` cycle, the
+# version-3 invariant). The demo still generates its own `IAMPolicy` *service*
+# trait + request types, but `build.rs` `extern_path`s the `google.iam.v1` *message*
+# layer onto `aip::iam::proto`, so the service shares one `Policy` type with the
+# helpers it calls (aip #65) instead of a structurally-identical duplicate.
+aip = { workspace = true, features = ["tonic", "sql", "iam", "iam-proto"] }
 
 # gRPC runtime: tonic core (server + transport), the Prost codec the generated
 # service uses, and the protobuf message runtime. `tonic-types` lets the handlers

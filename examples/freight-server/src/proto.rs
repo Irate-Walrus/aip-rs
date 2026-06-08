@@ -41,14 +41,19 @@ pub mod einride {
 pub mod google {
     pub mod r#type {
         // prost escapes the `type` keyword in the generated file name, too.
-        // Holds `LatLng` (freight `Site`) and `Expr` (the IAM `Binding.condition`).
+        // Holds `LatLng` (the freight `Site` location). The IAM `Binding.condition`
+        // `Expr` is `extern_path`ed onto `aip::iam::proto` (aip #65), so it is not
+        // generated here.
         include!(concat!(env!("OUT_DIR"), "/google.r#type.rs"));
     }
     pub mod iam {
         pub mod v1 {
-            // The `IAMPolicy` service trait + its `Policy` / `Binding` / request
-            // messages (aip #64). `Binding.condition` resolves to the sibling
-            // `super::super::r#type::Expr` mounted above.
+            // The `IAMPolicy` service trait + its request messages
+            // (`SetIamPolicyRequest`, `GetPolicyOptions`, …). The `Policy` /
+            // `Binding` message layer is `extern_path`ed onto `aip::iam::proto`
+            // (aip #65) so the service shares one `Policy` type with the structural
+            // read-modify-write helpers; only the service + requests are generated
+            // here.
             include!(concat!(env!("OUT_DIR"), "/google.iam.v1.rs"));
         }
     }

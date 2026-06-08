@@ -73,6 +73,7 @@ dependencies = [
 name = "aip-iam"
 version = "0.1.0"
 dependencies = [
+ "crc32fast",
  "prost",
  "prost-build",
  "protox",

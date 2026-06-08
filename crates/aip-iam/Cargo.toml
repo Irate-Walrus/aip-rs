@@ -15,6 +15,9 @@ tonic-types = { workspace = true, optional = true }
 # `iam-proto` enables the generated google.iam.v1.Policy / Binding structure.
 # Off by default so the parse/validate core stays proto-free (ADR-0010).
 prost = { workspace = true, optional = true }
+# The structural `etag` is a CRC32 over the encoded Policy — the same content-digest
+# idiom `aip-pagination`'s request checksum uses; only needed with `iam-proto`.
+crc32fast = { workspace = true, optional = true }
 
 [features]
 # Adds `From<Error> for tonic::Status` (PERMISSION_DENIED / INVALID_ARGUMENT) with
@@ -24,7 +27,7 @@ tonic = ["dep:tonic", "dep:tonic-types"]
 # Generates the google.iam.v1.Policy / Binding message structure (ADR-0010),
 # mirroring aip-filtering's `cel-proto`. Off by `default`, so the parse/validate
 # core pulls in no proto runtime; the structural read-modify-write ops build on it.
-iam-proto = ["dep:prost"]
+iam-proto = ["dep:prost", "dep:crc32fast"]
 
 [build-dependencies]
 # Generate the vendored google.iam.v1 protos for the `iam-proto` feature. The
