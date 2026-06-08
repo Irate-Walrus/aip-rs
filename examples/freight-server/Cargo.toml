@@ -24,7 +24,7 @@ publish = false
 # The `tonic` feature turns on the crates' AIP-193 `From<Error> for tonic::Status`
 # mapping (#16), so a primitive's validation error reaches the client as a rich
 # `INVALID_ARGUMENT` (ErrorInfo + BadRequest) via `?`.
-aip = { workspace = true, features = ["tonic"] }
+aip = { workspace = true, features = ["tonic", "sql"] }
 
 # gRPC runtime: tonic core (server + transport), the Prost codec the generated
 # service uses, and the protobuf message runtime. `tonic-types` lets the handlers
@@ -43,12 +43,12 @@ prost-types = { workspace = true }
 prost-reflect = { workspace = true, features = ["derive"] }
 tokio       = { workspace = true }
 
-# Default SQLite-backed Site storage (ADR-0008): `aip-sql` transpiles the AIP
-# filter to a parameterized Predicate; `rusqlite` (bundled SQLite, opened
+# Default SQLite-backed Site storage (ADR-0008): the `aip` umbrella's `sql`
+# feature (above) re-exports the SQL adapter as `aip::sql`, which transpiles the
+# AIP filter to a parameterized Predicate; `rusqlite` (bundled SQLite, opened
 # in-memory) binds the values and runs it. This is the Site store out of the box,
 # so `cargo run` exercises the filter end-to-end; shippers stay in an in-memory
 # map. The `bundled` SQLite needs a C toolchain to build the example.
-aip-sql  = { workspace = true }
 rusqlite = { workspace = true }
 
 [build-dependencies]

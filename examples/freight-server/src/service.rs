@@ -219,7 +219,7 @@ impl FreightService for FreightServer {
 
         // The AIP-160 `filter` is applied first, at the source: parse +
         // type-check it (`aip::filtering`), transpile it to a parameterized
-        // `Predicate` (`aip_sql`), and let the SQLite-backed store run it (#39). An
+        // `Predicate` (`aip::sql`), and let the SQLite-backed store run it (#39). An
         // empty filter lists every site.
         let predicate = if req.filter.is_empty() {
             None
@@ -231,7 +231,7 @@ impl FreightService for FreightServer {
             // recovery — it recovers enum/timestamp/map typing from them (ADR-0008).
             let declarations = site_declarations();
             let filter = aip::filtering::check(&req.filter, &declarations)?;
-            let predicate = aip_sql::transpile_filter(&filter, &declarations, &site_schema())
+            let predicate = aip::sql::transpile_filter(&filter, &declarations, &site_schema())
                 .map_err(|e| Status::invalid_argument(format!("filter: {e}")))?;
             Some(predicate)
         };
@@ -488,8 +488,8 @@ fn site_declarations() -> aip::filtering::Declarations {
 /// Maps the filterable Site identifiers onto their SQLite columns (#39, #40). The
 /// nested `lat_lng.latitude` path flattens to the `latitude` column; the rest map
 /// to identically-named columns in the `sites` table.
-fn site_schema() -> aip_sql::Schema {
-    aip_sql::Schema::builder()
+fn site_schema() -> aip::sql::Schema {
+    aip::sql::Schema::builder()
         .column("display_name", "display_name")
         .column("name", "name")
         .column("create_time", "create_time")

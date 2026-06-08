@@ -14,6 +14,9 @@ aip-pagination   = { workspace = true, optional = true }
 aip-fieldmask    = { workspace = true, optional = true }
 aip-ordering     = { workspace = true, optional = true }
 aip-filtering    = { workspace = true, optional = true }
+# Optional SQL adapter (ADR-0005 / ADR-0008): not part of the core, so it stays
+# off by default — only `aip = { features = ["sql"] }` pulls it in as `aip::sql`.
+aip-sql          = { workspace = true, optional = true }
 
 [features]
 default = ["resourcename", "resourceid", "pagination", "fieldmask", "ordering", "filtering"]
@@ -24,6 +27,8 @@ pagination   = ["dep:aip-pagination"]
 fieldmask    = ["dep:aip-fieldmask"]
 ordering     = ["dep:aip-ordering"]
 filtering    = ["dep:aip-filtering"]
+# Deliberately not in `default` (ADR-0005): the SQL adapter is opt-in.
+sql          = ["dep:aip-sql"]
 
 # Forward the optional integrations to whichever sub-crates are enabled.
 tonic = [

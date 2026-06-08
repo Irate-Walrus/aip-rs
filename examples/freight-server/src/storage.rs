@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-use aip_sql::Dialect as _;
+use aip::sql::Dialect as _;
 use prost::Message as _;
 
 use crate::proto::einride::example::freight::v1::{site::State, Shipper, Site};
@@ -95,15 +95,15 @@ impl Storage {
 
     /// Sites matching `predicate`, in resource-name order, read from SQLite. A
     /// `None` predicate returns every site. The predicate is rendered to
-    /// parameterized SQL by the SQLite [`Dialect`](aip_sql::Dialect) and its bind
+    /// parameterized SQL by the SQLite [`Dialect`](aip::sql::Dialect) and its bind
     /// values are passed as positional parameters — never spliced into the SQL
     /// text (ADR-0005 / ADR-0008). Parent scoping and ordering stay in the service
     /// layer this slice (`scope_to_parent` is #43; SQL `ORDER BY` is #42).
-    pub fn list_sites_matching(&self, predicate: Option<&aip_sql::Predicate>) -> Vec<Site> {
+    pub fn list_sites_matching(&self, predicate: Option<&aip::sql::Predicate>) -> Vec<Site> {
         let conn = self.sites.lock().unwrap();
         let (sql, params) = match predicate {
             Some(predicate) => {
-                let (where_sql, binds) = aip_sql::Sqlite.render(predicate);
+                let (where_sql, binds) = aip::sql::Sqlite.render(predicate);
                 let params: Vec<rusqlite::types::Value> = binds.into_iter().map(to_sql).collect();
                 (
                     format!("SELECT data FROM sites WHERE {where_sql} ORDER BY name"),
@@ -171,16 +171,16 @@ fn rfc3339(ts: &prost_types::Timestamp) -> String {
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
-/// Map an aip-sql bind [`Value`](aip_sql::Value) onto rusqlite's owned value type
+/// Map an aip-sql bind [`Value`](aip::sql::Value) onto rusqlite's owned value type
 /// for positional binding.
-fn to_sql(value: aip_sql::Value) -> rusqlite::types::Value {
+fn to_sql(value: aip::sql::Value) -> rusqlite::types::Value {
     use rusqlite::types::Value as Sql;
     match value {
-        aip_sql::Value::Null => Sql::Null,
-        aip_sql::Value::Bool(b) => Sql::Integer(b.into()),
-        aip_sql::Value::Int(i) => Sql::Integer(i),
-        aip_sql::Value::Double(d) => Sql::Real(d),
-        aip_sql::Value::Text(s) => Sql::Text(s),
-        aip_sql::Value::Bytes(b) => Sql::Blob(b),
+        aip::sql::Value::Null => Sql::Null,
+        aip::sql::Value::Bool(b) => Sql::Integer(b.into()),
+        aip::sql::Value::Int(i) => Sql::Integer(i),
+        aip::sql::Value::Double(d) => Sql::Real(d),
+        aip::sql::Value::Text(s) => Sql::Text(s),
+        aip::sql::Value::Bytes(b) => Sql::Blob(b),
     }
 }

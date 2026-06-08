@@ -21,6 +21,7 @@ dependencies = [
  "aip-pagination",
  "aip-resourceid",
  "aip-resourcename",
+ "aip-sql",
 ]
 
 [[package]]
@@ -345,7 +346,6 @@ name = "freight-server"
 version = "0.1.0"
 dependencies = [
  "aip",
- "aip-sql",
  "prost",
  "prost-reflect",
  "prost-types",

@@ -120,3 +120,14 @@ The has operator `:` and a comparison between two columns remain
 `Error::Unsupported` (`:` is #41). Per CLAUDE.md the example exercises this: a
 `Site.state` enum is added to the demo proto, and `ListSites` runs numeric,
 timestamp, and enum filters end-to-end through SQLite.
+
+## Amendment: reached via the umbrella's `aip::sql`
+
+`aip-sql` remains a separately published crate (ADR-0001), but consumers no
+longer depend on it directly: the umbrella `aip` crate re-exports it under a
+**non-default** `sql` feature as `aip::sql`. This keeps the "not part of the
+core" stance of ADR-0005 — the SQL adapter is opt-in, off by default, so a
+parse/validate-only user never pulls it in — while removing the last `aip_*`
+import from consumer code. The example now enables `aip = { features = ["sql"] }`
+and calls `aip::sql::transpile_filter` / `aip::sql::Predicate` /
+`aip::sql::Sqlite` rather than the bare `aip_sql` crate.

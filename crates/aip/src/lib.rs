@@ -24,3 +24,8 @@ pub use aip_ordering as ordering;
 
 #[cfg(feature = "filtering")]
 pub use aip_filtering as filtering;
+
+/// SQL adapter (ADR-0008) — opt-in via the non-default `sql` feature, since it is
+/// not part of the parse/validate core (ADR-0005).
+#[cfg(feature = "sql")]
+pub use aip_sql as sql;
