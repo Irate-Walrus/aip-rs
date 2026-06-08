@@ -20,6 +20,40 @@ pub use member::Member;
 pub use permission::Permission;
 pub use role::Role;
 
+/// The generated `google.iam.v1` Policy structure — opt-in via the non-default
+/// `iam-proto` feature (ADR-0010).
+///
+/// The vendored `policy.proto` is compiled with `protox` (no `protoc`, ADR-0001)
+/// and `prost-build`, mirroring `aip-filtering`'s `cel-proto`. This is the
+/// structural layer the read-modify-write ops (binding add/remove, dedupe, the
+/// `etag` cycle) build on; the parse/validate core above stays proto-free, so a
+/// default build pulls in no proto runtime.
+///
+/// [`Policy`] / [`Binding`] are re-exported for convenience; the remaining
+/// `policy.proto` messages (audit config, deltas) and the `google.type.Expr`
+/// condition live under [`google`](proto::google).
+#[cfg(feature = "iam-proto")]
+pub mod proto {
+    #![allow(missing_docs, clippy::all, rustdoc::all)]
+
+    /// The generated `google.*` protobuf packages, mounted in a module tree that
+    /// mirrors each package path so prost's cross-package reference from
+    /// `Binding.condition` to `google.type.Expr` resolves.
+    pub mod google {
+        pub mod iam {
+            pub mod v1 {
+                include!(concat!(env!("OUT_DIR"), "/google.iam.v1.rs"));
+            }
+        }
+        pub mod r#type {
+            // prost escapes the `type` keyword in the generated file name, too.
+            include!(concat!(env!("OUT_DIR"), "/google.r#type.rs"));
+        }
+    }
+
+    pub use google::iam::v1::{Binding, Policy};
+}
+
 /// Errors produced parsing the IAM identity vocabulary.
 ///
 /// One error type per crate (ADR-0001); each variant carries the dynamic values
@@ -122,9 +156,46 @@ mod tonic_tests {
             .expect("an ErrorInfo is always attached (AIP-193)");
         assert_eq!(info.reason, "IAM_MEMBER_UNKNOWN_TYPE");
         assert_eq!(info.domain, ERROR_DOMAIN);
-        assert_eq!(info.metadata.get("prefix").map(String::as_str), Some("robot"));
+        assert_eq!(
+            info.metadata.get("prefix").map(String::as_str),
+            Some("robot")
+        );
 
         // A member is an opaque value, not a request field path.
         assert!(status.get_details_bad_request().is_none());
+    }
+}
+
+#[cfg(all(test, feature = "iam-proto"))]
+mod proto_tests {
+    use super::proto::{Binding, Policy};
+    use prost::Message as _;
+
+    /// The `iam-proto` feature really does generate a usable `google.iam.v1`
+    /// Policy: a conditional version-3 policy survives an encode/decode round-trip
+    /// unchanged, proving the vendored `policy.proto` (and the `google.type.Expr`
+    /// condition it imports) compiled into prost types correctly.
+    #[test]
+    fn policy_round_trips_through_the_wire() {
+        let policy = Policy {
+            version: 3,
+            bindings: vec![Binding {
+                role: "roles/viewer".to_owned(),
+                members: vec![
+                    "user:alice@example.com".to_owned(),
+                    "group:admins@example.com".to_owned(),
+                ],
+                condition: Some(super::proto::google::r#type::Expr {
+                    expression: "request.time < timestamp(\"2030-01-01T00:00:00Z\")".to_owned(),
+                    title: "expirable access".to_owned(),
+                    ..Default::default()
+                }),
+            }],
+            etag: b"BwWWja0YfJA=".to_vec(),
+            audit_configs: Vec::new(),
+        };
+
+        let decoded = Policy::decode(policy.encode_to_vec().as_slice()).expect("decode");
+        assert_eq!(decoded, policy);
     }
 }

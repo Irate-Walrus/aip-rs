@@ -5,7 +5,9 @@
 //! references resolve. `google.protobuf.*` well-known types are mapped to
 //! [`prost_types`] (not generated), and `google.api.*` is options-only — neither
 //! is referenced by the generated freight field types, so neither is mounted.
-#![allow(clippy::all, missing_docs, rustdoc::all)]
+// `dead_code`: the generated `google.iam.v1` set carries types the demo never
+// constructs (audit configs, policy deltas), which a binary crate flags as unused.
+#![allow(clippy::all, missing_docs, rustdoc::all, dead_code)]
 
 use std::sync::LazyLock;
 
@@ -39,7 +41,16 @@ pub mod einride {
 pub mod google {
     pub mod r#type {
         // prost escapes the `type` keyword in the generated file name, too.
+        // Holds `LatLng` (freight `Site`) and `Expr` (the IAM `Binding.condition`).
         include!(concat!(env!("OUT_DIR"), "/google.r#type.rs"));
+    }
+    pub mod iam {
+        pub mod v1 {
+            // The `IAMPolicy` service trait + its `Policy` / `Binding` / request
+            // messages (aip #64). `Binding.condition` resolves to the sibling
+            // `super::super::r#type::Expr` mounted above.
+            include!(concat!(env!("OUT_DIR"), "/google.iam.v1.rs"));
+        }
     }
 }
 

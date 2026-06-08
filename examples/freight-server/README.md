@@ -3,7 +3,7 @@
 A runnable [tonic](https://github.com/hyperium/tonic) gRPC server that
 demonstrates aip-rs end-to-end and gives the workspace something real to test
 against. It implements einride's example `FreightService` (Shipper / Site /
-Shipment) over an in-memory store.
+Shipment) and the `google.iam.v1.IAMPolicy` service over an in-memory store.
 
 It is a **living demo**: it compiles today, and each handler grows to use an
 aip-rs crate as that crate's issue lands. Every seam is marked in
@@ -126,6 +126,37 @@ gc -d '{"parent":"shippers/$ID","filter":"origin_site = \"shippers/$ID/sites/a\"
 gc -d '{"parent":"shippers/$ID","filter":"annotations:priority"}'                            127.0.0.1:50051 $SVC/ListShipments
 ```
 
+The `google.iam.v1.IAMPolicy` service (#64) stores a **Policy** keyed by
+**Resource name**. Its protos are vendored under this example's
+[`proto/`](proto) (not the shared fixtures), so point grpcurl there:
+
+```sh
+IAM=examples/freight-server/proto
+ic() { grpcurl -import-path "$IAM" -proto google/iam/v1/iam_policy.proto \
+  -plaintext "$@"; }
+IAMSVC=google.iam.v1.IAMPolicy
+
+# GetIamPolicy on a resource with no policy returns an empty Policy (not an error).
+ic -d '{"resource":"shippers/acme"}' 127.0.0.1:50051 $IAMSVC/GetIamPolicy
+
+# SetIamPolicy validates every Member of every Binding via aip::iam, stores the
+# Policy, and echoes it back — a Member travels request → validate → store →
+# response. GetIamPolicy then reads the stored Policy.
+ic -d '{"resource":"shippers/acme","policy":{"version":1,"bindings":[{"role":"roles/viewer","members":["user:alice@example.com","group:ops@example.com"]}]}}' \
+                                     127.0.0.1:50051 $IAMSVC/SetIamPolicy
+ic -d '{"resource":"shippers/acme"}' 127.0.0.1:50051 $IAMSVC/GetIamPolicy
+
+# A malformed Member is rejected with InvalidArgument carrying an IAM_* ErrorInfo
+# (reason IAM_MEMBER_UNKNOWN_TYPE / domain aip-rs) — the AIP-193 mapping (#16).
+ic -d '{"resource":"shippers/acme","policy":{"bindings":[{"role":"roles/viewer","members":["robot:r2d2"]}]}}' \
+                                     127.0.0.1:50051 $IAMSVC/SetIamPolicy
+
+# TestIamPermissions is the next slice (#68): it decides through the opt-in
+# cel-backed eval adapter (#66), so today it returns Unimplemented.
+ic -d '{"resource":"shippers/acme","permissions":["freight.shippers.get"]}' \
+                                     127.0.0.1:50051 $IAMSVC/TestIamPermissions
+```
+
 ## What it exercises (and where it's headed)
 
 The freight methods map onto the aip-rs primitives. Shipper is the worked
@@ -143,7 +174,9 @@ wired up.
 | `ListSites`       | `ordering` (parse/validate) + `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (filter + server-composed scope/soft-delete + `ORDER BY`/`LIMIT`/`OFFSET` → in-memory SQLite) | #9, #10, #6, #7, #11, #39, #40, #41, #42, #43 | wired³ |
 | `CreateShipment`  | `resourceid` (generate), `resourcename` (parse parent + format) | #5, #3 | wired⁴ |
 | `ListShipments`   | `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (filter + server-composed scope/soft-delete → in-memory SQLite) | #6, #7, #43 | wired⁴ |
+| `IAMPolicy.GetIamPolicy` / `SetIamPolicy` | `iam` (Member validation) over a resource-name-keyed policy store | #64 | wired⁵ |
 | `GetSite` / `UpdateSite` / `DeleteSite`, `BatchGetSites`, `GetShipment` / `UpdateShipment` / `DeleteShipment` | the same primitives | #11–#15 | `Unimplemented` |
+| `IAMPolicy.TestIamPermissions` | `iam` + the opt-in cel-backed `eval` adapter | #66, #68 | `Unimplemented` |
 
 ³ `ListSites` parses the `order_by` (`aip::ordering::parse_order_by`) and
 validates it against an allow-list of sortable Site paths (`validate_for_paths`,
@@ -189,6 +222,19 @@ non-pagination field, so the request-checksum guard (#7) covers it. `CreateShipm
 mirrors `CreateSite` — a system-assigned id (#5) formatted into the shipment
 pattern (#3) — so there is something to list and filter; the other shipment
 standard methods stay `Unimplemented` until their issues land.
+
+⁵ The IAM tracer bullet (#64): the `google.iam.v1.IAMPolicy` service over a
+resource-name-keyed in-memory policy store. `SetIamPolicy` validates every
+**Member** of every **Binding** via `aip::iam::Member` — a malformed member
+converts through the crate's AIP-193 `From<Error>` (#16) to `INVALID_ARGUMENT`
+with an `IAM_*` `ErrorInfo` — then stores and echoes the **Policy**;
+`GetIamPolicy` returns the stored Policy, or an empty one when none is set. So a
+Member string travels request → validate → store → response. The example vendors
+and generates its own `google.iam.v1` service types under `proto/`; `aip-iam`
+generates the same `Policy` / `Binding` structure behind its opt-in `iam-proto`
+feature, which the structural read-modify-write ops (#65) build on.
+`TestIamPermissions` is left as a seam — it decides the held subset *through* the
+opt-in cel-backed `eval` adapter (#66), wired in #68 (ADR-0010).
 
 ² Real offset pagination through the `pagination` page-token codec (#6), with the
 request-checksum guard (#7) that rejects a token when a non-pagination field
@@ -239,6 +285,8 @@ descriptor (#47), and `UpdateShipper` applies its `update_mask` with the typed
 own and the hand-rolled `reflect.rs` bridge is gone.
 
 The freight protos and their vendored googleapis imports live under
-[`proto/`](proto), so the example builds standalone. They are a copy of the same
-einride sources used by
-[`crates/test-fixtures/proto`](../../crates/test-fixtures/proto).
+[`proto/`](proto), so the example builds standalone. The freight sources are a
+copy of the same einride sources used by
+[`crates/test-fixtures/proto`](../../crates/test-fixtures/proto); the
+`google/iam/v1/*` set backing the `IAMPolicy` service is vendored from googleapis
+(see [`proto/google/VENDOR.md`](proto/google/VENDOR.md)).

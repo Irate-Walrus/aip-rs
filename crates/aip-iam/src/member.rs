@@ -37,9 +37,9 @@ impl FromStr for Member {
             "allUsers" => Ok(Member::AllUsers),
             "allAuthenticatedUsers" => Ok(Member::AllAuthenticatedUsers),
             _ => {
-                let (kind, value) = s
-                    .split_once(':')
-                    .ok_or_else(|| Error::MemberUnknownType { prefix: s.to_owned() })?;
+                let (kind, value) = s.split_once(':').ok_or_else(|| Error::MemberUnknownType {
+                    prefix: s.to_owned(),
+                })?;
                 if value.is_empty() {
                     return Err(Error::MemberEmptyValue {
                         kind: kind.to_owned(),

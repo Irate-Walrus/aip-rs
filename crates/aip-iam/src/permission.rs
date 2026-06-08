@@ -19,12 +19,18 @@ pub struct Permission(String);
 impl Permission {
     /// The leading `service` segment.
     pub fn service(&self) -> &str {
-        self.0.split('.').next().expect("validated: at least three segments")
+        self.0
+            .split('.')
+            .next()
+            .expect("validated: at least three segments")
     }
 
     /// The trailing `verb` segment.
     pub fn verb(&self) -> &str {
-        self.0.rsplit('.').next().expect("validated: at least three segments")
+        self.0
+            .rsplit('.')
+            .next()
+            .expect("validated: at least three segments")
     }
 
     /// The full `service.resource.verb` string.
@@ -66,20 +72,31 @@ mod tests {
 
     #[test]
     fn parses_and_exposes_service_and_verb() {
-        let perm: Permission = "freight.shippers.get".parse().expect("well-formed permission");
+        let perm: Permission = "freight.shippers.get"
+            .parse()
+            .expect("well-formed permission");
         assert_eq!(perm.service(), "freight");
         assert_eq!(perm.verb(), "get");
         assert_eq!(perm.to_string(), "freight.shippers.get");
 
         // Multi-segment resource: service is the first, verb the last.
-        let nested: Permission = "iam.serviceAccounts.keys.create".parse().expect("well-formed");
+        let nested: Permission = "iam.serviceAccounts.keys.create"
+            .parse()
+            .expect("well-formed");
         assert_eq!(nested.service(), "iam");
         assert_eq!(nested.verb(), "create");
     }
 
     #[test]
     fn rejects_malformed() {
-        for bad in ["", "freight", "freight.get", "freight..get", "freight.1shippers.get", ".a.b"] {
+        for bad in [
+            "",
+            "freight",
+            "freight.get",
+            "freight..get",
+            "freight.1shippers.get",
+            ".a.b",
+        ] {
             assert_eq!(
                 bad.parse::<Permission>(),
                 Err(Error::PermissionMalformed {

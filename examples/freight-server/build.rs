@@ -32,14 +32,17 @@
 
 use std::{env, path::PathBuf};
 
-/// The freight `.proto` files to serve, relative to this crate's `proto/` root.
-/// Their imports (sibling freight protos, vendored `google/api` + `google/type`,
-/// and the well-known types) are resolved by `protox` from the include path.
+/// The `.proto` files to serve, relative to this crate's `proto/` root. Their
+/// imports (sibling freight protos, vendored `google/api` + `google/type` +
+/// `google/iam/v1`, and the well-known types) are resolved by `protox` from the
+/// include path. `iam_policy.proto` adds the `google.iam.v1.IAMPolicy` service
+/// (aip #64) and pulls in `policy.proto` / `options.proto` / `expr.proto`.
 const ROOT_PROTOS: &[&str] = &[
     "einride/example/freight/v1/freight_service.proto",
     "einride/example/freight/v1/shipment.proto",
     "einride/example/freight/v1/shipper.proto",
     "einride/example/freight/v1/site.proto",
+    "google/iam/v1/iam_policy.proto",
 ];
 
 fn main() {
