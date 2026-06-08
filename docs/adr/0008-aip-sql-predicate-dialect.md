@@ -131,3 +131,32 @@ parse/validate-only user never pulls it in — while removing the last `aip_*`
 import from consumer code. The example now enables `aip = { features = ["sql"] }`
 and calls `aip::sql::transpile_filter` / `aip::sql::Predicate` /
 `aip::sql::Sqlite` rather than the bare `aip_sql` crate.
+
+## Amendment (#41): the has operator `:`
+
+The transpiler now lowers the AIP-160 has operator `:`, the last operator the
+checker accepts. Unlike the comparisons, `:` is **the main per-engine divergence**
+(foreseen above), so it is a `Dialect` leaf rather than a directly-rendered one.
+
+- **Shape.** A new `Predicate::Has { column, test: HasTest }` leaf carries the
+  column and a `HasTest` — `Substring` / `Key` / `Element` / `Present` — one per
+  overload the checker accepts (string, `map<string,string>`, `list<string>`,
+  timestamp). The transpiler picks the variant from the left operand's declared
+  type, recovered from the `Declarations` exactly as #40 recovers enums.
+- **Per-`Dialect` spelling.** A new `Dialect::render_has(column, test, next_bind)
+  -> (sql, binds)` method spells the leaf; `next_bind` is its first 1-based
+  placeholder, so it numbers in step with the shared `render` pass. SQLite spells:
+  a substring as `column LIKE ?n ESCAPE '\'` binding `%value%` with the value's
+  `LIKE` metacharacters (`%` `_` `\`) escaped — so user input matches literally,
+  never as a wildcard, and is never interpolated; map-key and list-element
+  presence as `EXISTS (SELECT 1 FROM json_each(column) WHERE key|value = ?n)`;
+  and presence (`field:*`) as `column IS NOT NULL` (no bind). The has leaf binds
+  as tightly as a comparison, so it negates and composes without redundant parens.
+- **Map vs. member access.** `map:key` (this slice, key *presence*) is distinct
+  from `map.key` (#40, the *value* at a key via `->>`). A timestamp takes only
+  the `*` wildcard, which the checker already enforces, so `Present` binds
+  nothing. A comparison between two columns is still `Error::Unsupported`.
+
+Per CLAUDE.md the example exercises this end-to-end: `Site` gains an
+`annotations` map and a `tags` list (stored as JSON), and `ListSites` runs
+substring, map-key, and list-element has filters through SQLite `json_each`.

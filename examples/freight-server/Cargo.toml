@@ -50,6 +50,9 @@ tokio       = { workspace = true }
 # so `cargo run` exercises the filter end-to-end; shippers stay in an in-memory
 # map. The `bundled` SQLite needs a C toolchain to build the example.
 rusqlite = { workspace = true }
+# The `annotations` map / `tags` list are stored as JSON text so the has operator
+# can query them with SQLite's `json_each` (#41).
+serde_json = { workspace = true }
 
 [build-dependencies]
 # Pure-Rust .proto compiler (no `protoc`) + tonic codegen fed its descriptor set.

@@ -1,8 +1,9 @@
 //! Golden tests: a representative filter (or hand-built [`Predicate`]) renders to
 //! exact SQLite SQL plus an ordered list of binds. These pin the public surface
 //! ADR-0008 fixes: the full AIP-160 operator set (`=` `!=` `<` `<=` `>` `>=`,
-//! `AND` `OR` `NOT`), enum / timestamp / duration / map-member type recovery,
-//! single-pass placeholder numbering, and precedence parenthesization.
+//! `AND` `OR` `NOT`, the has operator `:`), enum / timestamp / duration /
+//! map-member type recovery, single-pass placeholder numbering, and precedence
+//! parenthesization.
 
 use aip_filtering::{function, Declarations, Overload, Type};
 use aip_sql::{transpile_filter, Dialect, Predicate, Schema, Sqlite, Value};
@@ -31,6 +32,7 @@ fn declarations() -> Declarations {
             "labels",
             Type::Map(Box::new(Type::String), Box::new(Type::String)),
         )
+        .ident("tags", Type::List(Box::new(Type::String)))
         .ident("category", enum_type())
         .ident("ENUM_ONE", enum_type())
         .ident("ENUM_TWO", enum_type())
@@ -47,8 +49,8 @@ fn declarations() -> Declarations {
 }
 
 /// Maps each filterable identifier onto its SQL column. The nested
-/// `lat_lng.latitude` flattens to a `latitude` column; `labels` is the JSON map
-/// column behind member access.
+/// `lat_lng.latitude` flattens to a `latitude` column; `labels` / `tags` are the
+/// JSON map / list columns behind member access and the has operator.
 fn schema() -> Schema {
     Schema::builder()
         .column("display_name", "display_name")
@@ -58,6 +60,7 @@ fn schema() -> Schema {
         .column("create_time", "create_time")
         .column("ttl", "ttl")
         .column("labels", "labels")
+        .column("tags", "tags")
         .column("category", "category")
         .build()
 }
@@ -287,11 +290,72 @@ fn literal_is_bound_on_either_side_of_equals() {
 }
 
 #[test]
-fn has_operator_is_unsupported() {
-    // The has operator `:` type-checks (it is in the standard set) but is the
-    // next slice (#41), so the transpiler is the gate that rejects it.
-    let err = transpile_err(r#"display_name : "Alpha""#);
-    assert!(matches!(err, aip_sql::Error::Unsupported(_)), "got {err:?}");
+fn has_on_string_renders_escaped_substring_like() {
+    // `:` on a string column is a substring match: a `LIKE` whose pattern wraps
+    // the value in `%…%`, bound under an explicit `ESCAPE` — never interpolated.
+    let (sql, binds) = render(r#"display_name : "Alpha""#);
+    assert_eq!(sql, r"display_name LIKE ?1 ESCAPE '\'");
+    assert_eq!(binds, vec![Value::Text("%Alpha%".to_string())]);
+}
+
+#[test]
+fn has_on_string_escapes_like_metacharacters() {
+    // The `LIKE` wildcards `%` / `_` and the escape char `\` in the value are
+    // each escaped so they match literally — user input can't act as a wildcard.
+    // (The filter literal `\\` lexes to a single backslash in the value.)
+    let (sql, binds) = render(r#"display_name : "a%b_c\\d""#);
+    assert_eq!(sql, r"display_name LIKE ?1 ESCAPE '\'");
+    assert_eq!(binds, vec![Value::Text(r"%a\%b\_c\\d%".to_string())]);
+}
+
+#[test]
+fn has_on_map_renders_key_presence() {
+    // `:` on a `map<string,string>` tests key presence via `json_each`; the key
+    // is bound.
+    let (sql, binds) = render("labels:env");
+    assert_eq!(
+        sql,
+        "EXISTS (SELECT 1 FROM json_each(labels) WHERE key = ?1)"
+    );
+    assert_eq!(binds, vec![Value::Text("env".to_string())]);
+}
+
+#[test]
+fn has_on_list_renders_membership() {
+    // `:` on a `list<string>` tests element presence via `json_each`; the value
+    // is bound.
+    let (sql, binds) = render("tags:urgent");
+    assert_eq!(
+        sql,
+        "EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?1)"
+    );
+    assert_eq!(binds, vec![Value::Text("urgent".to_string())]);
+}
+
+#[test]
+fn has_on_timestamp_renders_presence() {
+    // `:` on a timestamp is presence-only (`field:*`): a `NULL` test that binds
+    // nothing. The checker has already restricted the argument to `*`.
+    let (sql, binds) = render("create_time:*");
+    assert_eq!(sql, "create_time IS NOT NULL");
+    assert!(binds.is_empty());
+}
+
+#[test]
+fn has_leaf_numbers_in_step_and_negates_without_parens() {
+    // A has leaf binds as tightly as a comparison: it numbers left-to-right
+    // alongside other leaves, and `NOT` wraps it without parentheses.
+    let (sql, binds) = render(r#"display_name = "a" AND labels:env"#);
+    assert_eq!(
+        sql,
+        "display_name = ?1 AND EXISTS (SELECT 1 FROM json_each(labels) WHERE key = ?2)"
+    );
+    assert_eq!(
+        binds,
+        vec![Value::Text("a".to_string()), Value::Text("env".to_string()),],
+    );
+
+    assert_eq!(render("NOT create_time:*").0, "NOT create_time IS NOT NULL");
 }
 
 #[test]
