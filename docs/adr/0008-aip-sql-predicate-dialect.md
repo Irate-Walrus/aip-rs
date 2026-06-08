@@ -228,3 +228,59 @@ realized.
   pins `scope + eq("tenant_id", …) + is_null + filter` rendering to one fragment
   with left-to-right placeholder numbering — though the freight demo's tenancy
   boundary is the parent scope itself (a shipper owns its sites and shipments).
+
+## Amendment: the unified `Query`
+
+Until now a caller assembled a list query from two unrelated rendering paths: the
+**Filter** half (`transpile_filter` → `Predicate` → `Dialect::render` → `(sql,
+binds)`) and the **Order by** / page half (`transpile_order_by` → `Vec<Order>`,
+then the free functions `render_order_by` + `render_limit_offset` → bare
+strings), `format!`-ing the three fragments together at the call site (the
+example's `query_page`). That the WHERE and the `ORDER BY` / `LIMIT` rendered
+through two different mechanisms was the friction this amendment removes.
+
+- **A `Query` bundles the tail.** A new `Query` holds the WHERE `Predicate`, the
+  `ORDER BY` [`Order`]s, and the `LIMIT` / `OFFSET`, built fluently
+  (`Query::new().filter(..).order_by(..).limit(..).offset(..)`). One
+  `Query::render(&dialect)` pass emits the whole `WHERE … ORDER BY … LIMIT …
+  OFFSET` clause tail plus the binds — a single call replacing the hand-stitched
+  three. Only the parts that are set render; an empty `Query` renders `("", [])`.
+- **Clause tail only — no `SELECT` / `FROM`.** The `Query` owns no head: the
+  table and projection name the caller's storage, which an executor-agnostic
+  adapter (ADR-0005) has no business spelling. `render` returns no leading or
+  trailing space, so the caller writes `format!("SELECT … FROM {table} {tail}")`.
+- **WHERE is a pre-composed `Predicate`.** The `Query` does *not* re-transpile a
+  filter or re-introduce a raw-filter entry point: it takes the already-composed
+  WHERE predicate, so the server-side composition of #43 (parent scope, tenancy,
+  soft delete folded in with the user's filter) is unchanged, and the WHERE keeps
+  its single coherent placeholder numbering. The WHERE is the only source of
+  binds; `render` reuses `Dialect::render` for it, and the `ORDER BY` columns and
+  the `u64` `LIMIT` / `OFFSET` integers render directly (no binds), exactly as #42
+  established.
+- **`render_order_by` / `render_limit_offset` are now internal.** `render_order_by`
+  becomes `pub(crate)` (a helper `Query::render` calls) and `render_limit_offset`
+  is folded into `Query::render` directly; both leave the public surface. This
+  supersedes the #42 line that exposed them as public free functions —
+  `Query::render` is the one blessed way to render the tail. `transpile_filter`,
+  `transpile_order_by`, `Order`, and the `Predicate` builders are unchanged: they
+  remain how a caller *builds* the pieces a `Query` assembles.
+
+### Off-the-shelf builders considered
+
+- **sqlx** — rejected as the wrong layer. sqlx is the async driver / execution
+  toolkit, i.e. the `aip-sqlx` execution glue ADR-0005 deferred and kept
+  optional. Its `QueryBuilder` is a string-pusher with no expression AST, so it
+  models neither precedence nor coherent placeholder numbering — the same "bare
+  SQL string" alternative the Decision already rejected — and it would reverse the
+  datastore-/executor-agnostic constraint.
+- **sea-query** — the only genuine off-the-shelf match (driver-agnostic, an
+  `Expr`/`Cond` AST, dialect builders, `(sql, Values)` output). But adopting it
+  re-opens this ADR's core `Predicate` decision and adds a heavy pre-1.0 dep to a
+  crate ADR-0001 keeps lean, while the has-operator leaves (`LIKE … ESCAPE`,
+  `json_each` / `EXISTS`) would still need custom-SQL escape hatches. It buys
+  nothing for this unification, which is pure assembly over the existing renderer,
+  so the hand-rolled `Predicate` / `Dialect` foundation stands.
+
+Per CLAUDE.md the example uses it: `query_page` now builds one `Query` and drops
+the manual `Dialect::render` + `format!` stitching (and the `Dialect` import) for
+a single `render(&Sqlite)`.

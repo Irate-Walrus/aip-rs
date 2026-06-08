@@ -11,7 +11,6 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-use aip::sql::Dialect as _;
 use prost::Message as _;
 
 use crate::proto::einride::example::freight::v1::{site::State, Shipment, Shipper, Site};
@@ -194,14 +193,14 @@ impl Storage {
 /// Run one paginated list query against `table`, returning each matching row's
 /// `data` blob in order. Shared by the site and shipment listings (#43).
 ///
-/// The query is `SELECT data FROM <table> WHERE <predicate> ORDER BY <order_by>
-/// LIMIT <limit> OFFSET <offset>`: the predicate renders to parameterized SQL
-/// through the SQLite [`Dialect`](aip::sql::Dialect) and its bind values are bound
-/// positionally — never spliced into the SQL text (ADR-0005 / ADR-0008). The
-/// `ORDER BY` columns come from the [`Schema`](aip::sql::Schema) allowlist and the
-/// `LIMIT` / `OFFSET` are server-resolved integers, so both are rendered directly
-/// (no binds) by [`aip::sql::render_order_by`] / [`aip::sql::render_limit_offset`].
-/// `table` is a fixed string literal supplied by the store, never request input.
+/// The store owns only the `SELECT data FROM <table>` head; the WHERE / `ORDER
+/// BY` / `LIMIT` / `OFFSET` tail is one [`aip::sql::Query`] rendered in a single
+/// call. The composed `predicate` renders to parameterized SQL through the SQLite
+/// [`Dialect`](aip::sql::Dialect) and its bind values are bound positionally —
+/// never spliced into the SQL text (ADR-0005 / ADR-0008); the `ORDER BY` columns
+/// (from the [`Schema`](aip::sql::Schema) allowlist) and the server-resolved
+/// `LIMIT` / `OFFSET` integers carry no binds. `table` is a fixed string literal
+/// supplied by the store, never request input.
 fn query_page(
     conn: &rusqlite::Connection,
     table: &str,
@@ -210,15 +209,14 @@ fn query_page(
     limit: u64,
     offset: u64,
 ) -> Vec<Vec<u8>> {
-    let (where_sql, binds) = aip::sql::Sqlite.render(predicate);
+    let (tail, binds) = aip::sql::Query::new()
+        .filter(predicate.clone())
+        .order_by(order_by.iter().cloned())
+        .limit(limit)
+        .offset(offset)
+        .render(&aip::sql::Sqlite);
     let params: Vec<rusqlite::types::Value> = binds.into_iter().map(to_sql).collect();
-    let order_clause = if order_by.is_empty() {
-        String::new()
-    } else {
-        format!("ORDER BY {} ", aip::sql::render_order_by(order_by))
-    };
-    let page_clause = aip::sql::render_limit_offset(limit, offset);
-    let sql = format!("SELECT data FROM {table} WHERE {where_sql} {order_clause}{page_clause}");
+    let sql = format!("SELECT data FROM {table} {tail}");
     let mut statement = conn.prepare(&sql).expect("prepare list query");
     let rows = statement
         .query_map(rusqlite::params_from_iter(params), |row| {
