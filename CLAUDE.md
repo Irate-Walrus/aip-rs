@@ -6,6 +6,7 @@ Orientation before you change anything:
   and commit messages.
 - **`docs/adr/`** — recorded design decisions. Read the relevant ADR before
   changing a subsystem.
+- Always use a worktree, never make changes in `main` unless explicitly authorised.
 
 ## Every issue extends the example server
 
