@@ -25,6 +25,11 @@ pub use aip_ordering as ordering;
 #[cfg(feature = "filtering")]
 pub use aip_filtering as filtering;
 
+/// IAM primitives (ADR-0010) — opt-in via the non-default `iam` feature: parse and
+/// validate the `google.iam.v1` identity vocabulary (Member / Role / Permission).
+#[cfg(feature = "iam")]
+pub use aip_iam as iam;
+
 /// SQL adapter (ADR-0008) — opt-in via the non-default `sql` feature, since it is
 /// not part of the parse/validate core (ADR-0005).
 #[cfg(feature = "sql")]

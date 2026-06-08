@@ -1,0 +1,20 @@
+[package]
+name = "aip-iam"
+description = "google.iam.v1 primitives: Member / Role / Permission parsing and Policy structure"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+# AIP-193 error mapping only (no proto in the parsing core, like aip-resourceid).
+tonic = { workspace = true, optional = true }
+tonic-types = { workspace = true, optional = true }
+
+[features]
+# Adds `From<Error> for tonic::Status` (PERMISSION_DENIED / INVALID_ARGUMENT) with
+# AIP-193 standard error details (ErrorInfo). See docs/adr/0007-aip193-error-details.md
+# and docs/adr/0010-iam-primitives.md.
+tonic = ["dep:tonic", "dep:tonic-types"]

@@ -135,6 +135,47 @@ A name **Declared** as filterable, paired with a **Type**.
 The `:` operator in a **Filter**, testing presence/membership (e.g. a key in a
 map, a value in a list).
 
+### IAM
+
+The optional `aip-iam` crate (ADR-0010): parses and validates the `google.iam.v1`
+identity vocabulary. Like the rest of the core it *parses and validates* — the
+authorization **decision** (role→permission expansion, condition evaluation) is
+left to the caller.
+
+**Member**:
+A principal a **Binding** grants a **Role** to, written in the `type:value` grammar
+(`user:`, `serviceAccount:`, `group:`, `domain:`, or the bare `allUsers` /
+`allAuthenticatedUsers`).
+_Avoid_: principal (the generic term), identity, subject, account.
+
+**Role**:
+A named bundle of **Permissions**, in one of three forms: predefined
+(`roles/{role}`) or custom, scoped to a project (`projects/{p}/roles/{r}`) or an
+organization (`organizations/{o}/roles/{r}`).
+_Avoid_: grant, group (a **Member** kind), capability.
+
+**Permission**:
+A single `service.resource.verb` unit of access (e.g. `freight.shippers.get`) that
+a **Role** bundles.
+_Avoid_: scope, action, right, privilege.
+
+**Policy**:
+The `google.iam.v1.Policy` attached to a **Resource name** — a set of **Bindings**
+plus an `etag` for read-modify-write. (Structure deferred past the parsing slice;
+ADR-0010.)
+_Avoid_: ACL, ruleset, permissions.
+
+**Binding**:
+One entry in a **Policy** pairing a **Role** with the **Members** it is granted to,
+optionally gated by a **Condition**.
+_Avoid_: grant, rule, ACE.
+
+**Condition**:
+A `google.type.Expr` (CEL) predicate gating a **Binding**. Bridged to the
+**Filter** AST via `aip-filtering`'s CEL interop; evaluation is the caller's
+(ADR-0010).
+_Avoid_: filter (a distinct AIP-160 concept), guard, rule.
+
 ### SQL adapter
 
 The optional `aip-sql` crate (ADR-0005 / ADR-0008): turns a primitive's native
@@ -209,6 +250,9 @@ _Avoid_: wrapper/inner, high-level/low-level (say facade/core).
 - A **Filter** is **Transpiled** into a **Predicate**; a **Dialect** renders a
   **Predicate** to SQL text plus an ordered list of **Bind values**.
 - A **Field mask** is interpreted as either an **Update mask** or a **Read mask**.
+- A **Policy** is a set of **Bindings**; each **Binding** pairs one **Role** with
+  the **Members** granted it, optionally gated by a **Condition**.
+- A **Role** bundles **Permissions**; a **Permission** is a `service.resource.verb`.
 - A **Page token** is either an **Offset page token** or a **Cursor page token**.
 - A **Resource name** is an ordered sequence of **Segments** joined by `/`.
 - A **Segment** is exactly one of: **Literal**, **Variable**, **Wildcard**.

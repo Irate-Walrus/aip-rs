@@ -17,6 +17,7 @@ version = "0.1.0"
 dependencies = [
  "aip-fieldmask",
  "aip-filtering",
+ "aip-iam",
  "aip-ordering",
  "aip-pagination",
  "aip-resourceid",
@@ -47,6 +48,15 @@ dependencies = [
  "prost-types",
  "protox",
  "test-fixtures",
+ "thiserror",
+ "tonic",
+ "tonic-types",
+]
+
+[[package]]
+name = "aip-iam"
+version = "0.1.0"
+dependencies = [
  "thiserror",
  "tonic",
  "tonic-types",
