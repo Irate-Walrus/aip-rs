@@ -4,13 +4,13 @@
 //! `AND` `OR` `NOT`, the has operator `:`), enum / timestamp / duration /
 //! map-member type recovery, single-pass placeholder numbering, and precedence
 //! parenthesization — plus the AIP-132 `order_by` → `ORDER BY` mapping and the
-//! `LIMIT` / `OFFSET` tail.
+//! [`Query`] that unifies the WHERE, `ORDER BY`, and `LIMIT` / `OFFSET` tail into
+//! one render.
 
 use aip_filtering::{function, Declarations, Overload, Type};
 use aip_ordering::OrderBy;
 use aip_sql::{
-    render_limit_offset, render_order_by, transpile_filter, transpile_order_by, Dialect, Order,
-    Predicate, Schema, Sqlite, Value,
+    transpile_filter, transpile_order_by, Dialect, Order, Predicate, Query, Schema, Sqlite, Value,
 };
 
 /// The enum type both the `category` field and its bare value names share.
@@ -396,10 +396,13 @@ fn order(order_by: &str) -> Vec<Order> {
 #[test]
 fn order_by_renders_multi_field_ascending_and_descending() {
     // A multi-field `order_by` maps each path to its column in priority order; the
-    // implicit and explicit `asc` render `ASC`, `desc` renders `DESC`.
+    // implicit and explicit `asc` render `ASC`, `desc` renders `DESC`. An
+    // order-only `Query` is just the `ORDER BY` clause, with no binds.
     let items = order("display_name, size desc");
     assert_eq!(items, vec![Order::asc("display_name"), Order::desc("size")]);
-    assert_eq!(render_order_by(&items), "display_name ASC, size DESC");
+    let (sql, binds) = Query::new().order_by(items).render(&Sqlite);
+    assert_eq!(sql, "ORDER BY display_name ASC, size DESC");
+    assert!(binds.is_empty());
 }
 
 #[test]
@@ -407,16 +410,19 @@ fn order_by_maps_nested_path_to_its_column() {
     // A `.`-nested path resolves through the schema to its flattened column.
     let items = order("lat_lng.latitude desc");
     assert_eq!(items, vec![Order::desc("latitude")]);
-    assert_eq!(render_order_by(&items), "latitude DESC");
+    assert_eq!(
+        Query::new().order_by(items).render(&Sqlite).0,
+        "ORDER BY latitude DESC"
+    );
 }
 
 #[test]
 fn empty_order_by_renders_nothing() {
-    // An empty `order_by` is valid and yields no items, so the caller emits no
-    // `ORDER BY` clause.
+    // An empty `order_by` yields no items, so the `Query` emits no `ORDER BY`
+    // clause — here, an otherwise-empty `Query` renders to nothing at all.
     let items = order("");
     assert!(items.is_empty());
-    assert_eq!(render_order_by(&items), "");
+    assert_eq!(Query::new().order_by(items).render(&Sqlite).0, "");
 }
 
 #[test]
@@ -431,12 +437,76 @@ fn order_by_unmapped_path_is_rejected() {
     }
 }
 
+// ----- The unified `Query`: WHERE + ORDER BY + LIMIT/OFFSET in one render -----
+
 #[test]
-fn limit_offset_renders_from_page_size_and_offset() {
-    // The resolved page size and offset page-token offset render as a decimal
-    // `LIMIT` / `OFFSET` tail — no binds, since neither is free-form text.
-    assert_eq!(render_limit_offset(50, 100), "LIMIT 50 OFFSET 100");
-    assert_eq!(render_limit_offset(10, 0), "LIMIT 10 OFFSET 0");
+fn query_unifies_where_order_and_page_into_one_tail() {
+    // The headline: one `render` call emits `WHERE … ORDER BY … LIMIT … OFFSET`
+    // plus only the binds the WHERE produced — the filter and `order_by` halves no
+    // longer render through two separate mechanisms. The WHERE's placeholders keep
+    // their single left-to-right numbering (`?1`, `?2`); the `ORDER BY` columns and
+    // the page integers add no binds.
+    let predicate = transpile_filter(
+        &aip_filtering::check(r#"region = "west" AND size > 3"#, &declarations())
+            .expect("filter checks"),
+        &declarations(),
+        &schema(),
+    )
+    .expect("filter transpiles");
+    let (sql, binds) = Query::new()
+        .filter(predicate)
+        .order_by([Order::asc("display_name"), Order::asc("name")])
+        .limit(51)
+        .offset(100)
+        .render(&Sqlite);
+    assert_eq!(
+        sql,
+        "WHERE region = ?1 AND size > ?2 ORDER BY display_name ASC, name ASC LIMIT 51 OFFSET 100",
+    );
+    assert_eq!(binds, vec![Value::Text("west".to_string()), Value::Int(3)]);
+}
+
+#[test]
+fn query_with_only_a_filter_is_just_a_where() {
+    // A filter-only `Query` is a bare `WHERE`, carrying the predicate's binds.
+    let (sql, binds) = Query::new()
+        .filter(Predicate::eq("size", Value::Int(3)))
+        .render(&Sqlite);
+    assert_eq!(sql, "WHERE size = ?1");
+    assert_eq!(binds, vec![Value::Int(3)]);
+}
+
+#[test]
+fn query_omits_absent_clauses() {
+    // Only the parts that are set render: with no page tail, just WHERE + ORDER BY.
+    let (sql, binds) = Query::new()
+        .filter(Predicate::eq("region", Value::Text("west".to_string())))
+        .order_by([Order::desc("size")])
+        .render(&Sqlite);
+    assert_eq!(sql, "WHERE region = ?1 ORDER BY size DESC");
+    assert_eq!(binds, vec![Value::Text("west".to_string())]);
+}
+
+#[test]
+fn query_renders_limit_and_offset_directly() {
+    // The resolved page size and offset render as a decimal `LIMIT` / `OFFSET` tail
+    // — no binds, since neither is free-form text.
+    assert_eq!(
+        Query::new().limit(50).offset(100).render(&Sqlite).0,
+        "LIMIT 50 OFFSET 100"
+    );
+    assert_eq!(
+        Query::new().limit(10).offset(0).render(&Sqlite).0,
+        "LIMIT 10 OFFSET 0"
+    );
+}
+
+#[test]
+fn empty_query_renders_nothing() {
+    // An all-empty `Query` renders to `("", [])`.
+    let (sql, binds) = Query::new().render(&Sqlite);
+    assert_eq!(sql, "");
+    assert!(binds.is_empty());
 }
 
 // ----- The public `Predicate` builder surface for server-side composition -----

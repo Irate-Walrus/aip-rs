@@ -1,12 +1,14 @@
-//! Transpiling an AIP-132 [`OrderBy`] into SQL `ORDER BY` items, and rendering
-//! the `ORDER BY` / `LIMIT` / `OFFSET` tail of a list query.
+//! Transpiling an AIP-132 [`OrderBy`] into SQL `ORDER BY` [items](Order), and
+//! rendering them to their `col ASC` / `col DESC` spelling.
 //!
 //! Unlike a [`Filter`](aip_filtering::Filter), an `order_by` carries no
 //! attacker-controlled literals: each field path is validated against the column
 //! [`Schema`] (the allowlist) and mapped to a fixed column name, and the
-//! direction is one of `ASC` / `DESC`. So `ORDER BY` columns and the `LIMIT` /
-//! `OFFSET` integers are rendered *directly* (no bound [`Value`](crate::Value)s),
-//! the way the comparison operators are — there is nothing to parameterize.
+//! direction is one of `ASC` / `DESC`. So the `ORDER BY` columns are rendered
+//! *directly* (no bound [`Value`](crate::Value)s), the way the comparison
+//! operators are — there is nothing to parameterize. [`Query`](crate::Query)
+//! assembles these items, together with the `LIMIT` / `OFFSET` page tail, into
+//! the full clause tail of a list query.
 
 use aip_ordering::OrderBy;
 
@@ -76,7 +78,10 @@ pub fn transpile_order_by(order_by: &OrderBy, schema: &Schema) -> Result<Vec<Ord
 /// [`Schema`] allowlist (never raw filter input) and `ASC` / `DESC` are standard
 /// SQL identical across engines, so they are written directly rather than bound
 /// or per-[`Dialect`](crate::Dialect) spelled. An empty slice renders `""`.
-pub fn render_order_by(items: &[Order]) -> String {
+///
+/// Internal: callers reach this through [`Query::render`](crate::Query::render),
+/// which assembles it with the `LIMIT` / `OFFSET` tail.
+pub(crate) fn render_order_by(items: &[Order]) -> String {
     items
         .iter()
         .map(|order| {
@@ -85,18 +90,4 @@ pub fn render_order_by(items: &[Order]) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-/// Render the `LIMIT` / `OFFSET` tail from a resolved page size and offset.
-///
-/// Both are non-negative server-resolved integers — the page size after the
-/// AIP-158 default/cap, and the offset carried by the AIP-158 offset
-/// [`PageToken`] — so they are written as decimal literals rather than bound. A
-/// page token's offset is client-forgeable, but as a `u64` it can only ever
-/// render as digits, so this honors "parameterize, never interpolate" (ADR-0005 /
-/// ADR-0008): there is no free-form text to splice.
-///
-/// [`PageToken`]: https://docs.rs/aip-pagination
-pub fn render_limit_offset(limit: u64, offset: u64) -> String {
-    format!("LIMIT {limit} OFFSET {offset}")
 }

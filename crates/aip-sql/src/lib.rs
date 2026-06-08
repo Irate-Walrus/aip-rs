@@ -25,10 +25,15 @@
 //!
 //! [`transpile_order_by`] is the ordering counterpart: it maps an AIP-132
 //! [`OrderBy`](aip_ordering::OrderBy)'s field paths onto SQL `ORDER BY`
-//! [items](Order) through the same column [`Schema`]. With the offset and page
-//! size of an AIP-158 page token, [`render_order_by`] and [`render_limit_offset`]
-//! spell the `ORDER BY` / `LIMIT` / `OFFSET` tail of a list query — none of which
-//! is bound, since an `order_by` carries no attacker-controlled literals.
+//! [items](Order) through the same column [`Schema`].
+//!
+//! [`Query`] reunites the two halves: it bundles the WHERE [`Predicate`], the
+//! `ORDER BY` [items](Order), and an AIP-158 page token's offset and size, and
+//! [`Query::render`] spells the whole `WHERE … ORDER BY … LIMIT … OFFSET` clause
+//! tail plus its binds in one call — so a caller makes a single call instead of
+//! stitching the filter and `order_by` halves together by hand. Only the WHERE
+//! binds; the `order_by` and the page integers carry no attacker-controlled
+//! literals. The `SELECT` / `FROM` head stays the caller's.
 //!
 //! [`check`]: aip_filtering::check
 //! [`Declarations`]: aip_filtering::Declarations
@@ -36,12 +41,14 @@
 mod dialect;
 mod order;
 mod predicate;
+mod query;
 mod schema;
 mod transpile;
 
 pub use dialect::{Dialect, Sqlite};
-pub use order::{render_limit_offset, render_order_by, transpile_order_by, Order};
+pub use order::{transpile_order_by, Order};
 pub use predicate::{CmpOp, Column, HasTest, Predicate, Value};
+pub use query::Query;
 pub use schema::Schema;
 pub use transpile::transpile_filter;
 

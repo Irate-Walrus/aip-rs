@@ -185,8 +185,10 @@ AST into parameterized SQL. Not part of the database-agnostic core.
 A composable, parameterized boolean SQL fragment — the **Transpiled** form of a
 **Filter**. Its logical structure (`AND`/`OR`/`NOT`) is portable; its leaves are
 spelled by a **Dialect**. Owns precedence and placeholder numbering so a server
-can compose a user's **Filter** with its own predicates safely.
-_Avoid_: where clause, query, condition, expression.
+can compose a user's **Filter** with its own predicates safely. A Predicate is
+the WHERE *within* a **Query**, not the whole query.
+_Avoid_: where clause, condition, expression, and **Query** (the Predicate is one
+part of a Query, not a synonym for it).
 
 **Dialect**:
 The per-engine renderer that spells a **Predicate**'s leaves and numbers its
@@ -205,6 +207,15 @@ To walk a primitive's native AST — a **Filter**, an **Order by** — into a
 **Predicate**. The `aip-sql` operation; distinct from **Filter** parsing and
 checking, which stay reflection-free and datastore-free.
 _Avoid_: compile, translate, convert.
+
+**Query**:
+The clause tail of a list query, rendered by a **Dialect** in one pass: the WHERE
+**Predicate**, the **Order by** columns, and the `LIMIT` / `OFFSET` page tail
+bundled and rendered to one `(sql, bind values)`. Only the WHERE contributes
+**Bind values**. A Query owns no `SELECT` / `FROM` — the table and projection are
+the caller's — so the caller writes the head and interpolates the Query's tail.
+_Avoid_: statement (a Query carries no `SELECT` / `FROM`), where clause (that is
+the **Predicate**).
 
 ### Reflection
 
@@ -249,6 +260,10 @@ _Avoid_: wrapper/inner, high-level/low-level (say facade/core).
   references must be declared.
 - A **Filter** is **Transpiled** into a **Predicate**; a **Dialect** renders a
   **Predicate** to SQL text plus an ordered list of **Bind values**.
+- A **Query** bundles a **Predicate** (the WHERE), the **Order by** columns, and a
+  `LIMIT` / `OFFSET` page tail; a **Dialect** renders it to one clause tail plus
+  an ordered list of **Bind values** (only the WHERE binds). The `SELECT` /
+  `FROM` head is the caller's.
 - A **Field mask** is interpreted as either an **Update mask** or a **Read mask**.
 - A **Policy** is a set of **Bindings**; each **Binding** pairs one **Role** with
   the **Members** granted it, optionally gated by a **Condition**.
