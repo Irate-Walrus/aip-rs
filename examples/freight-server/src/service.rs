@@ -226,9 +226,10 @@ impl FreightService for FreightServer {
         } else {
             // An invalid filter converts to `INVALID_ARGUMENT`: `check` via
             // `aip-filtering`'s AIP-193 `From<Error>` (#16), and any construct the
-            // transpiler can't lower yet (the has operator `:`, #41) explicitly.
-            // The same declarations drive the check and the transpiler's type
-            // recovery — it recovers enum/timestamp/map typing from them (ADR-0008).
+            // transpiler can't lower (e.g. a comparison between two columns)
+            // explicitly. The same declarations drive the check and the
+            // transpiler's type recovery — it recovers enum/timestamp/map/list
+            // typing from them (ADR-0008).
             let declarations = site_declarations();
             let filter = aip::filtering::check(&req.filter, &declarations)?;
             let predicate = aip::sql::transpile_filter(&filter, &declarations, &site_schema())
@@ -452,11 +453,11 @@ fn longitude(site: &Site) -> f64 {
 }
 
 /// The AIP-160 declarations a `ListSites` filter is checked against: the full
-/// standard operator set (#40) over one identifier of each filterable shape — the
-/// string `display_name` / `name`, the timestamp `create_time`, the nested
-/// numeric `lat_lng.latitude`, and the reflective enum `state`. The transpiler is
-/// the gate for the constructs it can't lower yet (the has operator `:`, #41),
-/// which still surface as a clean `INVALID_ARGUMENT`.
+/// standard operator set (#40, #41) over one identifier of each filterable
+/// shape — the string `display_name` / `name`, the timestamp `create_time`, the
+/// nested numeric `lat_lng.latitude`, the reflective enum `state`, the
+/// `annotations` map, and the `tags` list. The map / list / string / timestamp
+/// identifiers carry the has operator `:` overloads (#41).
 fn site_declarations() -> aip::filtering::Declarations {
     use aip::filtering::{Declarations, Type};
 
@@ -480,14 +481,21 @@ fn site_declarations() -> aip::filtering::Declarations {
         .ident("name", Type::String)
         .ident("create_time", Type::Timestamp)
         .ident("lat_lng.latitude", Type::Double)
+        .ident(
+            "annotations",
+            Type::Map(Box::new(Type::String), Box::new(Type::String)),
+        )
+        .ident("tags", Type::List(Box::new(Type::String)))
         .enum_ident("state", state_enum)
         .build()
         .expect("site filter declarations are valid")
 }
 
-/// Maps the filterable Site identifiers onto their SQLite columns (#39, #40). The
-/// nested `lat_lng.latitude` path flattens to the `latitude` column; the rest map
-/// to identically-named columns in the `sites` table.
+/// Maps the filterable Site identifiers onto their SQLite columns (#39, #40, #41).
+/// The nested `lat_lng.latitude` path flattens to the `latitude` column;
+/// `annotations` / `tags` are the JSON map / list columns the has operator queries
+/// with `json_each`; the rest map to identically-named columns in the `sites`
+/// table.
 fn site_schema() -> aip::sql::Schema {
     aip::sql::Schema::builder()
         .column("display_name", "display_name")
@@ -495,6 +503,8 @@ fn site_schema() -> aip::sql::Schema {
         .column("create_time", "create_time")
         .column("lat_lng.latitude", "latitude")
         .column("state", "state")
+        .column("annotations", "annotations")
+        .column("tags", "tags")
         .build()
 }
 
@@ -652,6 +662,31 @@ mod tests {
                 site: Some(Site {
                     display_name: display_name.to_owned(),
                     state: state as i32,
+                    ..Default::default()
+                }),
+            }))
+            .await
+            .expect("create_site succeeds");
+    }
+
+    /// Creates a site under `PARENT` with the given display name, annotations map,
+    /// and tags list, for the has-operator filter tests.
+    async fn seed_site_with_metadata(
+        server: &FreightServer,
+        display_name: &str,
+        annotations: &[(&str, &str)],
+        tags: &[&str],
+    ) {
+        server
+            .create_site(Request::new(CreateSiteRequest {
+                parent: PARENT.to_owned(),
+                site: Some(Site {
+                    display_name: display_name.to_owned(),
+                    annotations: annotations
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect(),
+                    tags: tags.iter().map(|t| t.to_string()).collect(),
                     ..Default::default()
                 }),
             }))
@@ -1156,20 +1191,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn filter_with_has_operator_is_invalid_argument() {
-        // The has operator `:` type-checks (it is in the standard set) but is the
-        // next slice (#41), so the transpiler is the gate that rejects it with
-        // `INVALID_ARGUMENT`.
+    async fn filter_by_map_annotation_key_presence() {
+        // `:` on the `annotations` map tests key presence via SQLite's
+        // `json_each` (#41): `annotations:owner` keeps only the sites carrying
+        // that key, whatever its value.
         let server = FreightServer::new();
-        seed_site(&server, "Alpha", 0.0).await;
-        let status = server
-            .list_sites(Request::new(ListSitesRequest {
-                parent: PARENT.to_owned(),
-                filter: r#"display_name : "Alpha""#.to_owned(),
-                ..Default::default()
-            }))
-            .await
-            .expect_err("the has operator is not supported yet");
-        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        seed_site_with_metadata(&server, "Alpha", &[("owner", "ops")], &[]).await;
+        seed_site_with_metadata(&server, "Bravo", &[("region", "west")], &[]).await;
+        seed_site_with_metadata(&server, "Charlie", &[("owner", "sales")], &[]).await;
+        assert_eq!(
+            list_filtered_display_names(&server, "annotations:owner").await,
+            ["Alpha", "Charlie"],
+        );
+    }
+
+    #[tokio::test]
+    async fn filter_by_list_tag_membership() {
+        // `:` on the `tags` list tests element presence via `json_each` (#41):
+        // `tags:refrigerated` keeps only the sites carrying that tag.
+        let server = FreightServer::new();
+        seed_site_with_metadata(&server, "Alpha", &[], &["refrigerated", "hazmat"]).await;
+        seed_site_with_metadata(&server, "Bravo", &[], &["bulk"]).await;
+        seed_site_with_metadata(&server, "Charlie", &[], &["refrigerated"]).await;
+        assert_eq!(
+            list_filtered_display_names(&server, "tags:refrigerated").await,
+            ["Alpha", "Charlie"],
+        );
+    }
+
+    #[tokio::test]
+    async fn filter_by_string_substring() {
+        // `:` on a string column is a substring match (#41): `display_name:lph`
+        // keeps only the sites whose display name contains "lph".
+        let server = FreightServer::new();
+        for name in ["Alpha", "Bravo", "Charlie"] {
+            seed_site(&server, name, 0.0).await;
+        }
+        assert_eq!(
+            list_filtered_display_names(&server, "display_name:lph").await,
+            ["Alpha"],
+        );
     }
 }

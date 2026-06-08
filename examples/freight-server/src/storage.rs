@@ -66,27 +66,35 @@ impl Storage {
     /// Insert or overwrite a site, keyed by its `name`. The full site is stored as
     /// wire bytes alongside the columns an AIP-160 filter can address: the scalar
     /// `display_name`, the timestamp `create_time` as sortable RFC3339 text, the
-    /// nested `lat_lng.latitude` flattened to a numeric column, and the enum
-    /// `state` as its value name (matching the transpiler's enum rendering, #40).
+    /// nested `lat_lng.latitude` flattened to a numeric column, the enum `state` as
+    /// its value name (matching the transpiler's enum rendering, #40), and the
+    /// `annotations` map / `tags` list as JSON the has operator queries with
+    /// `json_each` (#41).
     pub fn put_site(&self, site: Site) {
         let create_time = site.create_time.as_ref().map(rfc3339);
         let latitude = site.lat_lng.as_ref().map(|ll| ll.latitude);
         let state = State::try_from(site.state)
             .unwrap_or(State::Unspecified)
             .as_str_name();
+        // The has operator reads these through SQLite's `json_each`, so they are
+        // stored as JSON text — an object for the map, an array for the list.
+        let annotations = serde_json::to_string(&site.annotations).expect("serialize annotations");
+        let tags = serde_json::to_string(&site.tags).expect("serialize tags");
         self.sites
             .lock()
             .unwrap()
             .execute(
                 "INSERT OR REPLACE INTO sites \
-                 (name, display_name, create_time, latitude, state, data) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                 (name, display_name, create_time, latitude, state, annotations, tags, data) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 rusqlite::params![
                     site.name,
                     site.display_name,
                     create_time,
                     latitude,
                     state,
+                    annotations,
+                    tags,
                     site.encode_to_vec(),
                 ],
             )
@@ -128,8 +136,9 @@ impl Storage {
 
 /// Open an in-memory SQLite database with the `sites` table: the resource name as
 /// primary key, the filterable `display_name` / `create_time` / `latitude` /
-/// `state` columns the AIP-160 filter addresses (#40), and the full site as wire
-/// bytes for lossless round-trips.
+/// `state` columns the AIP-160 filter addresses (#40), the JSON `annotations` /
+/// `tags` columns the has operator queries with `json_each` (#41), and the full
+/// site as wire bytes for lossless round-trips.
 fn new_sites_db() -> rusqlite::Connection {
     let conn = rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
     conn.execute_batch(
@@ -139,6 +148,8 @@ fn new_sites_db() -> rusqlite::Connection {
             create_time  TEXT,
             latitude     REAL,
             state        TEXT NOT NULL,
+            annotations  TEXT NOT NULL,
+            tags         TEXT NOT NULL,
             data         BLOB NOT NULL
         );",
     )

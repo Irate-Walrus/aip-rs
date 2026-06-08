@@ -87,6 +87,31 @@ pub enum Column {
     },
 }
 
+/// The presence/membership test of an AIP-160 has operator (`:`) leaf — the
+/// per-engine-spelled part of a [`Predicate::Has`].
+///
+/// Each variant is one overload the checker accepts: a substring of a string, a
+/// key in a `map<string,string>`, a value in a `list<string>`, or presence of a
+/// timestamp (`field:*`). The value it carries (where one applies) comes from the
+/// filter, so it is bound at render time, never spliced into SQL text (ADR-0005 /
+/// ADR-0008). How each is spelled is the [`Dialect`](crate::Dialect)'s job — the
+/// substring `LIKE` and the `json_each` membership tests are the main per-engine
+/// divergence (ADR-0008).
+#[derive(Debug, Clone, PartialEq)]
+pub enum HasTest {
+    /// Substring match on a string column (`field:value`): a `LIKE` whose bound
+    /// pattern wraps the value in `%…%` with its `LIKE` metacharacters escaped,
+    /// so user input can never act as a wildcard.
+    Substring(String),
+    /// Key presence in a `map<string,string>` column (`map:key`).
+    Key(String),
+    /// Value presence in a `list<string>` column (`list:value`).
+    Element(String),
+    /// Presence of a value (timestamp `field:*`). The checker restricts the has
+    /// operator on a timestamp to the `*` wildcard, so this binds nothing.
+    Present,
+}
+
 /// A composable, parameterized boolean SQL fragment.
 ///
 /// Its logical structure (`AND` / `OR` / `NOT`) is portable; its leaves are
@@ -117,6 +142,15 @@ pub enum Predicate {
         op: CmpOp,
         /// The bound right-hand value.
         value: Value,
+    },
+    /// An AIP-160 has operator (`:`) presence/membership test on a column —
+    /// substring, map-key, list-element, or presence. The per-engine leaf, spelled
+    /// by [`Dialect::render_has`](crate::Dialect::render_has).
+    Has {
+        /// The SQL column under test.
+        column: String,
+        /// Which presence/membership test to apply, plus its bound value.
+        test: HasTest,
     },
 }
 
@@ -150,10 +184,12 @@ impl Predicate {
 
     /// Binding tightness, used by the renderer to parenthesize a child only when
     /// it binds looser than its parent. Higher binds tighter, mirroring SQL:
-    /// comparison > `NOT` > `AND` > `OR`.
+    /// a leaf (comparison or has test) > `NOT` > `AND` > `OR`.
     pub(crate) fn precedence(&self) -> u8 {
         match self {
-            Predicate::Compare { .. } => 4,
+            // A has leaf renders as a self-contained atom (`LIKE …`, `EXISTS
+            // (…)`, `… IS NOT NULL`), so it binds as tight as a comparison.
+            Predicate::Compare { .. } | Predicate::Has { .. } => 4,
             Predicate::Not(_) => 3,
             Predicate::All(_) => 2,
             Predicate::Any(_) => 1,

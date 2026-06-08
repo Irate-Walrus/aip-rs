@@ -32,6 +32,13 @@ message Site {
   google.type.LatLng lat_lng = 6;
   // The operational state of the site. Filterable as an AIP-160 enum (#40).
   State state = 7;
+  // Free-form annotations on the site. Filterable with the AIP-160 has operator
+  // for key presence (`annotations:owner`) and by member access for a value
+  // (`annotations.owner = "ops"`) (#41).
+  map<string, string> annotations = 8;
+  // Operational tags on the site. Filterable with the AIP-160 has operator for
+  // membership (`tags:refrigerated`) (#41).
+  repeated string tags = 9;
 
   // The operational state of a [site][einride.example.freight.v1.Site].
   enum State {

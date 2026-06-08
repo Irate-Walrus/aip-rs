@@ -351,6 +351,7 @@ dependencies = [
  "prost-types",
  "protox",
  "rusqlite",
+ "serde_json",
  "tokio",
  "tonic",
  "tonic-prost",

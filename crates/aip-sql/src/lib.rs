@@ -15,12 +15,13 @@
 //!
 //! [`transpile_filter`] lowers the full AIP-160 operator set the checker
 //! accepts: the comparisons `=` / `!=` / `<` / `<=` / `>` / `>=`, the logical
-//! `AND` / `OR` / `NOT`, member access into `map` columns (`labels.env`), and
-//! the `timestamp(...)` / `duration(...)` constructors. Because [`check`] yields
-//! an *untyped* expression tree, it is handed the [`Declarations`] and a column
-//! [`Schema`] to recover each operand's type and map each identifier to a column
-//! (ADR-0008). The has operator `:` is the next slice (#41). See
-//! `docs/adr/0008-aip-sql-predicate-dialect.md`.
+//! `AND` / `OR` / `NOT`, member access into `map` columns (`labels.env`), the
+//! `timestamp(...)` / `duration(...)` constructors, and the has operator `:`
+//! (substring, map-key / list-element membership, and timestamp presence — the
+//! per-engine [`Dialect`] leaves). Because [`check`] yields an *untyped*
+//! expression tree, it is handed the [`Declarations`] and a column [`Schema`] to
+//! recover each operand's type and map each identifier to a column (ADR-0008).
+//! See `docs/adr/0008-aip-sql-predicate-dialect.md`.
 //!
 //! [`check`]: aip_filtering::check
 //! [`Declarations`]: aip_filtering::Declarations
@@ -31,7 +32,7 @@ mod schema;
 mod transpile;
 
 pub use dialect::{Dialect, Sqlite};
-pub use predicate::{CmpOp, Column, Predicate, Value};
+pub use predicate::{CmpOp, Column, HasTest, Predicate, Value};
 pub use schema::Schema;
 pub use transpile::transpile_filter;
 
@@ -39,8 +40,8 @@ pub use transpile::transpile_filter;
 /// [`Predicate`].
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// A filter construct this transpiler does not handle (e.g. the has operator
-    /// `:`, or a comparison between two columns).
+    /// A filter construct this transpiler does not handle (e.g. a comparison
+    /// between two columns).
     #[error("unsupported filter construct: {0}")]
     Unsupported(String),
     /// A filter identifier with no column mapping in the [`Schema`].

@@ -2,7 +2,7 @@
 
 use aip_filtering::{function, Constant, Declarations, Expr, Filter, Type};
 
-use crate::predicate::{CmpOp, Column, Predicate, Value};
+use crate::predicate::{CmpOp, Column, HasTest, Predicate, Value};
 use crate::schema::Schema;
 use crate::Error;
 
@@ -15,8 +15,8 @@ use crate::Error;
 /// name) apart from a declared column missing from `schema`.
 ///
 /// Every literal becomes a bound [`Value`] — nothing is spliced into SQL text
-/// (ADR-0005 / ADR-0008). Constructs outside the comparison/logical operator set
-/// (the has operator `:`, a comparison between two columns) are
+/// (ADR-0005 / ADR-0008). Constructs outside the comparison / logical / has
+/// operator set (e.g. a comparison between two columns) are
 /// [`Error::Unsupported`].
 pub fn transpile_filter(
     filter: &Filter,
@@ -67,6 +67,7 @@ fn transpile_call(name: &str, args: &[Expr], ctx: &Ctx) -> Result<Predicate, Err
         (function::LESS_EQUALS, [left, right]) => transpile_compare(CmpOp::Le, left, right, ctx),
         (function::GREATER_THAN, [left, right]) => transpile_compare(CmpOp::Gt, left, right, ctx),
         (function::GREATER_EQUALS, [left, right]) => transpile_compare(CmpOp::Ge, left, right, ctx),
+        (function::HAS, [left, right]) => transpile_has(left, right, ctx),
         // Recognized binary operators applied with the wrong arity.
         (
             function::AND
@@ -76,7 +77,8 @@ fn transpile_call(name: &str, args: &[Expr], ctx: &Ctx) -> Result<Predicate, Err
             | function::LESS_THAN
             | function::LESS_EQUALS
             | function::GREATER_THAN
-            | function::GREATER_EQUALS,
+            | function::GREATER_EQUALS
+            | function::HAS,
             _,
         ) => Err(Error::Unsupported(format!(
             "`{name}` expects two operands, found {}",
@@ -86,8 +88,8 @@ fn transpile_call(name: &str, args: &[Expr], ctx: &Ctx) -> Result<Predicate, Err
             "`NOT` expects one operand, found {}",
             args.len()
         ))),
-        // The has operator `:` (#41), the implicit-AND `FUZZY`, a bare
-        // `timestamp(...)` used as a predicate, etc.
+        // The implicit-AND `FUZZY`, a bare `timestamp(...)` used as a predicate,
+        // etc.
         _ => Err(Error::Unsupported(format!("operator `{name}`"))),
     }
 }
@@ -112,6 +114,53 @@ fn transpile_compare(op: CmpOp, left: &Expr, right: &Expr, ctx: &Ctx) -> Result<
             "a comparison must reference a filterable column".to_string(),
         )),
     }
+}
+
+/// Transpile the has operator `:` (AIP-160 presence/membership). The left operand
+/// is the column under test; its declared type — recovered from the declarations
+/// the filter was checked against — selects the overload: a substring on a
+/// string, key presence in a `map<string,string>`, element presence in a
+/// `list<string>`, or presence on a timestamp (`field:*`). The right operand is
+/// always a string the parser lifted from the filter (a bare identifier, a quoted
+/// string, or the `*` wildcard); it is bound, never interpolated.
+fn transpile_has(left: &Expr, right: &Expr, ctx: &Ctx) -> Result<Predicate, Error> {
+    let Expr::Const(Constant::String(arg)) = right else {
+        return Err(Error::Unsupported(
+            "the has operator's right operand must be a string value".to_string(),
+        ));
+    };
+
+    // The left operand names the filterable column under test; the checker has
+    // already verified that its type and the argument form a valid `:` overload.
+    let name = qualified_name(left).ok_or_else(|| {
+        Error::Unsupported(
+            "the has operator's left operand must be a filterable column".to_string(),
+        )
+    })?;
+    let column = ctx
+        .schema
+        .column(&name)
+        .ok_or_else(|| Error::UnknownIdentifier(name.clone()))?
+        .to_string();
+    let ty = ctx
+        .declarations
+        .ident_type(&name)
+        .ok_or_else(|| Error::UnknownIdentifier(name.clone()))?;
+
+    let test = match ty {
+        Type::String => HasTest::Substring(arg.clone()),
+        Type::Map(..) => HasTest::Key(arg.clone()),
+        Type::List(_) => HasTest::Element(arg.clone()),
+        // `:` on a timestamp is presence-only; the checker restricts the argument
+        // to the `*` wildcard, so the wildcard itself is never bound.
+        Type::Timestamp => HasTest::Present,
+        other => {
+            return Err(Error::Unsupported(format!(
+                "the has operator does not apply to a {other:?} column"
+            )))
+        }
+    };
+    Ok(Predicate::Has { column, test })
 }
 
 /// One side of a comparison, resolved to either a SQL column or a bound value.
