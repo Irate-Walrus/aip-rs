@@ -26,9 +26,7 @@
 //! See <https://google.aip.dev/161> and <https://google.aip.dev/203>.
 
 use prost::Message as _;
-use prost_reflect::{
-    DynamicMessage, FieldDescriptor, Kind, MessageDescriptor, ReflectMessage, Value,
-};
+use prost_reflect::{DynamicMessage, FieldDescriptor, Kind, ReflectMessage, Value};
 use prost_types::FieldMask;
 
 /// The field number of the `google.api.field_behavior` extension on
@@ -673,15 +671,6 @@ impl From<Error> for tonic::Status {
         }
         tonic::Status::with_error_details(tonic::Code::InvalidArgument, message, details)
     }
-}
-
-// ── Descriptor helper ─────────────────────────────────────────────────────────
-
-/// Looks up `google.protobuf.FieldOptions` in `pool` — a convenience for tests
-/// that need to introspect which extensions are registered.
-#[doc(hidden)]
-pub fn field_options_descriptor(pool: &prost_reflect::DescriptorPool) -> Option<MessageDescriptor> {
-    pool.get_message_by_name("google.protobuf.FieldOptions")
 }
 
 #[cfg(all(test, feature = "tonic"))]
