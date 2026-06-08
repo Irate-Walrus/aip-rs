@@ -23,8 +23,11 @@ publish = false
 # The SDK under demonstration. Handlers wire in each module as its issue lands.
 # The `tonic` feature turns on the crates' AIP-193 `From<Error> for tonic::Status`
 # mapping (#16), so a primitive's validation error reaches the client as a rich
-# `INVALID_ARGUMENT` (ErrorInfo + BadRequest) via `?`.
-aip = { workspace = true, features = ["tonic", "sql"] }
+# `INVALID_ARGUMENT` (ErrorInfo + BadRequest) via `?`. The `iam` feature exposes
+# `aip::iam` for the `IAMPolicy` service's Member validation (aip #64); the demo
+# vendors and generates its own `google.iam.v1` service types, so it does not pull
+# the `iam-proto` feature.
+aip = { workspace = true, features = ["tonic", "sql", "iam"] }
 
 # gRPC runtime: tonic core (server + transport), the Prost codec the generated
 # service uses, and the protobuf message runtime. `tonic-types` lets the handlers

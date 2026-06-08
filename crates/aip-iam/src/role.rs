@@ -40,12 +40,10 @@ impl FromStr for Role {
         let segments: Vec<&str> = s.split('/').collect();
         match segments.as_slice() {
             ["roles", role] => nonempty(role).map(Role::Predefined).ok_or_else(malformed),
-            ["organizations", org, "roles", role] => {
-                match (nonempty(org), nonempty(role)) {
-                    (Some(organization), Some(role)) => Ok(Role::Organization { organization, role }),
-                    _ => Err(malformed()),
-                }
-            }
+            ["organizations", org, "roles", role] => match (nonempty(org), nonempty(role)) {
+                (Some(organization), Some(role)) => Ok(Role::Organization { organization, role }),
+                _ => Err(malformed()),
+            },
             ["projects", project, "roles", role] => match (nonempty(project), nonempty(role)) {
                 (Some(project), Some(role)) => Ok(Role::Project { project, role }),
                 _ => Err(malformed()),
@@ -87,10 +85,19 @@ mod tests {
 
     #[test]
     fn rejects_malformed() {
-        for bad in ["", "viewer", "roles/", "roles", "projects/p/roles/", "folders/1/roles/x"] {
+        for bad in [
+            "",
+            "viewer",
+            "roles/",
+            "roles",
+            "projects/p/roles/",
+            "folders/1/roles/x",
+        ] {
             assert_eq!(
                 bad.parse::<Role>(),
-                Err(Error::RoleMalformed { role: bad.to_owned() }),
+                Err(Error::RoleMalformed {
+                    role: bad.to_owned()
+                }),
                 "{bad:?} should be malformed"
             );
         }

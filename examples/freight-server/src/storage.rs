@@ -13,6 +13,7 @@ use aip::sql::Dialect as _;
 use prost::Message as _;
 
 use crate::proto::einride::example::freight::v1::{site::State, Shipment, Shipper, Site};
+use crate::proto::google::iam::v1::Policy;
 
 /// Process-lifetime store. Shippers are a `BTreeMap` keyed by resource name,
 /// which keeps listings in a stable order (the deterministic tie-break behind a
@@ -296,6 +297,40 @@ fn rfc3339(ts: &prost_types::Timestamp) -> String {
     let year = yoe + era * 400 + i64::from(month <= 2);
 
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+/// Process-lifetime store of `google.iam.v1.Policy` keyed by **Resource name**,
+/// backing the demo's `IAMPolicy` service (aip #64). A `Policy` attaches to the
+/// resource it governs (a shipper / site / shipment name), so the resource name
+/// is the key; state resets on restart, like the rest of [`Storage`].
+///
+/// Kept separate from [`Storage`] (which owns the freight resources) because the
+/// tracer bullet only needs a Member to travel request → validate → store →
+/// response; cross-referencing a policy against the resource it names is a later
+/// slice (the AIP-211 NOT_FOUND-via-parent path, #67).
+#[derive(Default)]
+pub struct PolicyStore {
+    policies: Mutex<BTreeMap<String, Policy>>,
+}
+
+impl PolicyStore {
+    /// An empty policy store.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The policy attached to `resource`, or `None` when none is set — the caller
+    /// turns that into the empty `Policy` `GetIamPolicy` returns (AIP / IAM: an
+    /// unset policy is not an error).
+    pub fn get(&self, resource: &str) -> Option<Policy> {
+        self.policies.lock().unwrap().get(resource).cloned()
+    }
+
+    /// Attach `policy` to `resource`, replacing any existing one (the IAM
+    /// `SetIamPolicy` replace semantics).
+    pub fn set(&self, resource: String, policy: Policy) {
+        self.policies.lock().unwrap().insert(resource, policy);
+    }
 }
 
 /// Map an aip-sql bind [`Value`](aip::sql::Value) onto rusqlite's owned value type
