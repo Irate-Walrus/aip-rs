@@ -12,6 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use aip::fieldbehavior::FieldBehavior;
 use aip::ordering::OrderByRequest;
 use aip::pagination::{PageRequest, PageToken};
+use aip::validation::Validator;
 use prost_reflect::{Kind, ReflectMessage};
 use tonic::{Request, Response, Status};
 
@@ -281,9 +282,13 @@ impl FreightService for FreightServer {
         let mut site = req
             .site
             .ok_or_else(|| Status::invalid_argument("site is required"))?;
+        // Accumulate the server's own presence checks (no aip-rs primitive covers
+        // them) into one AIP-193 error, so the client sees every bad field at once.
+        let mut violations = Validator::new(SERVICE_DOMAIN, "FIELD_REQUIRED");
         if site.display_name.is_empty() {
-            return Err(required_field("site.display_name"));
+            violations.add_field_violation("site.display_name", "field is required");
         }
+        violations.into_result()?;
 
         // The validated `parent` binds the `{shipper}` of the canonical site
         // pattern; mint a system-assigned `{site}` id (a UUIDv4, per AIP-148) and
@@ -388,12 +393,17 @@ impl FreightService for FreightServer {
         let mut shipment = req
             .shipment
             .ok_or_else(|| Status::invalid_argument("shipment is required"))?;
+        // Both endpoints are required (AIP-203). Accumulate them into one
+        // `Validator` so a request missing both gets both violations back in a
+        // single response, rather than bailing on the first.
+        let mut violations = Validator::new(SERVICE_DOMAIN, "FIELD_REQUIRED");
         if shipment.origin_site.is_empty() {
-            return Err(required_field("shipment.origin_site"));
+            violations.add_field_violation("shipment.origin_site", "field is required");
         }
         if shipment.destination_site.is_empty() {
-            return Err(required_field("shipment.destination_site"));
+            violations.add_field_violation("shipment.destination_site", "field is required");
         }
+        violations.into_result()?;
 
         // The validated `parent` binds the `{shipper}` of the canonical shipment
         // pattern; mint a system-assigned `{shipment}` id (a UUIDv4, per AIP-148)
@@ -685,47 +695,19 @@ fn validate_shipper_name(field: &str, value: &str) -> Result<(), Status> {
     aip::resourcename::validate(value)?;
     let pattern = format!("{SHIPPERS_COLLECTION}/{{shipper}}");
     if !aip::resourcename::is_match(&pattern, value) {
-        return Err(field_violation(
-            field,
-            format!("must match the pattern `{pattern}`"),
-            "RESOURCE_NAME_PATTERN_MISMATCH",
-        ));
+        let mut violations = Validator::new(SERVICE_DOMAIN, "RESOURCE_NAME_PATTERN_MISMATCH");
+        violations.add_field_violation(field, format!("must match the pattern `{pattern}`"));
+        violations.into_result()?;
     }
     Ok(())
 }
 
 /// The AIP-193 `ErrorInfo.domain` for errors the server raises itself — the
-/// presence and policy checks no aip-rs primitive covers. The aip-rs crates use
-/// their own (`aip-rs`) domain for the values they validate (#16).
+/// presence and policy checks no aip-rs primitive covers. Passed to every
+/// [`Validator`] the handlers build, so the service's own field violations carry
+/// its domain; the aip-rs crates use their own (`aip-rs`) domain for the values
+/// they validate (#16).
 const SERVICE_DOMAIN: &str = "freight.example.com";
-
-/// Builds an `INVALID_ARGUMENT` carrying AIP-193 standard details for one bad
-/// request field: a `BadRequest` field violation plus the mandatory `ErrorInfo`
-/// (with the `field` echoed in `metadata`, since it appears in the message). This
-/// mirrors the shape the aip-rs crates emit via `From<Error>` (#16) for the
-/// server's own validations, which no primitive covers.
-fn field_violation(field: &str, description: impl Into<String>, reason: &str) -> Status {
-    use std::collections::HashMap;
-    use tonic_types::{ErrorDetails, StatusExt};
-
-    let description = description.into();
-    let mut details = ErrorDetails::with_bad_request_violation(field, description.clone());
-    details.set_error_info(
-        reason,
-        SERVICE_DOMAIN,
-        HashMap::from([("field".to_owned(), field.to_owned())]),
-    );
-    Status::with_error_details(
-        tonic::Code::InvalidArgument,
-        format!("{field}: {description}"),
-        details,
-    )
-}
-
-/// A [`field_violation`] for a required request field left empty.
-fn required_field(field: &str) -> Status {
-    field_violation(field, "field is required", "FIELD_REQUIRED")
-}
 
 /// The standard `Unimplemented` status for a method that hasn't been wired yet.
 fn unimplemented(method: &str) -> Status {
@@ -1264,6 +1246,44 @@ mod tests {
             .get_details_bad_request()
             .expect("a BadRequest field violation is attached");
         assert_eq!(bad.field_violations[0].field, "parent");
+    }
+
+    #[tokio::test]
+    async fn create_shipment_missing_endpoints_aggregates_field_violations() {
+        use tonic_types::StatusExt as _;
+
+        // A shipment with neither endpoint set trips both presence checks. The
+        // `Validator` accumulates them, so the client gets *both* violations in a
+        // single `BadRequest` — not just the first — carrying the service's own
+        // domain (no aip-rs primitive covers these presence checks).
+        let server = FreightServer::new();
+        let status = server
+            .create_shipment(Request::new(CreateShipmentRequest {
+                parent: PARENT.to_owned(),
+                shipment: Some(Shipment::default()),
+            }))
+            .await
+            .expect_err("a shipment missing both endpoints is rejected");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+        let bad = status
+            .get_details_bad_request()
+            .expect("a BadRequest field violation is attached");
+        let fields: Vec<&str> = bad
+            .field_violations
+            .iter()
+            .map(|v| v.field.as_str())
+            .collect();
+        assert_eq!(
+            fields,
+            ["shipment.origin_site", "shipment.destination_site"]
+        );
+
+        let info = status
+            .get_details_error_info()
+            .expect("an ErrorInfo is attached (AIP-193 MUST)");
+        assert_eq!(info.reason, "FIELD_REQUIRED");
+        assert_eq!(info.domain, "freight.example.com");
     }
 
     /// Lists sites under `PARENT` carrying an AIP-160 `filter`, returning their

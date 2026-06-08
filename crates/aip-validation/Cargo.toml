@@ -1,0 +1,18 @@
+[package]
+name = "aip-validation"
+description = "AIP-193 field-violation accumulator: collect per-field failures into one aggregated error"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+tonic = { workspace = true, optional = true }
+tonic-types = { workspace = true, optional = true }
+
+[features]
+# Adds `From<Error> for tonic::Status` (INVALID_ARGUMENT) with AIP-193 standard
+# error details: a `BadRequest` listing every accumulated field violation plus an
+# `ErrorInfo`. See docs/adr/0007-aip193-error-details.md.
+tonic = ["dep:tonic", "dep:tonic-types"]
