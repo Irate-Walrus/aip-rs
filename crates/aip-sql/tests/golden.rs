@@ -438,3 +438,93 @@ fn limit_offset_renders_from_page_size_and_offset() {
     assert_eq!(render_limit_offset(50, 100), "LIMIT 50 OFFSET 100");
     assert_eq!(render_limit_offset(10, 0), "LIMIT 10 OFFSET 0");
 }
+
+// ----- The public `Predicate` builder surface for server-side composition -----
+
+#[test]
+fn scope_to_parent_binds_an_escaped_prefix() {
+    // An AIP parent scope is a `LIKE` prefix keeping the rows under `parent`: the
+    // parent plus the child wildcard `/%`, bound under an explicit `ESCAPE` —
+    // never interpolated.
+    let (sql, binds) = Sqlite.render(&Predicate::scope_to_parent("name", "shippers/acme"));
+    assert_eq!(sql, r"name LIKE ?1 ESCAPE '\'");
+    assert_eq!(binds, vec![Value::Text("shippers/acme/%".to_string())]);
+}
+
+#[test]
+fn scope_to_parent_matches_metacharacters_literally() {
+    // A parent containing the `LIKE` wildcards `%` / `_` (or the escape char `\`)
+    // has them escaped in the bound pattern, so it matches literally — a parent
+    // can't smuggle a wildcard into the scope.
+    let (sql, binds) = Sqlite.render(&Predicate::scope_to_parent("name", r"tenants/a%b_c"));
+    assert_eq!(sql, r"name LIKE ?1 ESCAPE '\'");
+    assert_eq!(binds, vec![Value::Text(r"tenants/a\%b\_c/%".to_string())]);
+}
+
+#[test]
+fn is_null_renders_a_null_test() {
+    // The soft-delete predicate a server composes with a user filter; it binds
+    // nothing.
+    let (sql, binds) = Sqlite.render(&Predicate::is_null("delete_time"));
+    assert_eq!(sql, "delete_time IS NULL");
+    assert!(binds.is_empty());
+}
+
+#[test]
+fn raw_fragment_is_verbatim_at_the_root_and_parenthesized_as_a_child() {
+    // A raw fragment is emitted as-is at the root, and — because its internals are
+    // opaque — always parenthesized when composed under a combinator. It carries
+    // no binds, so the user filter beside it still numbers from `?1`.
+    assert_eq!(
+        Sqlite.render(&Predicate::raw("archived = 0")).0,
+        "archived = 0"
+    );
+
+    let composed = Predicate::all([
+        Predicate::raw("archived = 0"),
+        Predicate::eq("region", Value::Text("west".to_string())),
+    ]);
+    let (sql, binds) = Sqlite.render(&composed);
+    assert_eq!(sql, "(archived = 0) AND region = ?1");
+    assert_eq!(binds, vec![Value::Text("west".to_string())]);
+}
+
+#[test]
+fn server_composes_scope_tenancy_soft_delete_and_user_filter() {
+    // The headline composition #43 exists for: a server folds its own predicates
+    // — a parent scope, a tenancy `eq`, a soft-delete `IS NULL` — and the user's
+    // (transpiled) filter into one fragment that owns precedence and one coherent
+    // left-to-right placeholder numbering. The user filter's `OR` is parenthesized
+    // under the surrounding `AND`, and the bind-free soft-delete leaf consumes no
+    // placeholder, so the numbering steps 1 → 2 → 3 → 4 across the fragments that
+    // do bind.
+    let user_filter = transpile_filter(
+        &aip_filtering::check(r#"region = "west" OR region = "east""#, &declarations())
+            .expect("filter checks"),
+        &declarations(),
+        &schema(),
+    )
+    .expect("filter transpiles");
+
+    let composed = Predicate::all([
+        Predicate::scope_to_parent("name", "shippers/acme"),
+        Predicate::eq("tenant_id", Value::Int(7)),
+        Predicate::is_null("delete_time"),
+        user_filter,
+    ]);
+
+    let (sql, binds) = Sqlite.render(&composed);
+    assert_eq!(
+        sql,
+        r"name LIKE ?1 ESCAPE '\' AND tenant_id = ?2 AND delete_time IS NULL AND (region = ?3 OR region = ?4)",
+    );
+    assert_eq!(
+        binds,
+        vec![
+            Value::Text("shippers/acme/%".to_string()),
+            Value::Int(7),
+            Value::Text("west".to_string()),
+            Value::Text("east".to_string()),
+        ],
+    );
+}

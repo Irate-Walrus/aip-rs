@@ -216,25 +216,16 @@ impl FreightService for FreightServer {
         // mid-pagination flips the checksum and the now-stale token is rejected.
         let page = parse_page(&req)?;
 
-        // The AIP-160 `filter` is applied first, at the source: parse +
-        // type-check it (`aip::filtering`), transpile it to a parameterized
-        // `Predicate` (`aip::sql`), and let the SQLite-backed store run it (#39). An
-        // empty filter lists every site.
-        let predicate = if req.filter.is_empty() {
-            None
-        } else {
-            // An invalid filter converts to `INVALID_ARGUMENT`: `check` via
-            // `aip-filtering`'s AIP-193 `From<Error>` (#16), and any construct the
-            // transpiler can't lower (e.g. a comparison between two columns)
-            // explicitly. The same declarations drive the check and the
-            // transpiler's type recovery — it recovers enum/timestamp/map/list
-            // typing from them (ADR-0008).
-            let declarations = site_declarations();
-            let filter = aip::filtering::check(&req.filter, &declarations)?;
-            let predicate = aip::sql::transpile_filter(&filter, &declarations, &site_schema())
-                .map_err(|e| Status::invalid_argument(format!("filter: {e}")))?;
-            Some(predicate)
-        };
+        // The AIP-160 `filter` is parsed + type-checked (`aip::filtering`) and
+        // transpiled to a parameterized `Predicate` (`aip::sql`); an empty filter
+        // adds nothing. The server then folds in its own predicates — the AIP
+        // parent scope and the soft-delete `delete_time IS NULL` — through
+        // `Predicate`, which owns precedence and one coherent placeholder
+        // numbering across every composed fragment, so a user `a OR b` can't
+        // silently re-associate against the server's `AND`s (#43). The SQLite
+        // store renders the whole thing to one parameterized `WHERE`.
+        let user_filter = parse_filter(&req.filter, &site_declarations(), &site_schema())?;
+        let predicate = scoped_predicate(&req.parent, user_filter);
 
         // Sort and page in SQL (#42). The validated `order_by` transpiles to SQL
         // `ORDER BY` items, mapped through the same column `Schema` the filter
@@ -248,18 +239,16 @@ impl FreightService for FreightServer {
         order.push(aip::sql::Order::asc("name"));
 
         // Fetch one row past the page so an extra row signals a further page (the
-        // AIP-158 `next_page_token`), mirroring the old in-memory `end < total`
-        // check. A forged token's offset is clamped non-negative.
+        // AIP-158 `next_page_token`). The parent scope now lives in the SQL
+        // `WHERE` (#43), so the `LIMIT`/`OFFSET` page boundaries are computed over
+        // exactly the in-scope rows — no in-memory post-filter that could
+        // under-fill a page. A forged token's offset is clamped non-negative.
         let offset = page.token.offset.max(0) as u64;
         let mut sites =
             self.storage
-                .list_sites_page(predicate.as_ref(), &order, page.size as u64 + 1, offset);
+                .list_sites_page(&predicate, &order, page.size as u64 + 1, offset);
         let has_more = sites.len() > page.size;
         sites.truncate(page.size);
-        // Parent scoping stays in the service layer this slice (`scope_to_parent`
-        // is #43); for the demo's single-parent listings this post-filter keeps
-        // every paged row.
-        sites.retain(|site| aip::resourcename::has_parent(&site.name, &req.parent));
 
         let next_page_token = if has_more {
             page.token.next(page.size as i32).encode()
@@ -337,19 +326,88 @@ impl FreightService for FreightServer {
 
     async fn list_shipments(
         &self,
-        _: Request<ListShipmentsRequest>,
+        request: Request<ListShipmentsRequest>,
     ) -> Result<Response<ListShipmentsResponse>, Status> {
-        // TODO(aip #11): apply the AIP-160 filter here once ListShipments is
-        // wired — the same `aip::filtering` seam as ListSites, blocked on the
-        // method and on `ListShipmentsRequest` gaining a `filter` field.
-        Err(unimplemented("ListShipments"))
+        let req = request.into_inner();
+        validate_shipper_name("parent", &req.parent)?;
+
+        // Offset pagination (AIP-158). `filter` is a non-pagination field, so the
+        // request checksum `parse_page` computes covers it: changing it
+        // mid-pagination flips the checksum and the stale token is rejected.
+        let page = parse_page(&req)?;
+
+        // The same server-side composition as `ListSites` (#43): the user's
+        // AIP-160 `filter` (parsed + type-checked + transpiled) folded with the
+        // parent scope and the soft-delete `delete_time IS NULL` through one
+        // `Predicate` that owns precedence and placeholder numbering. The
+        // SQLite-backed store renders it to a parameterized `WHERE`.
+        let user_filter = parse_filter(&req.filter, &shipment_declarations(), &shipment_schema())?;
+        let predicate = scoped_predicate(&req.parent, user_filter);
+
+        // `ListShipments` carries no `order_by`, so results are ordered by
+        // resource name — a total, stable page order across the offset pages.
+        let order = [aip::sql::Order::asc("name")];
+        let offset = page.token.offset.max(0) as u64;
+        let mut shipments =
+            self.storage
+                .list_shipments_page(&predicate, &order, page.size as u64 + 1, offset);
+        let has_more = shipments.len() > page.size;
+        shipments.truncate(page.size);
+
+        let next_page_token = if has_more {
+            page.token.next(page.size as i32).encode()
+        } else {
+            String::new()
+        };
+        Ok(Response::new(ListShipmentsResponse {
+            shipments,
+            next_page_token,
+        }))
     }
 
     async fn create_shipment(
         &self,
-        _: Request<CreateShipmentRequest>,
+        request: Request<CreateShipmentRequest>,
     ) -> Result<Response<Shipment>, Status> {
-        Err(unimplemented("CreateShipment"))
+        // Mirrors `create_site`: the only shipment write the demo needs, so
+        // `ListShipments` (#43) has something to filter and page. The other
+        // shipment standard methods stay `Unimplemented` until their issues land.
+        let req = request.into_inner();
+        validate_shipper_name("parent", &req.parent)?;
+        let mut shipment = req
+            .shipment
+            .ok_or_else(|| Status::invalid_argument("shipment is required"))?;
+        if shipment.origin_site.is_empty() {
+            return Err(required_field("shipment.origin_site"));
+        }
+        if shipment.destination_site.is_empty() {
+            return Err(required_field("shipment.destination_site"));
+        }
+
+        // The validated `parent` binds the `{shipper}` of the canonical shipment
+        // pattern; mint a system-assigned `{shipment}` id (a UUIDv4, per AIP-148)
+        // and format the full resource name from the pattern (AIP-122) rather than
+        // hand-concatenating the segments.
+        let shipper_pattern = format!("{SHIPPERS_COLLECTION}/{{shipper}}");
+        let shipper_id = aip::resourcename::Pattern::parse(&shipper_pattern)
+            .expect("the shipper collection pattern is valid")
+            .match_name(&req.parent)
+            .and_then(|caps| caps.get("shipper"))
+            .expect("parent validated to match the shipper pattern")
+            .to_owned();
+        let id = aip::resourceid::generate_system();
+        let shipment_pattern = format!("{SHIPPERS_COLLECTION}/{{shipper}}/shipments/{{shipment}}");
+        shipment.name = aip::resourcename::Pattern::parse(&shipment_pattern)
+            .expect("the shipment collection pattern is valid")
+            .format([("shipper", shipper_id.as_str()), ("shipment", id.as_str())])
+            .expect("a generated shipment id formats into the pattern");
+
+        let ts = now();
+        shipment.create_time = Some(ts);
+        shipment.update_time = Some(ts);
+        shipment.delete_time = None;
+        self.storage.put_shipment(shipment.clone());
+        Ok(Response::new(shipment))
     }
 
     async fn update_shipment(
@@ -389,6 +447,16 @@ impl PageRequest for ListSitesRequest {
     }
     fn skip(&self) -> i32 {
         self.skip
+    }
+}
+
+/// `ListShipmentsRequest` carries the pagination fields but no AIP-158 `skip`.
+impl PageRequest for ListShipmentsRequest {
+    fn page_token(&self) -> &str {
+        &self.page_token
+    }
+    fn page_size(&self) -> i32 {
+        self.page_size
     }
 }
 
@@ -466,6 +534,89 @@ fn site_schema() -> aip::sql::Schema {
         .column("annotations", "annotations")
         .column("tags", "tags")
         .build()
+}
+
+/// The AIP-160 declarations a `ListShipments` filter is checked against: the
+/// resource-name references `origin_site` / `destination_site` (strings, so they
+/// also carry the substring has operator `:`), the timestamp `create_time`, and
+/// the `annotations` map (carrying the key-presence has operator). A small, focused
+/// allowlist — `ListShipments` exists here to prove the *composition* (#43), not to
+/// re-enumerate every filterable shape `ListSites` already covers.
+fn shipment_declarations() -> aip::filtering::Declarations {
+    use aip::filtering::{Declarations, Type};
+
+    Declarations::builder()
+        .standard_functions()
+        .ident("name", Type::String)
+        .ident("origin_site", Type::String)
+        .ident("destination_site", Type::String)
+        .ident("create_time", Type::Timestamp)
+        .ident(
+            "annotations",
+            Type::Map(Box::new(Type::String), Box::new(Type::String)),
+        )
+        .build()
+        .expect("shipment filter declarations are valid")
+}
+
+/// Maps the Shipment identifiers a filter can address onto their SQLite columns
+/// (#43) in the `shipments` table; `annotations` is the JSON map column the has
+/// operator queries with `json_each`. This is the column allowlist for
+/// [`aip::sql::transpile_filter`], paired with [`shipment_declarations`].
+fn shipment_schema() -> aip::sql::Schema {
+    aip::sql::Schema::builder()
+        .column("name", "name")
+        .column("origin_site", "origin_site")
+        .column("destination_site", "destination_site")
+        .column("create_time", "create_time")
+        .column("annotations", "annotations")
+        .build()
+}
+
+/// Parse + type-check an AIP-160 `filter` and transpile it to a parameterized
+/// [`Predicate`](aip::sql::Predicate), or `Ok(None)` for an empty filter (which
+/// lists every in-scope row). Shared by `ListSites` and `ListShipments` (#43).
+///
+/// An invalid filter converts to `INVALID_ARGUMENT`: `check` via `aip-filtering`'s
+/// AIP-193 `From<Error>` (#16), and any construct the transpiler can't lower (e.g.
+/// a comparison between two columns) explicitly. The same `declarations` drive the
+/// check and the transpiler's type recovery — it recovers enum/timestamp/map/list
+/// typing from them (ADR-0008).
+fn parse_filter(
+    filter: &str,
+    declarations: &aip::filtering::Declarations,
+    schema: &aip::sql::Schema,
+) -> Result<Option<aip::sql::Predicate>, Status> {
+    if filter.is_empty() {
+        return Ok(None);
+    }
+    let checked = aip::filtering::check(filter, declarations)?;
+    let predicate = aip::sql::transpile_filter(&checked, declarations, schema)
+        .map_err(|e| Status::invalid_argument(format!("filter: {e}")))?;
+    Ok(Some(predicate))
+}
+
+/// Compose the server's own predicates with an optional user `filter` into one
+/// [`Predicate`](aip::sql::Predicate) (#43): an AIP parent scope on the `name`
+/// column (`name LIKE 'parent/%'`, the parent escaped + bound) and the soft-delete
+/// `delete_time IS NULL`, conjoined with the user filter when present. `Predicate`
+/// owns precedence and one coherent placeholder numbering across the fragments, so
+/// a user `a OR b` is parenthesized under the server's `AND`s rather than silently
+/// re-associating, and the bound parent never collides with the filter's binds.
+///
+/// A multi-tenant server adds its tenancy predicate to the very same `all` — e.g.
+/// `aip::sql::Predicate::eq("tenant_id", tenant)` — and it numbers in step with
+/// the rest; here the parent scope is the freight demo's tenancy boundary (a
+/// shipper owns its sites and shipments).
+fn scoped_predicate(parent: &str, user_filter: Option<aip::sql::Predicate>) -> aip::sql::Predicate {
+    let mut clauses = vec![
+        aip::sql::Predicate::scope_to_parent("name", parent),
+        aip::sql::Predicate::is_null("delete_time"),
+    ];
+    // `Option` is an iterator of 0-or-1, so this appends the user filter only when
+    // one was supplied.
+    clauses.extend(user_filter);
+    aip::sql::Predicate::all(clauses)
 }
 
 /// The resolved AIP-158 pagination state for one list page, produced by
@@ -1228,5 +1379,154 @@ mod tests {
             list_filtered_display_names(&server, "display_name:lph").await,
             ["Alpha"],
         );
+    }
+
+    #[tokio::test]
+    async fn list_sites_scopes_to_parent_in_sql() {
+        // The parent scope now runs in the SQL `WHERE` (#43, `scope_to_parent`),
+        // not an in-memory post-filter: sites under a different shipper — including
+        // one whose name is a string prefix of the parent (`shippers/acme2`) — are
+        // excluded, proving the bound `LIKE 'shippers/acme/%'` respects the segment
+        // boundary.
+        let server = FreightServer::new();
+        seed_site(&server, "Mine", 0.0).await; // under PARENT (`shippers/acme`)
+        for other_parent in ["shippers/other", "shippers/acme2"] {
+            server
+                .create_site(Request::new(CreateSiteRequest {
+                    parent: other_parent.to_owned(),
+                    site: Some(Site {
+                        display_name: "Theirs".to_owned(),
+                        ..Default::default()
+                    }),
+                }))
+                .await
+                .expect("create_site succeeds");
+        }
+        assert_eq!(list_display_names(&server, "display_name").await, ["Mine"]);
+    }
+
+    #[tokio::test]
+    async fn list_sites_excludes_soft_deleted_in_sql() {
+        // The soft-delete predicate `delete_time IS NULL` runs in SQL (#43): a site
+        // carrying a `delete_time` is dropped from the listing. `DeleteSite` is not
+        // yet wired, so the soft-deleted row is seeded straight into the store.
+        let server = FreightServer::new();
+        seed_site(&server, "Live", 0.0).await;
+        server.storage.put_site(Site {
+            name: format!("{PARENT}/sites/deleted-1"),
+            display_name: "Gone".to_owned(),
+            delete_time: Some(now()),
+            ..Default::default()
+        });
+        assert_eq!(list_display_names(&server, "display_name").await, ["Live"]);
+    }
+
+    /// Creates a shipment under `PARENT` with the given origin/destination site
+    /// references and annotations, returning the stored resource.
+    async fn create_shipment(
+        server: &FreightServer,
+        origin: &str,
+        destination: &str,
+        annotations: &[(&str, &str)],
+    ) -> Shipment {
+        server
+            .create_shipment(Request::new(CreateShipmentRequest {
+                parent: PARENT.to_owned(),
+                shipment: Some(Shipment {
+                    origin_site: origin.to_owned(),
+                    destination_site: destination.to_owned(),
+                    annotations: annotations
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect(),
+                    ..Default::default()
+                }),
+            }))
+            .await
+            .expect("create_shipment succeeds")
+            .into_inner()
+    }
+
+    /// Lists shipments under `PARENT` carrying an AIP-160 `filter`, returning their
+    /// `origin_site` references.
+    async fn list_filtered_origins(server: &FreightServer, filter: &str) -> Vec<String> {
+        let resp = server
+            .list_shipments(Request::new(ListShipmentsRequest {
+                parent: PARENT.to_owned(),
+                filter: filter.to_owned(),
+                ..Default::default()
+            }))
+            .await
+            .expect("list_shipments succeeds")
+            .into_inner();
+        resp.shipments.into_iter().map(|s| s.origin_site).collect()
+    }
+
+    #[tokio::test]
+    async fn list_shipments_scopes_to_parent_with_no_filter() {
+        // `ListShipments` is SQLite-backed and composes scope + soft-delete (#43).
+        // With no filter it lists every in-scope shipment; one created under a
+        // different shipper is excluded by the parent scope.
+        let site = "shippers/acme/sites/x";
+        let server = FreightServer::new();
+        create_shipment(&server, site, site, &[]).await;
+        create_shipment(&server, site, site, &[]).await;
+        server
+            .create_shipment(Request::new(CreateShipmentRequest {
+                parent: "shippers/other".to_owned(),
+                shipment: Some(Shipment {
+                    origin_site: site.to_owned(),
+                    destination_site: site.to_owned(),
+                    ..Default::default()
+                }),
+            }))
+            .await
+            .expect("create_shipment succeeds");
+        assert_eq!(list_filtered_origins(&server, "").await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn list_shipments_filters_in_sqlite() {
+        // The user filter composes with the server predicates and runs in SQLite:
+        // `origin_site = X` returns only the matching shipment.
+        let a = "shippers/acme/sites/a";
+        let b = "shippers/acme/sites/b";
+        let server = FreightServer::new();
+        create_shipment(&server, a, b, &[]).await;
+        create_shipment(&server, b, a, &[]).await;
+        assert_eq!(
+            list_filtered_origins(&server, &format!(r#"origin_site = "{a}""#)).await,
+            [a],
+        );
+    }
+
+    #[tokio::test]
+    async fn list_shipments_has_operator_over_annotations() {
+        // The has operator on the `annotations` map (`json_each`) composes through
+        // the same path: only the shipment carrying the key is returned.
+        let site = "shippers/acme/sites/x";
+        let server = FreightServer::new();
+        create_shipment(&server, site, site, &[("priority", "high")]).await;
+        create_shipment(&server, site, site, &[("region", "west")]).await;
+        assert_eq!(
+            list_filtered_origins(&server, "annotations:priority").await,
+            [site]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_shipments_rejects_invalid_filter() {
+        // An unfilterable identifier is rejected with `INVALID_ARGUMENT`, the same
+        // gate `ListSites` applies — the filter never reaches SQL.
+        let server = FreightServer::new();
+        let status = server
+            .list_shipments(Request::new(ListShipmentsRequest {
+                parent: PARENT.to_owned(),
+                filter: r#"not_a_field = "x""#.to_owned(),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("an unknown filter field is rejected");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
     }
 }

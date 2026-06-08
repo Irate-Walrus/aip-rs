@@ -191,3 +191,40 @@ The Order by half of the Decision is now implemented, alongside the page tail.
   boundaries match the previous in-memory path; composing parent scope *into* the
   SQL `WHERE` (so multi-parent paging is exact) lands with `scope_to_parent` in
   #43.
+
+## Amendment (#43): server-side composition and `scope_to_parent`
+
+`Predicate` becomes a public builder so a server folds its own predicates in with
+the user's transpiled Filter — the composition the Decision opened with, now
+realized.
+
+- **Builders.** `is_null`, `raw`, and `scope_to_parent` join the existing `all` /
+  `any` / `not` / `eq`. `scope_to_parent(column, parent)` is an AIP parent scope:
+  a `LIKE` prefix keeping the resource names under `parent`, binding
+  `escape_like(parent) + "/%"` so the parent's `%` / `_` / `\` match literally and
+  the child wildcard is the only one — never interpolated, honoring the cardinal
+  rule. The `/` before `%` enforces the segment boundary, so `shippers/acme` does
+  not scope `shippers/acme2/...`.
+- **Rendered directly, not per-`Dialect`.** `IS NULL` and the `LIKE … ESCAPE '\'`
+  scope are standard SQL identical across SQLite and Postgres, so — like the
+  comparison operators and the `order_by` tail — they render in the shared pass
+  rather than through a `Dialect` leaf. Both are atoms (leaf precedence), so they
+  negate and compose without redundant parens.
+- **`raw` is the bind-free escape hatch.** A verbatim boolean fragment for a server
+  predicate the typed builders don't cover. It carries no placeholders (so the
+  single coherent numbering is untouched) and is treated as the loosest-binding
+  node, so it is always parenthesized under a combinator — the composition's
+  precedence guarantee holds even through the escape hatch.
+- **Example composes in SQL.** `ListSites` now transpiles the user filter and folds
+  it through `Predicate::all` with `scope_to_parent("name", parent)` and the
+  soft-delete `is_null("delete_time")`, dropping the in-memory `has_parent`
+  post-filter — so the `LIMIT`/`OFFSET` page boundaries are computed over exactly
+  the in-scope, non-deleted rows (multi-parent paging is now exact, superseding the
+  #42 service-side note). This unblocks `ListShipments`: it is now SQLite-backed,
+  gains a `filter` field, and runs the *same* `scoped_predicate` composition (no
+  `order_by`, so it orders by resource name); a minimal `CreateShipment` mirrors
+  `CreateSite` to seed it, and the `sites` / `shipments` tables gain a
+  `delete_time` column. A tenancy predicate composes identically — a golden test
+  pins `scope + eq("tenant_id", …) + is_null + filter` rendering to one fragment
+  with left-to-right placeholder numbering — though the freight demo's tenancy
+  boundary is the parent scope itself (a shipper owns its sites and shipments).

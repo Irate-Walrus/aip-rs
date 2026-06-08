@@ -63,6 +63,27 @@ fn write_node<D: Dialect + ?Sized>(
             sql.push_str(&leaf_sql);
             binds.extend(leaf_binds);
         }
+        // `IS NULL` is standard SQL across engines, so it is rendered directly
+        // (like the comparison operators) and binds nothing.
+        Predicate::IsNull(column) => {
+            sql.push_str(column);
+            sql.push_str(" IS NULL");
+        }
+        // A parent scope is a `LIKE` prefix: standard SQL across SQLite and
+        // Postgres, so it is rendered directly. The bound pattern escapes the
+        // parent's `LIKE` metacharacters and appends the child wildcard, so the
+        // parent matches literally and is never interpolated (ADR-0008).
+        Predicate::Scope { column, parent } => {
+            sql.push_str(column);
+            sql.push_str(" LIKE ");
+            sql.push_str(&dialect.placeholder(binds.len() + 1));
+            sql.push_str(r" ESCAPE '\'");
+            binds.push(Value::Text(format!("{}/%", escape_like(parent))));
+        }
+        // A raw fragment is emitted verbatim; it carries no binds, so the shared
+        // placeholder numbering is untouched. `write_child` parenthesizes it when
+        // it sits under a combinator (its precedence is the loosest).
+        Predicate::Raw(fragment) => sql.push_str(fragment),
         Predicate::Not(inner) => {
             sql.push_str("NOT ");
             write_child(dialect, inner, node.precedence(), sql, binds);
