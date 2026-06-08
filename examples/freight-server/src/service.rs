@@ -9,10 +9,9 @@
 use std::cmp::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use aip::ordering::{OrderBy, OrderByRequest};
+use aip::ordering::OrderByRequest;
 use aip::pagination::{PageRequest, PageToken};
 use prost_reflect::{Kind, ReflectMessage};
-use prost_types::Timestamp;
 use tonic::{Request, Response, Status};
 
 use crate::proto::einride::example::freight::v1::{
@@ -237,27 +236,36 @@ impl FreightService for FreightServer {
             Some(predicate)
         };
 
-        // Sites under this parent, in the store's stable resource-name order, then
-        // sorted by `order_by`. The sort is stable, so the name order breaks ties
-        // and the ordering stays consistent across pages.
-        let mut sites: Vec<Site> = self
-            .storage
-            .list_sites_matching(predicate.as_ref())
-            .into_iter()
-            .filter(|site| aip::resourcename::has_parent(&site.name, &req.parent))
-            .collect();
-        sort_sites(&mut sites, &order_by);
+        // Sort and page in SQL (#42). The validated `order_by` transpiles to SQL
+        // `ORDER BY` items, mapped through the same column `Schema` the filter
+        // uses; the resource name is appended as a tie-break so the order is total
+        // and stable across pages — equal `order_by` keys fall back to a fixed
+        // name order. Every sortable path is in the allow-list and the schema maps
+        // it, so transpilation can only fail on an allow-list/schema drift, an
+        // internal inconsistency rather than bad input.
+        let mut order = aip::sql::transpile_order_by(&order_by, &site_schema())
+            .map_err(|e| Status::internal(format!("transpile order_by: {e}")))?;
+        order.push(aip::sql::Order::asc("name"));
 
-        let total = sites.len();
-        let start = usize::try_from(page.token.offset).unwrap_or(0).min(total);
-        let end = start.saturating_add(page.size).min(total);
-        // Only hand back a `next_page_token` when results remain past this page.
-        let next_page_token = if end < total {
+        // Fetch one row past the page so an extra row signals a further page (the
+        // AIP-158 `next_page_token`), mirroring the old in-memory `end < total`
+        // check. A forged token's offset is clamped non-negative.
+        let offset = page.token.offset.max(0) as u64;
+        let mut sites =
+            self.storage
+                .list_sites_page(predicate.as_ref(), &order, page.size as u64 + 1, offset);
+        let has_more = sites.len() > page.size;
+        sites.truncate(page.size);
+        // Parent scoping stays in the service layer this slice (`scope_to_parent`
+        // is #43); for the demo's single-parent listings this post-filter keeps
+        // every paged row.
+        sites.retain(|site| aip::resourcename::has_parent(&site.name, &req.parent));
+
+        let next_page_token = if has_more {
             page.token.next(page.size as i32).encode()
         } else {
             String::new()
         };
-        let sites = sites.drain(start..end).collect();
         Ok(Response::new(ListSitesResponse {
             sites,
             next_page_token,
@@ -392,65 +400,10 @@ impl OrderByRequest for ListSitesRequest {
     }
 }
 
-/// Sorts `sites` in place by an AIP-132 `order_by`, breaking ties by resource
-/// name so the order is total and stable across pages — independent of the
-/// store's iteration order. An empty `order_by` leaves the store's
-/// resource-name order untouched.
-fn sort_sites(sites: &mut [Site], order_by: &OrderBy) {
-    if order_by.fields.is_empty() {
-        return;
-    }
-    sites.sort_by(|a, b| {
-        for field in &order_by.fields {
-            let ordering = compare_site_field(a, b, &field.path);
-            let ordering = if field.desc {
-                ordering.reverse()
-            } else {
-                ordering
-            };
-            if ordering != Ordering::Equal {
-                return ordering;
-            }
-        }
-        // Resource names are unique, so this makes the ordering total: equal
-        // `order_by` keys fall back to a fixed name order on every page.
-        a.name.cmp(&b.name)
-    });
-}
-
-/// Compares two sites by a single Site field path.
-///
-/// Every path reaching here is one of [`SORTABLE_SITE_PATHS`] — the `order_by`
-/// was validated against that allow-list — so an unrecognised path is
-/// unreachable and compares Equal.
-fn compare_site_field(a: &Site, b: &Site, path: &str) -> Ordering {
-    match path {
-        "name" => a.name.cmp(&b.name),
-        "display_name" => a.display_name.cmp(&b.display_name),
-        "create_time" => cmp_timestamp(&a.create_time, &b.create_time),
-        "update_time" => cmp_timestamp(&a.update_time, &b.update_time),
-        "lat_lng.latitude" => latitude(a).total_cmp(&latitude(b)),
-        "lat_lng.longitude" => longitude(a).total_cmp(&longitude(b)),
-        _ => Ordering::Equal,
-    }
-}
-
-/// Orders two optional timestamps by `(seconds, nanos)`, with an unset time
-/// sorting before any set time.
-fn cmp_timestamp(a: &Option<Timestamp>, b: &Option<Timestamp>) -> Ordering {
-    let key = |t: &Option<Timestamp>| t.as_ref().map(|t| (t.seconds, t.nanos));
-    key(a).cmp(&key(b))
-}
-
-/// The site's latitude, or `0.0` when it carries no location.
-fn latitude(site: &Site) -> f64 {
-    site.lat_lng.as_ref().map_or(0.0, |ll| ll.latitude)
-}
-
-/// The site's longitude, or `0.0` when it carries no location.
-fn longitude(site: &Site) -> f64 {
-    site.lat_lng.as_ref().map_or(0.0, |ll| ll.longitude)
-}
+// The AIP-132 sort and AIP-158 page are pushed to SQLite (#42): `list_sites`
+// transpiles `order_by` to SQL `ORDER BY` items and the store renders `ORDER BY`
+// / `LIMIT` / `OFFSET`, so the in-memory `sort_sites` the earlier slices used is
+// gone.
 
 /// The AIP-160 declarations a `ListSites` filter is checked against: the full
 /// standard operator set (#40, #41) over one identifier of each filterable
@@ -491,17 +444,24 @@ fn site_declarations() -> aip::filtering::Declarations {
         .expect("site filter declarations are valid")
 }
 
-/// Maps the filterable Site identifiers onto their SQLite columns (#39, #40, #41).
-/// The nested `lat_lng.latitude` path flattens to the `latitude` column;
-/// `annotations` / `tags` are the JSON map / list columns the has operator queries
-/// with `json_each`; the rest map to identically-named columns in the `sites`
-/// table.
+/// Maps the Site identifiers a filter or `order_by` can address onto their SQLite
+/// columns (#39, #40, #41, #42). The nested `lat_lng.latitude` / `lat_lng.longitude`
+/// paths flatten to the `latitude` / `longitude` columns; `annotations` / `tags`
+/// are the JSON map / list columns the has operator queries with `json_each`; the
+/// rest map to identically-named columns in the `sites` table.
+///
+/// This is the column allowlist for both [`aip::sql::transpile_filter`] and
+/// [`aip::sql::transpile_order_by`], so it must cover every sortable
+/// [`SORTABLE_SITE_PATHS`] entry (the `update_time` / `lat_lng.longitude` columns
+/// are sort-only — they carry no filter [`Declaration`](aip::filtering)).
 fn site_schema() -> aip::sql::Schema {
     aip::sql::Schema::builder()
         .column("display_name", "display_name")
         .column("name", "name")
         .column("create_time", "create_time")
+        .column("update_time", "update_time")
         .column("lat_lng.latitude", "latitude")
+        .column("lat_lng.longitude", "longitude")
         .column("state", "state")
         .column("annotations", "annotations")
         .column("tags", "tags")
@@ -629,6 +589,7 @@ mod tests {
     use super::*;
     use crate::proto::einride::example::freight::v1::site;
     use crate::proto::google::r#type::LatLng;
+    use aip::ordering::OrderBy;
 
     /// A shipper parent name; the demo does not require the shipper to exist in
     /// storage for `CreateSite`/`ListSites`, only that the name is well-formed.
@@ -739,6 +700,27 @@ mod tests {
         assert_eq!(
             list_display_names(&server, "lat_lng.latitude desc").await,
             ["north", "equator", "south"],
+        );
+    }
+
+    #[tokio::test]
+    async fn orders_by_multiple_fields_in_priority() {
+        // A multi-field `order_by` sorts by the first field, then the second
+        // within each tie: latitude ascending groups the two `lat 0` sites, and
+        // `display_name` orders them within that group.
+        let server = FreightServer::new();
+        seed_site(&server, "Bravo", 0.0).await;
+        seed_site(&server, "Alpha", 0.0).await;
+        seed_site(&server, "Crest", 1.0).await;
+        assert_eq!(
+            list_display_names(&server, "lat_lng.latitude, display_name").await,
+            ["Alpha", "Bravo", "Crest"],
+        );
+        // Reversing only the secondary field flips the `lat 0` group's order while
+        // the latitude grouping stays ascending.
+        assert_eq!(
+            list_display_names(&server, "lat_lng.latitude, display_name desc").await,
+            ["Bravo", "Alpha", "Crest"],
         );
     }
 
@@ -881,11 +863,10 @@ mod tests {
     #[test]
     fn sortable_site_paths_resolve_on_the_site_descriptor() {
         // `ListSites` gates `order_by` with the curated `validate_for_paths`
-        // allow-list (#9), since the in-memory `sort_sites` only knows those
-        // paths. `validate_for_message` (#10) guards the allow-list itself: every
-        // sortable path must be a real `Site` field, so the allow-list can't
-        // silently drift from the proto. The `Site` descriptor comes straight off
-        // the Typed message (ADR-0009), no by-name pool lookup.
+        // allow-list (#9). `validate_for_message` (#10) guards the allow-list
+        // itself: every sortable path must be a real `Site` field, so the
+        // allow-list can't silently drift from the proto. The `Site` descriptor
+        // comes straight off the Typed message (ADR-0009), no by-name pool lookup.
         let site = Site::default().descriptor();
         let order_by: OrderBy = SORTABLE_SITE_PATHS
             .join(",")
@@ -894,6 +875,22 @@ mod tests {
         order_by
             .validate_for_message(&site)
             .expect("every sortable Site path resolves on the Site descriptor");
+    }
+
+    #[test]
+    fn sortable_site_paths_map_to_columns_in_the_schema() {
+        // Sorting now happens in SQL (#42): `transpile_order_by` maps each
+        // `order_by` path to a column through `site_schema`. So the schema must
+        // cover every sortable path — otherwise an in-allow-list `order_by` would
+        // surface as an `internal` error. This guards the allow-list against
+        // drifting from the column schema the same way the test above guards it
+        // against the proto.
+        let order_by: OrderBy = SORTABLE_SITE_PATHS
+            .join(",")
+            .parse()
+            .expect("the allow-list is valid order_by syntax");
+        aip::sql::transpile_order_by(&order_by, &site_schema())
+            .expect("every sortable Site path maps to a column in the schema");
     }
 
     #[test]
