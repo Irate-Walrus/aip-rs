@@ -1,0 +1,27 @@
+// Import anchor for `buf generate --include-imports`.
+//
+// `aip-proto` ships no protobuf schema of its own: the standardized `google.*`
+// types come from `buf.build/googleapis/googleapis` (ADR-0011), pinned by digest
+// in `buf.lock`. buf only generates a module's *own* files, so this empty anchor
+// imports exactly the googleapis roots we vendor as committed Rust; running
+// `buf generate --include-imports` then emits this file plus each transitively
+// imported `google.*` package. The generated `aip.proto.rs` carries no messages
+// and is dropped by `regen.sh`.
+syntax = "proto3";
+
+package aip.proto;
+
+// google.api.* annotation types (and the extensions reflection reads).
+import "google/api/resource.proto";
+import "google/api/field_behavior.proto";
+import "google/api/launch_stage.proto";
+
+// google.type.* shared types — Expr backs an IAM Condition.
+import "google/type/expr.proto";
+
+// google.iam.v1.* — the Policy structure (ADR-0010 / ADR-0011).
+import "google/iam/v1/policy.proto";
+
+// CEL google.api.expr.v1alpha1 — the checked/abstract syntax trees.
+import "google/api/expr/v1alpha1/syntax.proto";
+import "google/api/expr/v1alpha1/checked.proto";

@@ -114,6 +114,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aip-proto"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "prost-reflect",
+ "prost-types",
+]
+
+[[package]]
 name = "aip-reflect"
 version = "0.1.0"
 dependencies = [

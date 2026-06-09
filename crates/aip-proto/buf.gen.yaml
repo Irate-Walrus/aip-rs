@@ -1,0 +1,63 @@
+# buf generate template for aip-proto (ADR-0011).
+#
+# neoeinstein-prost emits the prost structs. Reflection wiring (ADR-0009) is added
+# as prost type attributes rather than a build.rs: every message derives
+# `prost_reflect::ReflectMessage` against the crate-local `DESCRIPTOR_POOL`, and
+# each one is given its fully-qualified `message_name` (the derive requires it
+# explicitly — it does not infer it from the prost path).
+#
+# The `message_name` lines below enumerate every generated message. They are the
+# one hand-maintained part of this file, but completeness is compiler-enforced: a
+# message left without its `message_name` fails to derive `ReflectMessage`
+# ("missing required argument 'message_name'"), so a googleapis digest bump that
+# adds messages breaks the build loudly rather than drifting silently. Regenerate
+# the list from the descriptor set after a digest bump:
+#
+#   buf build --as-file-descriptor-set -o /tmp/fds.json
+#   jq -r '<walk messageType recursively, skip mapEntry/WKT/anchor>' /tmp/fds.json
+#
+# Comments are disabled: the googleapis docs carry ```-fenced JSON/CEL examples
+# that rustdoc would otherwise run as doctests (matches aip-iam / aip-filtering).
+version: v2
+plugins:
+  - remote: buf.build/community/neoeinstein-prost
+    out: src/gen
+    opt:
+      - disable_comments=.
+      - 'type_attribute=.=#[derive(::prost_reflect::ReflectMessage)]'
+      - 'type_attribute=.=#[prost_reflect(descriptor_pool = "crate::DESCRIPTOR_POOL")]'
+      - 'type_attribute=google.api.ResourceDescriptor=#[prost_reflect(message_name = "google.api.ResourceDescriptor")]'
+      - 'type_attribute=google.api.ResourceReference=#[prost_reflect(message_name = "google.api.ResourceReference")]'
+      - 'type_attribute=google.api.expr.v1alpha1.CheckedExpr=#[prost_reflect(message_name = "google.api.expr.v1alpha1.CheckedExpr")]'
+      - 'type_attribute=google.api.expr.v1alpha1.Constant=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Constant")]'
+      - 'type_attribute=google.api.expr.v1alpha1.Decl=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Decl")]'
+      - 'type_attribute=google.api.expr.v1alpha1.Decl.FunctionDecl=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Decl.FunctionDecl")]'
+      - 'type_attribute=google.api.expr.v1alpha1.Decl.FunctionDecl.Overload=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Decl.FunctionDecl.Overload")]'
+      - 'type_attribute=google.api.expr.v1alpha1.Decl.IdentDecl=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Decl.IdentDecl")]'
+      - 'type_attribute=google.api.expr.v1alpha1.Expr=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Expr")]'
+      - 'type_attribute=google.api.expr.v1alpha1.Expr.Call=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Expr.Call")]'
+      - 'type_attribute=google.api.expr.v1alpha1.Expr.Comprehension=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Expr.Comprehension")]'
+      - 'type_attribute=google.api.expr.v1alpha1.Expr.CreateList=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Expr.CreateList")]'
+      - 'type_attribute=google.api.expr.v1alpha1.Expr.CreateStruct=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Expr.CreateStruct")]'
+      - 'type_attribute=google.api.expr.v1alpha1.Expr.CreateStruct.Entry=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Expr.CreateStruct.Entry")]'
+      - 'type_attribute=google.api.expr.v1alpha1.Expr.Ident=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Expr.Ident")]'
+      - 'type_attribute=google.api.expr.v1alpha1.Expr.Select=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Expr.Select")]'
+      - 'type_attribute=google.api.expr.v1alpha1.ParsedExpr=#[prost_reflect(message_name = "google.api.expr.v1alpha1.ParsedExpr")]'
+      - 'type_attribute=google.api.expr.v1alpha1.Reference=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Reference")]'
+      - 'type_attribute=google.api.expr.v1alpha1.SourceInfo=#[prost_reflect(message_name = "google.api.expr.v1alpha1.SourceInfo")]'
+      - 'type_attribute=google.api.expr.v1alpha1.SourceInfo.Extension=#[prost_reflect(message_name = "google.api.expr.v1alpha1.SourceInfo.Extension")]'
+      - 'type_attribute=google.api.expr.v1alpha1.SourceInfo.Extension.Version=#[prost_reflect(message_name = "google.api.expr.v1alpha1.SourceInfo.Extension.Version")]'
+      - 'type_attribute=google.api.expr.v1alpha1.SourcePosition=#[prost_reflect(message_name = "google.api.expr.v1alpha1.SourcePosition")]'
+      - 'type_attribute=google.api.expr.v1alpha1.Type=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Type")]'
+      - 'type_attribute=google.api.expr.v1alpha1.Type.AbstractType=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Type.AbstractType")]'
+      - 'type_attribute=google.api.expr.v1alpha1.Type.FunctionType=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Type.FunctionType")]'
+      - 'type_attribute=google.api.expr.v1alpha1.Type.ListType=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Type.ListType")]'
+      - 'type_attribute=google.api.expr.v1alpha1.Type.MapType=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Type.MapType")]'
+      - 'type_attribute=google.iam.v1.AuditConfig=#[prost_reflect(message_name = "google.iam.v1.AuditConfig")]'
+      - 'type_attribute=google.iam.v1.AuditConfigDelta=#[prost_reflect(message_name = "google.iam.v1.AuditConfigDelta")]'
+      - 'type_attribute=google.iam.v1.AuditLogConfig=#[prost_reflect(message_name = "google.iam.v1.AuditLogConfig")]'
+      - 'type_attribute=google.iam.v1.Binding=#[prost_reflect(message_name = "google.iam.v1.Binding")]'
+      - 'type_attribute=google.iam.v1.BindingDelta=#[prost_reflect(message_name = "google.iam.v1.BindingDelta")]'
+      - 'type_attribute=google.iam.v1.Policy=#[prost_reflect(message_name = "google.iam.v1.Policy")]'
+      - 'type_attribute=google.iam.v1.PolicyDelta=#[prost_reflect(message_name = "google.iam.v1.PolicyDelta")]'
+      - 'type_attribute=google.type.Expr=#[prost_reflect(message_name = "google.type.Expr")]'
