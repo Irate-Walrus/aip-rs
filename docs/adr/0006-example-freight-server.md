@@ -1,5 +1,12 @@
 # Demo with a runnable freight gRPC server, grown issue by issue
 
+> **Build mechanism superseded by [ADR-0011](0011-buf-proto-pipeline.md).** The
+> "No `protoc`" decision (protox compilation) and the "each crate vendors its
+> protos to build standalone" property are replaced by ADR-0011's buf pipeline: a
+> shared `aip-proto` crate with `google.*` from the BSR, generated code committed.
+> The demo's purpose, gRPC surface, living-demo growth model, and storage
+> decisions below stand.
+
 aip-rs needs an executable end-to-end demo: a place to see the primitives used
 together (resource names → IDs → pagination → field masks → filtering →
 ordering → errors) and an integration-test surface the per-crate unit tests
