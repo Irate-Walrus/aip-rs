@@ -1,5 +1,11 @@
 # Idiomatic resourcename API; code generation deferred
 
+> **Partially superseded by [ADR-0011](0011-buf-proto-pipeline.md).** The
+> deferred-codegen decision below — and the `#[derive(ResourceName)]` proc-macro
+> it floats — is resolved by ADR-0011, which generates resource names with the
+> `protoc-gen-prost-aip` buf plugin instead. The runtime `resourcename` API
+> described here stands unchanged; the generated wrappers layer on it.
+
 `aip-go`'s `resourcename` exposes variadic `Sscan`/`Sprint`, which exist as
 targets for its `protoc-gen-go-aip` code generator (generated `XxxResourceName`
 structs call them with positional `&field` lists). Rust has no variadics and we
