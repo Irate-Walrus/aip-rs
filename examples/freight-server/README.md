@@ -28,14 +28,14 @@ toolchain for the bundled SQLite.
 ## Try it
 
 With [`grpcurl`](https://github.com/fullstorydev/grpcurl) (no server reflection,
-so point it at the shared proto tree):
+so hand it the committed descriptor set — the same `buf build` image that backs
+the server's runtime reflection, which also lets grpcurl decode the AIP-193
+error details below):
 
 ```sh
-PROTO=crates/test-fixtures/proto
+PROTOSET=examples/freight-server/src/descriptor_set.binpb
 SVC=einride.example.freight.v1.FreightService
-gc() { grpcurl -import-path "$PROTO" \
-  -proto einride/example/freight/v1/freight_service.proto \
-  -plaintext "$@"; }
+gc() { grpcurl -protoset "$PROTOSET" -plaintext "$@"; }
 
 # CreateShipper mints a system-assigned id (a UUIDv4, per AIP-148), so it
 # returns a name like `shippers/daf1cb3e-f33b-43f1-81cc-e65fda51efa5`. Copy that
@@ -127,14 +127,12 @@ gc -d '{"parent":"shippers/$ID","filter":"annotations:priority"}'               
 ```
 
 The `google.iam.v1.IAMPolicy` service (#64, #65) stores a **Policy** keyed by
-**Resource name** and mutates it through the `aip::iam` structural helpers. Its
-protos are vendored under this example's [`proto/`](proto) (not the shared
-fixtures), so point grpcurl there:
+**Resource name** and mutates it through the `aip::iam` structural helpers. It
+is in the same descriptor set (via the `proto/imports.proto` anchor), so the
+same protoset serves it:
 
 ```sh
-IAM=examples/freight-server/proto
-ic() { grpcurl -import-path "$IAM" -proto google/iam/v1/iam_policy.proto \
-  -plaintext "$@"; }
+ic() { grpcurl -protoset "$PROTOSET" -plaintext "$@"; }
 IAMSVC=google.iam.v1.IAMPolicy
 
 # GetIamPolicy on a resource with no policy returns an empty Policy (not an error).
@@ -260,14 +258,14 @@ wired up.
 
 | Method            | aip-rs primitive(s)                          | Issue        | Status      |
 | ----------------- | -------------------------------------------- | ------------ | ----------- |
-| `GetShipper`      | `resourcename` (validate name), `iam` (AIP-211 authorization → non-leaking `PERMISSION_DENIED` / `NOT_FOUND`-via-parent over the shared Policy store) | #4, #67 | wired⁶ |
+| `GetShipper`      | `resourcename` (validate) + generated `ShipperResourceName` (pattern match), `iam` (AIP-211 authorization → non-leaking `PERMISSION_DENIED` / `NOT_FOUND`-via-parent over the shared Policy store) | #4, #67, #82 | wired⁶ |
 | `ListShippers`    | `pagination` (offset page-token codec + request-checksum guard) | #6, #7 | wired² |
-| `CreateShipper`   | `resourceid` (generate), `resourcename` (format), `fieldbehavior` (clear OUTPUT_ONLY/IMMUTABLE, validate REQUIRED) | #5, #3, #59 | wired       |
+| `CreateShipper`   | `resourceid` (generate), generated `ShipperResourceName` (format), `fieldbehavior` (clear OUTPUT_ONLY/IMMUTABLE, validate REQUIRED) | #5, #3, #59, #82 | wired       |
 | `UpdateShipper`   | `fieldmask` (typed `update` over `update_mask`), `fieldbehavior` (copy OUTPUT_ONLY from existing, validate REQUIRED in mask) | #8, #48, #59 | wired       |
-| `DeleteShipper`   | `resourcename` (validate name)               | #4           | wired       |
-| `CreateSite`      | `resourceid` (generate), `resourcename` (parse parent + format), `validation` (accumulate REQUIRED-field violations → AIP-193) | #5, #3, #60 | wired       |
+| `DeleteShipper`   | `resourcename` (validate) + generated `ShipperResourceName` (pattern match) | #4, #82      | wired       |
+| `CreateSite`      | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `SiteResourceName` (format), `validation` (accumulate REQUIRED-field violations → AIP-193) | #5, #3, #60, #82 | wired       |
 | `ListSites`       | `ordering` (parse/validate) + `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (filter + server-composed scope/soft-delete + `ORDER BY`/`LIMIT`/`OFFSET` → in-memory SQLite) | #9, #10, #6, #7, #11, #39, #40, #41, #42, #43 | wired³ |
-| `CreateShipment`  | `resourceid` (generate), `resourcename` (parse parent + format), `validation` (accumulate both REQUIRED endpoints → one AIP-193 response) | #5, #3, #60 | wired⁴ |
+| `CreateShipment`  | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `ShipmentResourceName` (format), `validation` (accumulate both REQUIRED endpoints → one AIP-193 response) | #5, #3, #60, #82 | wired⁴ |
 | `ListShipments`   | `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (filter + server-composed scope/soft-delete → in-memory SQLite) | #6, #7, #43 | wired⁴ |
 | `IAMPolicy.GetIamPolicy` / `SetIamPolicy` | `iam` (Member validation + structural read-modify-write: dedupe/normalise, `etag` optimistic concurrency, conditions⟹version-3) over a decomposed SQLite policy store (iam-go's `iam_policy_bindings` schema) | #64, #65 | wired⁵ |
 | `IAMPolicy.TestIamPermissions` | `iam` + the opt-in cel-backed `eval` adapter (`aip::iam::eval`): role→permission expansion via an example-owned catalogue, Member matching, Condition evaluation | #66, #68 | wired⁷ |
@@ -412,20 +410,36 @@ which resolves to the same AIP-193 details under the service's own domain. So a
 
 ## How the proto types are built
 
-`build.rs` compiles the protos with [`protox`](https://crates.io/crates/protox) —
-a pure-Rust protobuf compiler, so **no `protoc` is required** (matching
-[ADR-0001](../../docs/adr/0001-prost-reflect-and-workspace.md)) — and feeds the
-resulting `FileDescriptorSet` to `tonic-prost-build` for the message + service
-codegen. The same set is embedded raw so the server can build a
-`prost_reflect::DescriptorPool` at runtime; that pool backs the `ReflectMessage`
-derives below — each Typed message resolves its own descriptor from it.
+The Rust under [`src/gen`](src/gen) is emitted by `buf generate` and
+**committed** ([ADR-0011](../../docs/adr/0011-buf-proto-pipeline.md)): there is
+no codegen `build.rs`, so building the example needs no proto toolchain —
+[`regen.sh`](regen.sh) is the maintainer path (buf + the BSR + a Rust
+toolchain). The crate owns only its `einride.example.freight.v1` protos under
+[`proto/`](proto); every shared `google.*` type is `extern_path`'d onto
+[`aip-proto`](../../crates/aip-proto), googleapis itself riding as a
+digest-pinned BSR dependency (`buf.lock`). That makes `google.iam.v1.Policy`
+exist **once** by construction: the `IAMPolicy` service trait generated here
+speaks the very `Policy` the `aip::iam` structural helpers operate on, where the
+old `build.rs` hand-maintained eight per-message `extern_path` mappings to the
+same end.
 
-The generated freight messages are **Typed messages** (#46): `build.rs`
-adds `#[derive(prost_reflect::ReflectMessage)]` to each, enumerated from the same
-`protox` set, so a message carries its own `MessageDescriptor`
-(`Shipper::default().descriptor()`) without a by-name pool lookup — per
+Each `google.api.resource` annotation also yields a **typed resource-name
+wrapper** (`ShipperResourceName`, `SiteResourceName`, `ShipmentResourceName`)
+via the workspace's own buf plugin,
+[`protoc-gen-prost-aip`](../../crates/protoc-gen-prost-aip) (the
+protoc-gen-go-aip analog, ADR-0011): the proto annotation is the single source
+of truth for the name pattern, and the handlers parse and format resource names
+through the generated `parse()`/`format()` instead of hand-written
+`format!("shippers/{{shipper}}")` strings.
+
+The generated freight messages are **Typed messages** (#46): the buf template
+adds `#[derive(prost_reflect::ReflectMessage)]` to each, resolved against the
+embedded descriptor pool (`buf build`'s import-complete image, which preserves
+the extension bytes annotations ride on), so a message carries its own
+`MessageDescriptor` (`Shipper::default().descriptor()`) without a by-name pool
+lookup — per
 [ADR-0009](../../docs/adr/0009-reflective-typed-message-api.md). Every reflective
-primitive the handlers call is now expressed over these Typed messages:
+primitive the handlers call is expressed over these Typed messages:
 `ListShippers`/`ListSites` take `request_checksum` straight off the request's
 descriptor (#47), and `UpdateShipper` applies its `update_mask` with the typed
 `fieldmask::update` facade (#48) — so the server holds no `DynamicMessage` of its
@@ -441,9 +455,11 @@ generated `Shipment` / `BatchGetSitesRequest` and asserts a well-formed referenc
 (`origin_site` naming a `Site`) resolves while a mismatched one (a `Shipper` name
 where a `Site` is required) is rejected.
 
-The freight protos and their vendored googleapis imports live under
-[`proto/`](proto), so the example builds standalone. The freight sources are a
-copy of the same einride sources used by
-[`crates/test-fixtures/proto`](../../crates/test-fixtures/proto); the
-`google/iam/v1/*` set backing the `IAMPolicy` service is vendored from googleapis
-(see [`proto/google/VENDOR.md`](proto/google/VENDOR.md)).
+The freight proto sources under [`proto/`](proto) are a copy of the same
+einride sources used by
+[`crates/test-fixtures/proto`](../../crates/test-fixtures/proto); nothing
+`google.*` is vendored anymore — those imports resolve from the BSR at the
+commit pinned in [`buf.lock`](buf.lock). The `proto/imports.proto` anchor pulls
+`google/iam/v1/iam_policy.proto` (the served `IAMPolicy` service, which no
+freight proto imports) and `google/rpc/error_details.proto` (so the grpcurl
+protoset decodes AIP-193 details) into the closure.

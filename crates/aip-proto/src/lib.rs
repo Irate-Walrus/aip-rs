@@ -70,14 +70,15 @@ pub mod google {
         }
     }
 
-    /// `google.type.*` shared types (currently `Expr`).
+    /// `google.type.*` shared types (`Expr`, `LatLng`).
     #[cfg(any(feature = "type", feature = "iam"))]
     pub mod r#type {
         // prost escapes the `type` keyword in the generated file name, too.
         include!("gen/google/r#type/google.type.rs");
     }
 
-    /// `google.iam.v1`: the Policy structure (ADR-0010).
+    /// `google.iam.v1`: the Policy structure (ADR-0010) plus the IAMPolicy
+    /// service's request/response messages.
     #[cfg(feature = "iam")]
     pub mod iam {
         pub mod v1 {

@@ -14,4 +14,14 @@ pub struct Expr {
     #[prost(string, tag="4")]
     pub location: ::prost::alloc::string::String,
 }
+#[derive(::prost_reflect::ReflectMessage)]
+#[prost_reflect(descriptor_pool = "crate::DESCRIPTOR_POOL")]
+#[prost_reflect(message_name = "google.type.LatLng")]
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct LatLng {
+    #[prost(double, tag="1")]
+    pub latitude: f64,
+    #[prost(double, tag="2")]
+    pub longitude: f64,
+}
 // @@protoc_insertion_point(module)

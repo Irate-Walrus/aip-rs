@@ -24,12 +24,16 @@ use crate::proto::einride::example::freight::v1::{
     CreateShipmentRequest, CreateShipperRequest, CreateSiteRequest, DeleteShipmentRequest,
     DeleteShipperRequest, DeleteSiteRequest, GetShipmentRequest, GetShipperRequest, GetSiteRequest,
     ListShipmentsRequest, ListShipmentsResponse, ListShippersRequest, ListShippersResponse,
-    ListSitesRequest, ListSitesResponse, Shipment, Shipper, Site, UpdateShipmentRequest,
-    UpdateShipperRequest, UpdateSiteRequest,
+    ListSitesRequest, ListSitesResponse, Shipment, ShipmentResourceName, Shipper,
+    ShipperResourceName, Site, SiteResourceName, UpdateShipmentRequest, UpdateShipperRequest,
+    UpdateSiteRequest,
 };
 use crate::storage::{PolicyStore, Storage};
 
-/// The shipper collection ID — the root segment of every shipper resource name.
+/// The shipper collection ID — the root segment of every shipper resource name,
+/// used as the collection-level IAM resource (the AIP-211 parent fallback). The
+/// generated [`ShipperResourceName::PATTERN`] is the source of truth for the
+/// segment (ADR-0011); a test guards the two against drifting apart.
 const SHIPPERS_COLLECTION: &str = "shippers";
 
 /// Default page size when a `ListShippers` request leaves `page_size` unset —
@@ -202,12 +206,11 @@ impl FreightService for FreightServer {
         // user-supplied id to validate here; `validate_user_settable` guards
         // that path wherever a request later exposes one.
         let id = aip::resourceid::generate_system();
-        // Format the canonical resource name `shippers/{shipper}` from its
-        // pattern (AIP-122) rather than hand-concatenating the segments.
-        let shipper_pattern = format!("{SHIPPERS_COLLECTION}/{{shipper}}");
-        shipper.name = aip::resourcename::Pattern::parse(&shipper_pattern)
-            .expect("the shipper collection pattern is valid")
-            .format([("shipper", id.as_str())])
+        // Format the canonical resource name `shippers/{shipper}` through the
+        // typed wrapper generated from shipper.proto's `google.api.resource`
+        // annotation (AIP-122 / ADR-0011) rather than hand-writing the pattern.
+        shipper.name = ShipperResourceName { shipper: id }
+            .format()
             .expect("a generated shipper id formats into the pattern");
         let ts = now();
         shipper.create_time = Some(ts);
@@ -367,21 +370,16 @@ impl FreightService for FreightServer {
 
         // The validated `parent` binds the `{shipper}` of the canonical site
         // pattern; mint a system-assigned `{site}` id (a UUIDv4, per AIP-148) and
-        // format the full resource name from the pattern (AIP-122) rather than
-        // hand-concatenating the segments.
-        let shipper_pattern = format!("{SHIPPERS_COLLECTION}/{{shipper}}");
-        let shipper_id = aip::resourcename::Pattern::parse(&shipper_pattern)
-            .expect("the shipper collection pattern is valid")
-            .match_name(&req.parent)
-            .and_then(|caps| caps.get("shipper"))
-            .expect("parent validated to match the shipper pattern")
-            .to_owned();
-        let id = aip::resourceid::generate_system();
-        let site_pattern = format!("{SHIPPERS_COLLECTION}/{{shipper}}/sites/{{site}}");
-        site.name = aip::resourcename::Pattern::parse(&site_pattern)
-            .expect("the site collection pattern is valid")
-            .format([("shipper", shipper_id.as_str()), ("site", id.as_str())])
-            .expect("a generated site id formats into the pattern");
+        // format the full resource name through the typed wrappers generated from
+        // the `google.api.resource` annotations (AIP-122 / ADR-0011).
+        let parent = ShipperResourceName::parse(&req.parent)
+            .expect("parent validated to match the shipper pattern");
+        site.name = SiteResourceName {
+            shipper: parent.shipper,
+            site: aip::resourceid::generate_system(),
+        }
+        .format()
+        .expect("a generated site id formats into the pattern");
 
         let ts = now();
         site.create_time = Some(ts);
@@ -482,21 +480,16 @@ impl FreightService for FreightServer {
 
         // The validated `parent` binds the `{shipper}` of the canonical shipment
         // pattern; mint a system-assigned `{shipment}` id (a UUIDv4, per AIP-148)
-        // and format the full resource name from the pattern (AIP-122) rather than
-        // hand-concatenating the segments.
-        let shipper_pattern = format!("{SHIPPERS_COLLECTION}/{{shipper}}");
-        let shipper_id = aip::resourcename::Pattern::parse(&shipper_pattern)
-            .expect("the shipper collection pattern is valid")
-            .match_name(&req.parent)
-            .and_then(|caps| caps.get("shipper"))
-            .expect("parent validated to match the shipper pattern")
-            .to_owned();
-        let id = aip::resourceid::generate_system();
-        let shipment_pattern = format!("{SHIPPERS_COLLECTION}/{{shipper}}/shipments/{{shipment}}");
-        shipment.name = aip::resourcename::Pattern::parse(&shipment_pattern)
-            .expect("the shipment collection pattern is valid")
-            .format([("shipper", shipper_id.as_str()), ("shipment", id.as_str())])
-            .expect("a generated shipment id formats into the pattern");
+        // and format the full resource name through the typed wrappers generated
+        // from the `google.api.resource` annotations (AIP-122 / ADR-0011).
+        let parent = ShipperResourceName::parse(&req.parent)
+            .expect("parent validated to match the shipper pattern");
+        shipment.name = ShipmentResourceName {
+            shipper: parent.shipper,
+            shipment: aip::resourceid::generate_system(),
+        }
+        .format()
+        .expect("a generated shipment id formats into the pattern");
 
         let ts = now();
         shipment.create_time = Some(ts);
@@ -760,18 +753,21 @@ fn effective_page_size(requested: i32) -> Result<usize, Status> {
 }
 
 /// Validates that `value` is a well-formed shipper resource name (AIP-122): a
-/// valid resource name that matches the `shippers/{shipper}` pattern. Returns
+/// valid resource name that parses as a [`ShipperResourceName`] — the typed
+/// wrapper generated from shipper.proto's `google.api.resource` pattern. Returns
 /// `INVALID_ARGUMENT` otherwise. `field` is the request field the value came from
 /// (`name` or `parent`), so the AIP-193 `BadRequest` points at the right one.
 fn validate_shipper_name(field: &str, value: &str) -> Result<(), Status> {
     // A malformed name converts via the crate's AIP-193 `From<Error> for Status`
-    // (#16) to an `INVALID_ARGUMENT` carrying an `ErrorInfo`. The collection-match
+    // (#16) to an `INVALID_ARGUMENT` carrying an `ErrorInfo`. The pattern-match
     // check below is the server's own policy, so it builds its own AIP-193 details.
     aip::resourcename::validate(value)?;
-    let pattern = format!("{SHIPPERS_COLLECTION}/{{shipper}}");
-    if !aip::resourcename::is_match(&pattern, value) {
+    if ShipperResourceName::parse(value).is_err() {
         let mut violations = Validator::new(SERVICE_DOMAIN, "RESOURCE_NAME_PATTERN_MISMATCH");
-        violations.add_field_violation(field, format!("must match the pattern `{pattern}`"));
+        violations.add_field_violation(
+            field,
+            format!("must match the pattern `{}`", ShipperResourceName::PATTERN),
+        );
         violations.into_result()?;
     }
     Ok(())
@@ -847,12 +843,24 @@ fn now() -> prost_types::Timestamp {
 mod tests {
     use super::*;
     use crate::proto::einride::example::freight::v1::site;
-    use crate::proto::google::r#type::LatLng;
     use aip::ordering::OrderBy;
+    use aip_proto::google::r#type::LatLng;
 
     /// A shipper parent name; the demo does not require the shipper to exist in
     /// storage for `CreateSite`/`ListSites`, only that the name is well-formed.
     const PARENT: &str = "shippers/acme";
+
+    /// The proto's `google.api.resource` pattern is the source of truth for the
+    /// shipper collection segment (ADR-0011): if the generated pattern ever
+    /// changes, the hand-held collection handle the IAM gate consults must move
+    /// with it.
+    #[test]
+    fn shippers_collection_matches_the_generated_pattern() {
+        assert_eq!(
+            ShipperResourceName::PATTERN.split_once('/'),
+            Some((SHIPPERS_COLLECTION, "{shipper}")),
+        );
+    }
 
     /// Creates a site under `PARENT` with the given display name and latitude.
     async fn seed_site(server: &FreightServer, display_name: &str, latitude: f64) {

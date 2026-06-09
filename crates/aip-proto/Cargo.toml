@@ -27,13 +27,16 @@ prost-types = { workspace = true, optional = true }
 # readable even with no package feature enabled.
 default = []
 
-# google.api.* annotation types (ResourceDescriptor / ResourceReference and the
-# field_behavior / launch_stage enums).
+# google.api.* annotation types (ResourceDescriptor / ResourceReference, the
+# field_behavior / launch_stage enums, and the http/client-library option types
+# iam_policy.proto's closure pulls in).
 api = ["dep:prost", "dep:prost-types"]
-# google.type.* shared types (Expr).
+# google.type.* shared types (Expr, LatLng).
 type = ["dep:prost", "dep:prost-types"]
-# google.iam.v1.* Policy structure (ADR-0010). Implies `type`: a Binding's
-# condition is a `google.type.Expr`, and the generated code references it by path.
+# google.iam.v1.* Policy structure (ADR-0010) plus the IAMPolicy service's
+# request/response messages, so a service crate generating the IAMPolicy trait
+# shares one Policy type. Implies `type`: a Binding's condition is a
+# `google.type.Expr`, and the generated code references it by path.
 iam = ["type", "dep:prost", "dep:prost-types"]
 # CEL google.api.expr.v1alpha1 checked/abstract syntax trees.
 cel = ["dep:prost", "dep:prost-types"]

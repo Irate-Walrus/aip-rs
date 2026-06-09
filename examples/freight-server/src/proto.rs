@@ -1,23 +1,32 @@
-//! Generated protobuf types and the `FreightService` server trait.
+//! Generated protobuf types and the `FreightService` / `IAMPolicy` server traits.
 //!
-//! `build.rs` writes one Rust file per proto package into `OUT_DIR`; we mount
-//! them in a module tree that mirrors each package path so prost's cross-package
-//! references resolve. `google.protobuf.*` well-known types are mapped to
-//! [`prost_types`] (not generated), and `google.api.*` is options-only — neither
-//! is referenced by the generated freight field types, so neither is mounted.
-// `dead_code`: the generated `google.iam.v1` set carries types the demo never
-// constructs (audit configs, policy deltas), which a binary crate flags as unused.
+//! The code under `src/gen` is emitted by `buf generate` (see `regen.sh`) and
+//! **committed** (ADR-0011): there is no codegen `build.rs` and no vendored
+//! `google/**`, so building the example needs no proto toolchain. We mount the
+//! generated files in a module tree that mirrors each package path so prost's
+//! cross-package references resolve. The shared `google.*` types are not
+//! generated here at all — `extern_path` maps them onto [`aip_proto`], so e.g.
+//! the `google.iam.v1.Policy` the `IAMPolicy` service trait speaks *is* the one
+//! `aip::iam`'s structural helpers operate on (one `Policy` type by
+//! construction). `google.protobuf.*` well-known types map to [`prost_types`].
+//!
+//! Each `google.api.resource` annotation also yields a typed resource-name
+//! wrapper (`ShipperResourceName`, …) via `protoc-gen-prost-aip` — the proto
+//! annotation is the single source of truth for the name pattern (ADR-0011).
+// `dead_code`: the generated service plumbing and resource-name wrappers carry
+// items the demo never constructs, which a binary crate flags as unused.
 #![allow(clippy::all, missing_docs, rustdoc::all, dead_code)]
 
 use std::sync::LazyLock;
 
 use prost_reflect::DescriptorPool;
 
-/// The freight `FileDescriptorSet` emitted by `build.rs`, embedded so the
-/// generated messages can resolve their own descriptors at runtime (the
-/// [`ReflectMessage`](prost_reflect::ReflectMessage) derives read [`DESCRIPTOR_POOL`]).
-static FILE_DESCRIPTOR_SET: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/freight_descriptor_set.bin"));
+/// The freight `FileDescriptorSet` emitted by `buf build` via `regen.sh` —
+/// import-complete, with extension bytes (e.g. `google.api.field_behavior`)
+/// preserved — embedded so the generated messages can resolve their own
+/// descriptors at runtime (the [`ReflectMessage`](prost_reflect::ReflectMessage)
+/// derives read [`DESCRIPTOR_POOL`]).
+static FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("descriptor_set.binpb");
 
 /// Shared [`DescriptorPool`] over the freight protos. Backs the generated
 /// `ReflectMessage` derives — every Typed message resolves its own
@@ -32,29 +41,42 @@ pub mod einride {
     pub mod example {
         pub mod freight {
             pub mod v1 {
-                include!(concat!(env!("OUT_DIR"), "/einride.example.freight.v1.rs"));
+                // The message structs and the `FreightService` server trait.
+                include!("gen/einride/example/freight/v1/einride.example.freight.v1.rs");
+                include!("gen/einride/example/freight/v1/einride.example.freight.v1.tonic.rs");
+
+                // The typed resource-name wrappers, one file per annotated
+                // proto. Each carries its own `use` lines, so each gets its own
+                // module, re-exported flat alongside the messages.
+                mod shipment_aip {
+                    include!("gen/einride/example/freight/v1/shipment.aip.rs");
+                }
+                mod shipper_aip {
+                    include!("gen/einride/example/freight/v1/shipper.aip.rs");
+                }
+                mod site_aip {
+                    include!("gen/einride/example/freight/v1/site.aip.rs");
+                }
+                pub use shipment_aip::ShipmentResourceName;
+                pub use shipper_aip::ShipperResourceName;
+                pub use site_aip::SiteResourceName;
             }
         }
     }
 }
 
 pub mod google {
-    pub mod r#type {
-        // prost escapes the `type` keyword in the generated file name, too.
-        // Holds `LatLng` (the freight `Site` location). The IAM `Binding.condition`
-        // `Expr` is `extern_path`ed onto `aip::iam::proto` (aip #65), so it is not
-        // generated here.
-        include!(concat!(env!("OUT_DIR"), "/google.r#type.rs"));
-    }
+    // Nothing `google.type` is generated or mounted here: the generated freight
+    // structs reference `LatLng` by its real path (`aip_proto::google::r#type`),
+    // and so does any hand-written code that needs it.
     pub mod iam {
         pub mod v1 {
-            // The `IAMPolicy` service trait + its request messages
-            // (`SetIamPolicyRequest`, `GetPolicyOptions`, …). The `Policy` /
-            // `Binding` message layer is `extern_path`ed onto `aip::iam::proto`
-            // (aip #65) so the service shares one `Policy` type with the structural
-            // read-modify-write helpers; only the service + requests are generated
-            // here.
-            include!(concat!(env!("OUT_DIR"), "/google.iam.v1.rs"));
+            // Every `google.iam.v1` *message* (`Policy`, the request/response
+            // types, …) comes from aip-proto; only the `IAMPolicy` service
+            // trait is generated here, referencing those very types.
+            pub use aip_proto::google::iam::v1::*;
+
+            include!("gen/google/iam/v1/google.iam.v1.tonic.rs");
         }
     }
 }
