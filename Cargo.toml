@@ -43,6 +43,11 @@ aip-reflect      = { version = "0.1.0", path = "crates/aip-reflect" }
 # parameterized, dialect-rendered Predicate. Not part of the core; depended on
 # directly by the example's default SQLite storage.
 aip-sql          = { version = "0.1.0", path = "crates/aip-sql" }
+# Resource-name code generator (issue #81, ADR-0011): the codegen-only helpers
+# (MethodType / GrammaticalName / strcase) and `generate()`, which emits typed
+# resource-name wrappers layered on `aip-resourcename`. Drives the
+# `protoc-gen-prost-aip` buf/protoc plugin.
+aip-codegen      = { version = "0.1.0", path = "crates/aip-codegen" }
 
 # Test-only fixture harness (never published); dev-dependency of the reflective
 # crates. Path-only — no version, since it is unpublishable.

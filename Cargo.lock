@@ -29,6 +29,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aip-codegen"
+version = "0.1.0"
+dependencies = [
+ "aip-reflect",
+ "aip-resourcename",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "aip-fieldbehavior"
 version = "0.1.0"
 dependencies = [
@@ -1205,6 +1214,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8991c4cbdb8bc5b11f0b074ffe286c30e523de90fee5ba8132f1399f23cb3dd7"
 dependencies = [
  "prost",
+]
+
+[[package]]
+name = "protoc-gen-prost-aip"
+version = "0.1.0"
+dependencies = [
+ "aip-codegen",
+ "aip-reflect",
+ "prost",
+ "prost-reflect",
+ "prost-types",
 ]
 
 [[package]]
