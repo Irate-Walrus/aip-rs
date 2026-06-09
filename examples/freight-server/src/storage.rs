@@ -14,11 +14,12 @@ use std::sync::Mutex;
 use prost::Message as _;
 
 use crate::proto::einride::example::freight::v1::{site::State, Shipment, Shipper, Site};
-// The `google.iam.v1.Policy` message layer is shared with the structural helpers
-// via `extern_path` (aip #65), so it comes from `aip::iam::proto`, not the locally
-// generated `crate::proto::google::iam::v1`. `Expr` is the `google.type.Expr`
-// **Condition** a `Binding` carries — persisted (its expression) and reconstructed
-// so `TestIamPermissions` can evaluate it (aip #68).
+// `Policy` / `Binding` are aip-proto's generated `google.iam.v1` types (ADR-0011)
+// — the very ones the `aip::iam` structural helpers operate on and the `IAMPolicy`
+// service trait speaks, so there is one `Policy` type by construction (aip #65,
+// #82). `Expr` is the `google.type.Expr` **Condition** a `Binding` carries —
+// persisted (its expression) and reconstructed so `TestIamPermissions` can
+// evaluate it (aip #68).
 use aip::iam::proto::{google::r#type::Expr, Binding, Policy};
 
 /// Process-lifetime store. Shippers are a `BTreeMap` keyed by resource name,

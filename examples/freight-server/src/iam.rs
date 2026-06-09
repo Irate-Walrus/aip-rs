@@ -31,9 +31,10 @@ use std::time::SystemTime;
 
 use tonic::{Request, Response, Status};
 
-// The `IAMPolicy` service trait and its request/response messages are generated
-// locally; the `Policy` / `Binding` message layer is shared with the structural
-// helpers via `extern_path` (aip #65), so it comes from `aip::iam::proto`.
+// Only the `IAMPolicy` service trait is generated locally (ADR-0011); every
+// `google.iam.v1` message — the requests here, and the `Policy` / `Binding` the
+// structural helpers operate on (aip #65) — comes from aip-proto, re-exported
+// through `crate::proto`, so there is one `Policy` type by construction (#82).
 use crate::proto::google::iam::v1::{
     iam_policy_server::IamPolicy, GetIamPolicyRequest, SetIamPolicyRequest,
     TestIamPermissionsRequest, TestIamPermissionsResponse,

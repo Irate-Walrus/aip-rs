@@ -16,11 +16,17 @@ import "google/api/resource.proto";
 import "google/api/field_behavior.proto";
 import "google/api/launch_stage.proto";
 
-// google.type.* shared types — Expr backs an IAM Condition.
+// google.type.* shared types — Expr backs an IAM Condition; LatLng is the
+// freight example's Site location.
 import "google/type/expr.proto";
+import "google/type/latlng.proto";
 
-// google.iam.v1.* — the Policy structure (ADR-0010 / ADR-0011).
+// google.iam.v1.* — the Policy structure (ADR-0010 / ADR-0011) plus the
+// IAMPolicy service's request/response messages (iam_policy.proto pulls in
+// options.proto), so a service crate can generate the IAMPolicy *service* trait
+// while every google.iam.v1 *message* comes from here (one Policy type).
 import "google/iam/v1/policy.proto";
+import "google/iam/v1/iam_policy.proto";
 
 // CEL google.api.expr.v1alpha1 — the checked/abstract syntax trees.
 import "google/api/expr/v1alpha1/syntax.proto";

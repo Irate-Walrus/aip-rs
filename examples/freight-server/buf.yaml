@@ -1,0 +1,20 @@
+# buf module for the freight example (ADR-0011).
+#
+# The module owns only the demo's `einride.example.freight.v1` service protos;
+# every `google.*` import is a managed dependency from the BSR, pinned by digest
+# in `buf.lock` (the same digest `aip-proto` pins, so the two crates generate
+# from one googleapis commit).
+version: v2
+modules:
+  - path: proto
+deps:
+  - buf.build/googleapis/googleapis
+lint:
+  use:
+    - STANDARD
+  ignore:
+    # The schema-less import anchor (see its header).
+    - proto/imports.proto
+breaking:
+  use:
+    - PACKAGE

@@ -189,4 +189,52 @@ pub mod audit_config_delta {
         }
     }
 }
+#[derive(::prost_reflect::ReflectMessage)]
+#[prost_reflect(descriptor_pool = "crate::DESCRIPTOR_POOL")]
+#[prost_reflect(message_name = "google.iam.v1.GetPolicyOptions")]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetPolicyOptions {
+    #[prost(int32, tag="1")]
+    pub requested_policy_version: i32,
+}
+#[derive(::prost_reflect::ReflectMessage)]
+#[prost_reflect(descriptor_pool = "crate::DESCRIPTOR_POOL")]
+#[prost_reflect(message_name = "google.iam.v1.SetIamPolicyRequest")]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SetIamPolicyRequest {
+    #[prost(string, tag="1")]
+    pub resource: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="2")]
+    pub policy: ::core::option::Option<Policy>,
+    #[prost(message, optional, tag="3")]
+    pub update_mask: ::core::option::Option<::prost_types::FieldMask>,
+}
+#[derive(::prost_reflect::ReflectMessage)]
+#[prost_reflect(descriptor_pool = "crate::DESCRIPTOR_POOL")]
+#[prost_reflect(message_name = "google.iam.v1.GetIamPolicyRequest")]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetIamPolicyRequest {
+    #[prost(string, tag="1")]
+    pub resource: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="2")]
+    pub options: ::core::option::Option<GetPolicyOptions>,
+}
+#[derive(::prost_reflect::ReflectMessage)]
+#[prost_reflect(descriptor_pool = "crate::DESCRIPTOR_POOL")]
+#[prost_reflect(message_name = "google.iam.v1.TestIamPermissionsRequest")]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TestIamPermissionsRequest {
+    #[prost(string, tag="1")]
+    pub resource: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag="2")]
+    pub permissions: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(::prost_reflect::ReflectMessage)]
+#[prost_reflect(descriptor_pool = "crate::DESCRIPTOR_POOL")]
+#[prost_reflect(message_name = "google.iam.v1.TestIamPermissionsResponse")]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TestIamPermissionsResponse {
+    #[prost(string, repeated, tag="1")]
+    pub permissions: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
 // @@protoc_insertion_point(module)
