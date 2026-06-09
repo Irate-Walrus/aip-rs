@@ -12,8 +12,11 @@ thiserror.workspace = true
 # AIP-193 error mapping only (no proto in the parsing core, like aip-resourceid).
 tonic = { workspace = true, optional = true }
 tonic-types = { workspace = true, optional = true }
-# `iam-proto` enables the generated google.iam.v1.Policy / Binding structure.
-# Off by default so the parse/validate core stays proto-free (ADR-0010).
+# `iam-proto` surfaces the generated google.iam.v1.Policy / Binding structure,
+# re-exported from aip-proto (buf-generated, ADR-0011) so the public path
+# `aip::iam::proto::…` is unchanged. Off by default so the parse/validate core
+# stays proto-free (ADR-0010).
+aip-proto = { workspace = true, features = ["iam"], optional = true }
 prost = { workspace = true, optional = true }
 # The structural `etag` is a CRC32 over the encoded Policy — the same content-digest
 # idiom `aip-pagination`'s request checksum uses; only needed with `iam-proto`.
@@ -30,22 +33,14 @@ chrono = { workspace = true, optional = true }
 # AIP-193 standard error details (ErrorInfo). See docs/adr/0007-aip193-error-details.md
 # and docs/adr/0010-iam-primitives.md.
 tonic = ["dep:tonic", "dep:tonic-types"]
-# Generates the google.iam.v1.Policy / Binding message structure (ADR-0010),
-# mirroring aip-filtering's `cel-proto`. Off by `default`, so the parse/validate
-# core pulls in no proto runtime; the structural read-modify-write ops build on it.
-iam-proto = ["dep:prost", "dep:crc32fast"]
+# Surfaces the google.iam.v1.Policy / Binding message structure (ADR-0010) from
+# aip-proto (ADR-0011), mirroring aip-filtering's `cel-proto`. Off by `default`,
+# so the parse/validate core pulls in no proto runtime; the structural
+# read-modify-write ops build on it.
+iam-proto = ["dep:aip-proto", "dep:prost", "dep:crc32fast"]
 # The opt-in CEL-backed **Condition** evaluation adapter (ADR-0010): compile a
 # Condition (general CEL) once and evaluate it against a request context to a
 # bool. Off by `default` and depended on by nothing else, so a parse/validate
 # build never compiles the `cel` parser/runtime — the same line `aip-sql` draws
 # for SQL transpilation.
 eval = ["dep:cel", "dep:chrono"]
-
-[build-dependencies]
-# Generate the vendored google.iam.v1 protos for the `iam-proto` feature. The
-# build script only invokes these when `CARGO_FEATURE_IAM_PROTO` is set, so a
-# default build does no proto codegen (it still compiles these build-deps).
-# `protox` compiles the `.proto` into a descriptor set (no `protoc`, ADR-0001);
-# `prost-build` turns that set into Rust via `compile_fds`.
-protox.workspace = true
-prost-build.workspace = true
