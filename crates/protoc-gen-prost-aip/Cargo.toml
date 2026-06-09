@@ -1,0 +1,24 @@
+[package]
+name = "protoc-gen-prost-aip"
+description = "buf/protoc plugin: emits typed resource-name wrappers from google.api.resource annotations (the protoc-gen-go-aip analog). A thin stdin -> aip-codegen::generate -> stdout shim."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "protoc-gen-prost-aip"
+path = "src/main.rs"
+
+[dependencies]
+# The CodeGeneratorRequest/Response codec and the FileDescriptorSet wire type.
+prost.workspace = true
+prost-types.workspace = true
+# A descriptor pool over the request's protos, so the annotation parsing can run.
+prost-reflect.workspace = true
+# Reused for reading the google.api.resource annotations off the descriptors —
+# no reimplementation of the annotation parsing (ADR-0011).
+aip-reflect.workspace = true
+# The generation logic. The plugin is only the stdin/stdout shim around it.
+aip-codegen.workspace = true

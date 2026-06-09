@@ -1,0 +1,20 @@
+[package]
+name = "aip-codegen"
+description = "AIP resource-name code generation: codegen-only helpers (MethodType / GrammaticalName / strcase) and generate(), which emits typed resource-name wrappers layered on aip-resourcename"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+# `ResourceType` splits a resource type into service name + type; the type names
+# the generated wrapper struct (`Shipper` -> `ShipperResourceName`).
+aip-reflect.workspace = true
+# The generator scans a pattern's segments to read out its variable names, over
+# the very `Scanner`/`Segment` API the runtime parses names with — the generated
+# code in turn calls `Pattern::parse`/`match`/`format`, so the wrapper is a thin
+# typed layer over the runtime, not a reimplementation of it. (Also used by the
+# `roundtrip` test, which compiles the golden fixtures and round-trips them.)
+aip-resourcename.workspace = true
