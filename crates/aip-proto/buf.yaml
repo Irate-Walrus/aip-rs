@@ -1,0 +1,18 @@
+# buf module for aip-proto (ADR-0011).
+#
+# The standardized `google.*` schema is a managed dependency from the BSR, pinned
+# by digest in `buf.lock`. The only local `.proto` is the generation anchor
+# (`proto/imports.proto`), which carries no schema of its own.
+version: v2
+modules:
+  - path: proto
+deps:
+  - buf.build/googleapis/googleapis
+lint:
+  use:
+    - STANDARD
+  ignore:
+    - proto/imports.proto
+breaking:
+  use:
+    - PACKAGE
