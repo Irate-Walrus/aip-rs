@@ -176,6 +176,31 @@ A `google.type.Expr` (CEL) predicate gating a **Binding**. Bridged to the
 (ADR-0010).
 _Avoid_: filter (a distinct AIP-160 concept), guard, rule.
 
+### Events
+
+The planned `aip-events` crate (issue #103): resource-centric change events. No
+published AIP standardizes an event bus; the precedent followed is CloudEvents
+with protobuf payloads (Eventarc style).
+
+**Change event**:
+A record that one resource was created, updated, deleted, or undeleted —
+identified by its **Resource name** and carrying the post-change resource.
+Carried in a CloudEvents envelope.
+_Avoid_: notification, message, event (unqualified, where ambiguous).
+
+**Change kind**:
+Which of the four changes a **Change event** records: created, updated, deleted,
+or undeleted. Encoded as the verb suffix of the event's type string, which is
+derived per resource from its AIP-123 resource type.
+_Avoid_: event type (that's the full derived string), action, operation, verb.
+
+**Subscription**:
+A standing **Filter** over **Change events**, checked against a **Declaration**
+of the envelope fields plus — when the Subscription names a resource type — that
+resource's fields under a `resource.` prefix. A Change event is delivered to a
+Subscription when its Filter matches.
+_Avoid_: watch (the RPC verb, not the standing filter), listener, query.
+
 ### SQL adapter
 
 The optional `aip-sql` crate (ADR-0005 / ADR-0008): turns a primitive's native
@@ -268,6 +293,11 @@ _Avoid_: wrapper/inner, high-level/low-level (say facade/core).
 - A **Policy** is a set of **Bindings**; each **Binding** pairs one **Role** with
   the **Members** granted it, optionally gated by a **Condition**.
 - A **Role** bundles **Permissions**; a **Permission** is a `service.resource.verb`.
+- A **Change event** records exactly one **Change kind** for exactly one
+  **Resource name** and carries the post-change resource and, for updates, the
+  **Update mask** of changed paths.
+- A **Subscription** is a **Filter** over **Change events**, checked against a
+  **Declaration**; matching decides delivery, transport delivers.
 - A **Page token** is either an **Offset page token** or a **Cursor page token**.
 - A **Resource name** is an ordered sequence of **Segments** joined by `/`.
 - A **Segment** is exactly one of: **Literal**, **Variable**, **Wildcard**.
