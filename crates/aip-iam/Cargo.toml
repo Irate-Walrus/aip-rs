@@ -18,6 +18,12 @@ prost = { workspace = true, optional = true }
 # The structural `etag` is a CRC32 over the encoded Policy — the same content-digest
 # idiom `aip-pagination`'s request checksum uses; only needed with `iam-proto`.
 crc32fast = { workspace = true, optional = true }
+# `eval` pulls the CEL parser/runtime to compile and evaluate an IAM **Condition**
+# (ADR-0010). `chrono` lowers a `request.time` `SystemTime` into the CEL timestamp
+# value cel uses; both ride strictly behind `eval` so a parse/validate build pulls
+# in neither.
+cel = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
 
 [features]
 # Adds `From<Error> for tonic::Status` (PERMISSION_DENIED / INVALID_ARGUMENT) with
@@ -28,6 +34,12 @@ tonic = ["dep:tonic", "dep:tonic-types"]
 # mirroring aip-filtering's `cel-proto`. Off by `default`, so the parse/validate
 # core pulls in no proto runtime; the structural read-modify-write ops build on it.
 iam-proto = ["dep:prost", "dep:crc32fast"]
+# The opt-in CEL-backed **Condition** evaluation adapter (ADR-0010): compile a
+# Condition (general CEL) once and evaluate it against a request context to a
+# bool. Off by `default` and depended on by nothing else, so a parse/validate
+# build never compiles the `cel` parser/runtime — the same line `aip-sql` draws
+# for SQL transpilation.
+eval = ["dep:cel", "dep:chrono"]
 
 [build-dependencies]
 # Generate the vendored google.iam.v1 protos for the `iam-proto` feature. The

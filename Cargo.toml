@@ -67,6 +67,15 @@ uuid       = { version = "1", features = ["v4"] }
 # `test-fixtures` support crate to compile the vendored example protos.
 protox = "0.9"
 
+# CEL parser + interpreter (the cel-rust project) for `aip-iam`'s opt-in `eval`
+# adapter (ADR-0010): compile and evaluate an IAM **Condition** (general CEL, not
+# the AIP-160 subset). Strictly behind the non-default `eval` feature so
+# parse/validate-only users never pull the parser/runtime. `chrono` rides with it
+# because a CEL `request.time` value is a `chrono` timestamp (cel's default
+# `chrono` feature), so a `std::time::SystemTime` is lowered through it.
+cel   = "0.13"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+
 # Optional gRPC status mapping (behind each crate's `tonic` feature).
 tonic = { version = "0.14", default-features = false }
 # AIP-193 standard error details (BadRequest / ErrorInfo) packed into a mapped

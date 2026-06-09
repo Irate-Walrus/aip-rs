@@ -60,3 +60,7 @@ cel-proto = ["aip-filtering?/cel-proto"]
 # Generate the google.iam.v1.Policy / Binding structure (ADR-0010), surfaced as
 # `aip::iam::proto`. Opt-in alongside `iam`, mirroring `cel-proto`.
 iam-proto = ["aip-iam?/iam-proto"]
+# The CEL-backed Condition evaluation adapter (ADR-0010), surfaced as
+# `aip::iam::eval`. Opt-in alongside `iam`; pulls the `cel` parser/runtime, so it
+# stays out of `default` like `sql`.
+eval = ["aip-iam?/eval"]
