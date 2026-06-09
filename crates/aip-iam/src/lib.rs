@@ -20,6 +20,14 @@ pub use member::Member;
 pub use permission::Permission;
 pub use role::Role;
 
+/// AIP-211 authorization-error shaping — opt-in via the non-default `tonic`
+/// feature (ADR-0010). The canonical non-leaking `PERMISSION_DENIED`
+/// ([`authz::permission_denied`]) and the `NOT_FOUND`-via-parent fallback
+/// ([`authz::not_found_via_parent`]). The authorization **decision** stays the
+/// caller's; these only shape its outcome into a [`tonic::Status`].
+#[cfg(feature = "tonic")]
+pub mod authz;
+
 /// Structural read-modify-write ops over a [`google.iam.v1.Policy`](proto::Policy)
 /// — opt-in via the non-default `iam-proto` feature (ADR-0010). Binding
 /// add/remove, dedupe/normalise, the `etag` optimistic-concurrency cycle, and the
@@ -134,7 +142,8 @@ impl From<Error> for tonic::Status {
     /// read-modify-write [`PolicyEtagMismatch`](Error::PolicyEtagMismatch) maps to
     /// `ABORTED`, matching the IAM optimistic-concurrency contract — a stale `etag`
     /// is a concurrency conflict, not a malformed request (ADR-0010). The AIP-211
-    /// `PERMISSION_DENIED` authorization-failure shape is a separate helper. A
+    /// `PERMISSION_DENIED` authorization-failure shape is a separate helper
+    /// ([`authz::permission_denied`]). A
     /// member/role/permission is an opaque value, not a request field path, so no
     /// `BadRequest` is attached.
     fn from(err: Error) -> Self {
