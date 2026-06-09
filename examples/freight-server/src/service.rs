@@ -7,13 +7,16 @@
 //! `Unimplemented` until they follow the same pattern.
 
 use std::cmp::Ordering;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aip::fieldbehavior::FieldBehavior;
+use aip::iam::{Member, Permission};
 use aip::ordering::OrderByRequest;
 use aip::pagination::{PageRequest, PageToken};
 use aip::validation::Validator;
 use prost_reflect::{Kind, ReflectMessage};
+use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status};
 
 use crate::proto::einride::example::freight::v1::{
@@ -24,7 +27,7 @@ use crate::proto::einride::example::freight::v1::{
     ListSitesRequest, ListSitesResponse, Shipment, Shipper, Site, UpdateShipmentRequest,
     UpdateShipperRequest, UpdateSiteRequest,
 };
-use crate::storage::Storage;
+use crate::storage::{PolicyStore, Storage};
 
 /// The shipper collection ID — the root segment of every shipper resource name.
 const SHIPPERS_COLLECTION: &str = "shippers";
@@ -50,16 +53,61 @@ const SORTABLE_SITE_PATHS: &[&str] = &[
 ];
 
 /// Serves `FreightService` over an in-memory [`Storage`].
+///
+/// `policies` is the resource-name-keyed IAM [`PolicyStore`] shared with
+/// [`IamServer`](crate::iam::IamServer): the handlers read it to make the AIP-211
+/// authorization decision they gate on, so a Policy set via `SetIamPolicy` governs
+/// who may read a resource (aip #67).
 #[derive(Default)]
 pub struct FreightServer {
     storage: Storage,
+    policies: Arc<PolicyStore>,
 }
 
 impl FreightServer {
-    /// A server backed by an empty store.
+    /// A server backed by an empty store and its own empty policy store. The
+    /// binary always shares a store via [`with_policies`](Self::with_policies), so
+    /// this stand-alone constructor is only used by the handler tests.
+    #[cfg(test)]
     pub fn new() -> Self {
         Self {
             storage: Storage::new(),
+            policies: Arc::new(PolicyStore::new()),
+        }
+    }
+
+    /// A server backed by an empty store and an existing, shared [`PolicyStore`] —
+    /// the one [`IamServer`](crate::iam::IamServer) mutates, so IAM Policies govern
+    /// freight authorization.
+    pub fn with_policies(policies: Arc<PolicyStore>) -> Self {
+        Self {
+            storage: Storage::new(),
+            policies,
+        }
+    }
+
+    /// The example's AIP-211 authorization gate (step 1): may `caller` act on
+    /// `resource`? A resource with **no Policy attached is public** in this demo —
+    /// mirroring the open `ListShippers` — so existence is not secret until you
+    /// lock it down with `SetIamPolicy`; once a Policy is attached, the caller must
+    /// be named in one of its **Bindings** (directly, or via `allUsers` /
+    /// `allAuthenticatedUsers`).
+    ///
+    /// This is deliberately a coarse *membership* check, not the full
+    /// role→permission expansion and **Condition** evaluation that is the
+    /// authorization **decision** — that lands behind the opt-in cel-backed `eval`
+    /// adapter (#66/#68, ADR-0010). Issue #67 contributes the AIP-211 error
+    /// *shape* this gate returns on a denial ([`aip::iam::authz`]), not the
+    /// decision.
+    fn authorized(&self, caller: Option<&Member>, resource: &str) -> bool {
+        match self.policies.get(resource) {
+            // Unprotected ⇒ public (a demo simplification, not production policy).
+            None => true,
+            Some(policy) => policy
+                .bindings
+                .iter()
+                .flat_map(|binding| &binding.members)
+                .any(|member| member_matches(member, caller)),
         }
     }
 }
@@ -72,12 +120,39 @@ impl FreightService for FreightServer {
         &self,
         request: Request<GetShipperRequest>,
     ) -> Result<Response<Shipper>, Status> {
+        // AIP-211: authorize *before* validating or reading. The caller identity is
+        // an example-owned credential carried in request metadata; a real server
+        // derives the principal from authenticated transport instead.
+        let caller = caller_member(request.metadata());
         let name = request.into_inner().name;
-        validate_shipper_name("name", &name)?;
-        self.storage
-            .get_shipper(&name)
-            .map(Response::new)
-            .ok_or_else(|| Status::not_found(format!("shipper `{name}` not found")))
+
+        if self.authorized(caller.as_ref(), &name) {
+            // Authorized: a missing shipper is an honest `NOT_FOUND` (the caller is
+            // allowed to know), and a malformed name is the usual `INVALID_ARGUMENT`.
+            validate_shipper_name("name", &name)?;
+            return self
+                .storage
+                .get_shipper(&name)
+                .map(Response::new)
+                .ok_or_else(|| Status::not_found(format!("shipper `{name}` not found")));
+        }
+
+        // Unauthorized: shape the AIP-211 error without leaking existence (#67).
+        // The shipper exists ⇒ the canonical non-leaking `PERMISSION_DENIED`; it
+        // does not ⇒ the `NOT_FOUND`-via-parent fallback, which reveals the gap
+        // only to a caller that may read the parent collection's children and
+        // otherwise returns the same `PERMISSION_DENIED`.
+        let permission = shipper_get_permission();
+        if self.storage.get_shipper(&name).is_some() {
+            Err(aip::iam::authz::permission_denied(&permission, &name))
+        } else {
+            let parent_read = self.authorized(caller.as_ref(), SHIPPERS_COLLECTION);
+            Err(aip::iam::authz::not_found_via_parent(
+                &permission,
+                &name,
+                parent_read,
+            ))
+        }
     }
 
     async fn list_shippers(
@@ -708,6 +783,44 @@ fn validate_shipper_name(field: &str, value: &str) -> Result<(), Status> {
 /// its domain; the aip-rs crates use their own (`aip-rs`) domain for the values
 /// they validate (#16).
 const SERVICE_DOMAIN: &str = "freight.example.com";
+
+/// The request-metadata key the demo reads the caller's IAM **Member** identity
+/// from. A real server derives the principal from authenticated transport (mTLS, a
+/// verified JWT); the demo takes it verbatim so `grpcurl -H 'x-freight-caller: …'`
+/// can play any identity against the AIP-211 gate.
+const CALLER_METADATA_KEY: &str = "x-freight-caller";
+
+/// Read the caller's IAM **Member** from request metadata, or `None` when it is
+/// absent or unparseable (an anonymous caller). The credential only *identifies*
+/// the caller for the authorization gate — it is not a request field — so a bad
+/// value degrades to anonymous rather than `INVALID_ARGUMENT`.
+fn caller_member(metadata: &MetadataMap) -> Option<Member> {
+    metadata
+        .get(CALLER_METADATA_KEY)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<Member>().ok())
+}
+
+/// Does the stored Policy member string `granted` admit `caller`? `allUsers`
+/// admits anyone (even an absent caller); `allAuthenticatedUsers` admits any
+/// present caller; a typed member admits the exact same **Member**. The grant is
+/// compared against the caller's canonical [`Member`] rendering, so only a
+/// well-formed grant matches (a malformed one was rejected at `SetIamPolicy`).
+fn member_matches(granted: &str, caller: Option<&Member>) -> bool {
+    match granted {
+        "allUsers" => true,
+        "allAuthenticatedUsers" => caller.is_some(),
+        granted => caller.is_some_and(|member| member.to_string() == granted),
+    }
+}
+
+/// The AIP-211 permission `GetShipper` checks (`freight.shippers.get`) — the
+/// `Permission` named in a denial's non-leaking message and `IAM_*` `ErrorInfo`.
+fn shipper_get_permission() -> Permission {
+    "freight.shippers.get"
+        .parse()
+        .expect("a static freight.shippers.get permission is well-formed")
+}
 
 /// The standard `Unimplemented` status for a method that hasn't been wired yet.
 fn unimplemented(method: &str) -> Status {
@@ -1590,5 +1703,152 @@ mod tests {
             .await
             .expect_err("an unknown filter field is rejected");
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    // ----- GetShipper authorization (AIP-211, #67) -----
+
+    use aip::iam::proto::{Binding, Policy};
+
+    /// Lock `resource` down to exactly `members` (granting an arbitrary role)
+    /// through the shared policy store, so the authorization gate admits only those
+    /// callers. A resource with no policy stays public.
+    fn lock_resource(server: &FreightServer, resource: &str, members: &[&str]) {
+        let policy = Policy {
+            version: 1,
+            bindings: vec![Binding {
+                role: "roles/viewer".to_owned(),
+                members: members.iter().map(|m| (*m).to_owned()).collect(),
+                condition: None,
+            }],
+            etag: Vec::new(),
+            audit_configs: Vec::new(),
+        };
+        server
+            .policies
+            .set_checked(resource.to_owned(), policy)
+            .expect("seed policy");
+    }
+
+    /// Drive `GetShipper` for `name` as `caller` (an `x-freight-caller` Member
+    /// string, or `None` for an anonymous caller).
+    async fn get_as(
+        server: &FreightServer,
+        name: &str,
+        caller: Option<&str>,
+    ) -> Result<Shipper, Status> {
+        let mut request = Request::new(GetShipperRequest {
+            name: name.to_owned(),
+        });
+        if let Some(caller) = caller {
+            request
+                .metadata_mut()
+                .insert(CALLER_METADATA_KEY, caller.parse().expect("metadata value"));
+        }
+        server.get_shipper(request).await.map(Response::into_inner)
+    }
+
+    #[tokio::test]
+    async fn get_shipper_is_public_until_a_policy_is_attached() {
+        // A shipper with no Policy attached is public in the demo (mirroring the
+        // open ListShippers), so an anonymous caller reads it.
+        let server = FreightServer::new();
+        let created = create_shipper(&server, "Acme").await;
+        let got = get_as(&server, &created.name, None)
+            .await
+            .expect("an unprotected shipper is readable");
+        assert_eq!(got, created);
+    }
+
+    #[tokio::test]
+    async fn get_shipper_denies_an_unauthorized_caller_on_a_locked_shipper() {
+        use tonic_types::StatusExt as _;
+
+        // Lock the shipper down to alice. She reads it; bob (and an anonymous
+        // caller) get the canonical non-leaking PERMISSION_DENIED (#67).
+        let server = FreightServer::new();
+        let created = create_shipper(&server, "Acme").await;
+        lock_resource(&server, &created.name, &["user:alice@example.com"]);
+
+        let allowed = get_as(&server, &created.name, Some("user:alice@example.com"))
+            .await
+            .expect("the granted member reads the shipper");
+        assert_eq!(allowed, created);
+
+        for caller in [Some("user:bob@example.com"), None] {
+            let status = get_as(&server, &created.name, caller)
+                .await
+                .expect_err("an ungranted caller is denied");
+            assert_eq!(status.code(), tonic::Code::PermissionDenied);
+            // The non-leaking message hides whether the resource exists.
+            assert_eq!(
+                status.message(),
+                format!(
+                    "Permission 'freight.shippers.get' denied on resource '{}' \
+                     (or it might not exist).",
+                    created.name
+                ),
+            );
+            let info = status
+                .get_details_error_info()
+                .expect("an ErrorInfo is attached (AIP-193 MUST)");
+            assert_eq!(info.reason, "IAM_PERMISSION_DENIED");
+            assert_eq!(info.domain, "aip-rs");
+        }
+    }
+
+    #[tokio::test]
+    async fn get_shipper_denial_does_not_leak_existence() {
+        use tonic_types::StatusExt as _;
+
+        // Non-leaking: an unauthorized caller who also cannot read the parent
+        // collection's children gets the *same* PERMISSION_DENIED whether the
+        // shipper exists or not — so a missing resource is indistinguishable from a
+        // forbidden one. `shippers/ghost` was never created; both it and the parent
+        // collection are locked against bob.
+        let server = FreightServer::new();
+        let existing = create_shipper(&server, "Acme").await;
+        lock_resource(&server, &existing.name, &["user:alice@example.com"]);
+        lock_resource(&server, "shippers/ghost", &["user:alice@example.com"]);
+        lock_resource(&server, SHIPPERS_COLLECTION, &["user:alice@example.com"]);
+
+        let on_existing = get_as(&server, &existing.name, Some("user:bob@example.com"))
+            .await
+            .expect_err("denied on the existing shipper");
+        let on_missing = get_as(&server, "shippers/ghost", Some("user:bob@example.com"))
+            .await
+            .expect_err("denied on the missing shipper");
+
+        // Same code and same machine-readable reason — no NOT_FOUND tell.
+        assert_eq!(on_existing.code(), tonic::Code::PermissionDenied);
+        assert_eq!(on_missing.code(), tonic::Code::PermissionDenied);
+        assert_eq!(
+            on_missing
+                .get_details_error_info()
+                .expect("ErrorInfo")
+                .reason,
+            "IAM_PERMISSION_DENIED",
+        );
+    }
+
+    #[tokio::test]
+    async fn get_shipper_reveals_not_found_when_caller_may_read_the_parent() {
+        use tonic_types::StatusExt as _;
+
+        // AIP-211 fallback: a caller unauthorized on the (missing) resource but
+        // authorized to read the parent collection's children is allowed to learn
+        // it does not exist — NOT_FOUND, not PERMISSION_DENIED. `shippers/ghost` is
+        // locked to alice; the parent collection grants bob.
+        let server = FreightServer::new();
+        lock_resource(&server, "shippers/ghost", &["user:alice@example.com"]);
+        lock_resource(&server, SHIPPERS_COLLECTION, &["user:bob@example.com"]);
+
+        let status = get_as(&server, "shippers/ghost", Some("user:bob@example.com"))
+            .await
+            .expect_err("the missing shipper is reported");
+        assert_eq!(status.code(), tonic::Code::NotFound);
+        assert_eq!(
+            status.get_details_error_info().expect("ErrorInfo").reason,
+            "IAM_RESOURCE_NOT_FOUND",
+        );
     }
 }

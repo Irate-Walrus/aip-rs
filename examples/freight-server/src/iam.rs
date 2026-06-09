@@ -21,6 +21,8 @@
 //! permission subset *through* the opt-in cel-backed `eval` adapter (#66), which
 //! lands in a later slice (ADR-0010).
 
+use std::sync::Arc;
+
 use tonic::{Request, Response, Status};
 
 // The `IAMPolicy` service trait and its request/response messages are generated
@@ -34,17 +36,29 @@ use crate::storage::PolicyStore;
 use aip::iam::proto::Policy;
 
 /// Serves `IAMPolicy` over an in-memory, resource-name-keyed [`PolicyStore`].
+///
+/// The store is shared (`Arc`) with [`FreightService`](crate::service::FreightServer)
+/// so a Policy set here governs that service's AIP-211 authorization (aip #67).
 #[derive(Default)]
 pub struct IamServer {
-    policies: PolicyStore,
+    policies: Arc<PolicyStore>,
 }
 
 impl IamServer {
-    /// A server backed by an empty policy store.
+    /// A server backed by its own empty policy store. The binary always shares a
+    /// store via [`with_store`](Self::with_store), so this stand-alone constructor
+    /// is only used by the service tests.
+    #[cfg(test)]
     pub fn new() -> Self {
         Self {
-            policies: PolicyStore::new(),
+            policies: Arc::new(PolicyStore::new()),
         }
+    }
+
+    /// A server backed by an existing, shared policy store — the one
+    /// [`FreightService`](crate::service::FreightServer) reads to authorize.
+    pub fn with_store(policies: Arc<PolicyStore>) -> Self {
+        Self { policies }
     }
 }
 

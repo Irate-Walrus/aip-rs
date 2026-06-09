@@ -176,6 +176,40 @@ ic -d '{"resource":"shippers/acme","permissions":["freight.shippers.get"]}' \
                                      127.0.0.1:50051 $IAMSVC/TestIamPermissions
 ```
 
+Those Policies actually **govern freight access** (#67): the two services share one
+policy store, so `GetShipper` consults the shipper's `Policy` and shapes an AIP-211
+authorization error when the caller is not a granted **Member**. The demo reads the
+caller identity from an `x-freight-caller` metadata header (a real server derives it
+from authenticated transport); a resource with **no Policy is public**, mirroring the
+open `ListShippers`, so the `GetShipper` above worked for anyone until you lock it
+down. (`gc` and `ic` are the helper functions defined above.)
+
+```sh
+# Lock shippers/$ID down to alice (use the system-assigned name from CreateShipper).
+ic -d '{"resource":"shippers/$ID","policy":{"version":1,"bindings":[{"role":"roles/viewer","members":["user:alice@example.com"]}]}}' \
+                                     127.0.0.1:50051 $IAMSVC/SetIamPolicy
+
+# alice reads it; bob gets the canonical *non-leaking* PERMISSION_DENIED — message
+# "Permission 'freight.shippers.get' denied on resource 'shippers/$ID' (or it might
+# not exist)." with an IAM_PERMISSION_DENIED ErrorInfo (domain aip-rs).
+gc -H 'x-freight-caller: user:alice@example.com' -d '{"name":"shippers/$ID"}' 127.0.0.1:50051 $SVC/GetShipper
+gc -H 'x-freight-caller: user:bob@example.com'   -d '{"name":"shippers/$ID"}' 127.0.0.1:50051 $SVC/GetShipper
+
+# Non-leaking: the *same* denial comes back for a name that does not exist, so an
+# unauthorized caller cannot probe existence. Lock a never-created name and the
+# parent collection (resource `shippers`) against bob, then GetShipper on the
+# missing name is PERMISSION_DENIED too — indistinguishable from the existing one.
+ic -d '{"resource":"shippers/ghost","policy":{"version":1,"bindings":[{"role":"roles/viewer","members":["user:alice@example.com"]}]}}' 127.0.0.1:50051 $IAMSVC/SetIamPolicy
+ic -d '{"resource":"shippers","policy":{"version":1,"bindings":[{"role":"roles/viewer","members":["user:alice@example.com"]}]}}'       127.0.0.1:50051 $IAMSVC/SetIamPolicy
+gc -H 'x-freight-caller: user:bob@example.com' -d '{"name":"shippers/ghost"}' 127.0.0.1:50051 $SVC/GetShipper
+
+# AIP-211 fallback: a caller allowed to read the parent collection's children *is*
+# told NOT_FOUND (it may know the resource is absent). Grant bob on the collection
+# root, then the missing name comes back NOT_FOUND (reason IAM_RESOURCE_NOT_FOUND).
+ic -d '{"resource":"shippers","policy":{"version":1,"bindings":[{"role":"roles/viewer","members":["user:alice@example.com","user:bob@example.com"]}]}}' 127.0.0.1:50051 $IAMSVC/SetIamPolicy
+gc -H 'x-freight-caller: user:bob@example.com' -d '{"name":"shippers/ghost"}' 127.0.0.1:50051 $SVC/GetShipper
+```
+
 ## What it exercises (and where it's headed)
 
 The freight methods map onto the aip-rs primitives. Shipper is the worked
@@ -184,7 +218,7 @@ wired up.
 
 | Method            | aip-rs primitive(s)                          | Issue        | Status      |
 | ----------------- | -------------------------------------------- | ------------ | ----------- |
-| `GetShipper`      | `resourcename` (validate name)               | #4           | wired       |
+| `GetShipper`      | `resourcename` (validate name), `iam` (AIP-211 authorization → non-leaking `PERMISSION_DENIED` / `NOT_FOUND`-via-parent over the shared Policy store) | #4, #67 | wired⁶ |
 | `ListShippers`    | `pagination` (offset page-token codec + request-checksum guard) | #6, #7 | wired² |
 | `CreateShipper`   | `resourceid` (generate), `resourcename` (format), `fieldbehavior` (clear OUTPUT_ONLY/IMMUTABLE, validate REQUIRED) | #5, #3, #59 | wired       |
 | `UpdateShipper`   | `fieldmask` (typed `update` over `update_mask`), `fieldbehavior` (copy OUTPUT_ONLY from existing, validate REQUIRED in mask) | #8, #48, #59 | wired       |
@@ -266,6 +300,23 @@ via `extern_path` (its opt-in `iam-proto` feature), so the service operates on t
 very types the helpers mutate. `TestIamPermissions` is left as a seam — it decides
 the held subset *through* the opt-in cel-backed `eval` adapter (#66), wired in #68
 (ADR-0010).
+
+⁶ `GetShipper` enforces AIP-211 authorization (#67) using the `Policy` store it
+**shares** with the `IAMPolicy` service: it reads the caller identity from an
+`x-freight-caller` metadata header (a real server derives the principal from
+authenticated transport), and a shipper with **no Policy attached is public** —
+mirroring the open `ListShippers`, so existence is not secret until a Policy locks
+it down. Once locked, an ungranted caller gets the canonical non-leaking
+`PERMISSION_DENIED` from `aip::iam::authz::permission_denied` — *"Permission '{p}'
+denied on resource '{r}' (or it might not exist)."* with an `IAM_PERMISSION_DENIED`
+`ErrorInfo` — that hides whether the resource exists. A missing resource routes
+through `aip::iam::authz::not_found_via_parent`: it returns the same
+`PERMISSION_DENIED` unless the caller may read the parent collection's children, in
+which case it is allowed to learn the resource is absent (`NOT_FOUND`). The gate is a
+deliberately coarse **Member** membership check, not the role→permission expansion +
+**Condition** evaluation that is the authorization *decision* — that lands behind the
+opt-in cel-backed `eval` adapter (#66/#68, ADR-0010); #67 contributes the error
+*shape*, not the decision.
 
 ² Real offset pagination through the `pagination` page-token codec (#6), with the
 request-checksum guard (#7) that rejects a token when a non-pagination field
