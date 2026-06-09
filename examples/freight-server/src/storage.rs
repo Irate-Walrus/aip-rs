@@ -16,8 +16,10 @@ use prost::Message as _;
 use crate::proto::einride::example::freight::v1::{site::State, Shipment, Shipper, Site};
 // The `google.iam.v1.Policy` message layer is shared with the structural helpers
 // via `extern_path` (aip #65), so it comes from `aip::iam::proto`, not the locally
-// generated `crate::proto::google::iam::v1`.
-use aip::iam::proto::{Binding, Policy};
+// generated `crate::proto::google::iam::v1`. `Expr` is the `google.type.Expr`
+// **Condition** a `Binding` carries — persisted (its expression) and reconstructed
+// so `TestIamPermissions` can evaluate it (aip #68).
+use aip::iam::proto::{google::r#type::Expr, Binding, Policy};
 
 /// Process-lifetime store. Shippers are a `BTreeMap` keyed by resource name,
 /// which keeps listings in a stable order (the deterministic tie-break behind a
@@ -309,13 +311,17 @@ fn rfc3339(ts: &prost_types::Timestamp) -> String {
 /// rather than as an opaque blob; the **Policy** is reconstructed on read and its
 /// `etag` is a content digest computed from that canonical form (ADR-0010).
 ///
-/// `version` and a **Binding**'s **Condition** are deliberately *not* persisted by
-/// this schema (exactly as iam-go's `iamspanner` does not): the
-/// *conditions ⟹ version 3* invariant is enforced by
-/// [`aip::iam::policy::validate`] in the handler *before* a write, so a conditional
-/// binding on an old version is rejected, while accepted policies round-trip as
-/// their `(role, members)` grants. State lives for the process and resets on
-/// restart, like the rest of [`Storage`].
+/// Each row also carries its **Binding**'s **Condition** expression (the
+/// `condition` column, NULL for an unconditional binding) so that the stored
+/// **Policy** round-trips its **Conditions** and `TestIamPermissions` can evaluate
+/// them through the opt-in `eval` adapter (aip #68). The policy `version` is *not*
+/// stored — it is reconstructed from the *conditions ⟹ version 3* invariant
+/// ([`reconstruct`]): version 3 when any binding is conditional, else version 1's
+/// default. The invariant itself is still enforced by [`aip::iam::policy::validate`]
+/// in the handler *before* a write, so a conditional binding on an old version is
+/// rejected up front. A **Condition**'s `title` / `description` are not persisted
+/// (only the `expression` the adapter needs). State lives for the process and
+/// resets on restart, like the rest of [`Storage`].
 pub struct PolicyStore {
     /// One in-memory SQLite connection holding the `iam_policy_bindings` table.
     bindings: Mutex<rusqlite::Connection>,
@@ -342,16 +348,8 @@ impl PolicyStore {
     /// round-trip it back as its read-modify-write token.
     pub fn get(&self, resource: &str) -> Option<Policy> {
         let conn = self.bindings.lock().unwrap();
-        let bindings = read_bindings(&conn, resource);
-        if bindings.is_empty() {
-            return None;
-        }
-        let mut policy = Policy {
-            bindings,
-            ..Policy::default()
-        };
-        policy.etag = aip::iam::policy::compute_etag(&policy);
-        Some(policy)
+        let policy = reconstruct(&conn, resource);
+        (!policy.bindings.is_empty()).then_some(policy)
     }
 
     /// Apply `SetIamPolicy` read-modify-write semantics atomically, the way a real
@@ -378,22 +376,16 @@ impl PolicyStore {
         let supplied = std::mem::take(&mut policy.etag);
         let mut conn = self.bindings.lock().unwrap();
 
-        // Freshness check against the canonical stored form (etag computed from the
-        // reconstructed bindings — the same form `get` and the write below produce).
-        let current = {
-            let bindings = read_bindings(&conn, &resource);
-            (!bindings.is_empty()).then(|| {
-                let mut policy = Policy {
-                    bindings,
-                    ..Policy::default()
-                };
-                policy.etag = aip::iam::policy::compute_etag(&policy);
-                policy
-            })
-        };
+        // Freshness check against the canonical stored form — the same `reconstruct`
+        // `get` uses, so the etag matches what a prior read handed the client.
+        let current = reconstruct(&conn, &resource);
+        let current = (!current.bindings.is_empty()).then_some(current);
         aip::iam::policy::check_etag(&supplied, current.as_ref())?;
 
-        // Canonicalise, then replace the resource's rows atomically.
+        // Canonicalise, then replace the resource's rows atomically. Each row
+        // carries the binding's **Condition** expression (NULL when unconditional)
+        // — the same value across every member of a binding, taken from whichever
+        // row first reconstructs it on read (#68).
         aip::iam::policy::normalize(&mut policy);
         let tx = conn.transaction().expect("begin policy transaction");
         tx.execute(
@@ -402,17 +394,22 @@ impl PolicyStore {
         )
         .expect("clear existing policy rows");
         for (binding_index, binding) in policy.bindings.iter().enumerate() {
+            let condition = binding
+                .condition
+                .as_ref()
+                .map(|expr| expr.expression.as_str());
             for (member_index, member) in binding.members.iter().enumerate() {
                 tx.execute(
                     "INSERT INTO iam_policy_bindings \
-                     (resource, binding_index, role, member_index, member) \
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                     (resource, binding_index, role, member_index, member, condition) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                     rusqlite::params![
                         resource,
                         binding_index as i64,
                         binding.role,
                         member_index as i64,
-                        member
+                        member,
+                        condition
                     ],
                 )
                 .expect("insert policy binding row");
@@ -420,27 +417,41 @@ impl PolicyStore {
         }
         tx.commit().expect("commit policy transaction");
 
-        // Return the canonical stored form the schema preserves — `(role, members)`
-        // grants (no `version` / `condition`) — matching what `get` reconstructs,
-        // with a fresh content `etag`.
-        let stored_bindings: Vec<Binding> = policy
-            .bindings
-            .into_iter()
-            .map(|binding| Binding {
-                role: binding.role,
-                members: binding.members,
-                condition: None,
-            })
-            .collect();
-        let mut stored = Policy {
-            bindings: stored_bindings,
-            ..Policy::default()
-        };
-        if !stored.bindings.is_empty() {
-            stored.etag = aip::iam::policy::compute_etag(&stored);
-        }
-        Ok(stored)
+        // Echo the canonical stored form exactly as `get` reconstructs it — the
+        // `(role, members, condition)` grants with a fresh content `etag` — so the
+        // etag the caller round-trips matches a subsequent `GetIamPolicy`.
+        Ok(reconstruct(&conn, &resource))
     }
+}
+
+/// Reconstruct the canonical stored **Policy** for `resource` from its
+/// `iam_policy_bindings` rows: the `(role, members, condition)` grants in canonical
+/// order, with a fresh content `etag`. Returns the empty [`Policy`] when the
+/// resource has no rows (the caller turns that into `None` / an empty
+/// `GetIamPolicy` response).
+///
+/// `version` is not a stored column; it is recovered from the *conditions ⟹
+/// version 3* invariant — version 3 when any reconstructed **Binding** is
+/// conditional, else the default — so the round-tripped **Policy** is valid and its
+/// `etag` (a digest over the whole **Policy**, including `version`) is stable across
+/// `get` and the [`PolicyStore::set_checked`] echo.
+fn reconstruct(conn: &rusqlite::Connection, resource: &str) -> Policy {
+    let bindings = read_bindings(conn, resource);
+    if bindings.is_empty() {
+        return Policy::default();
+    }
+    let version = if bindings.iter().any(|b| b.condition.is_some()) {
+        3
+    } else {
+        0
+    };
+    let mut policy = Policy {
+        version,
+        bindings,
+        ..Policy::default()
+    };
+    policy.etag = aip::iam::policy::compute_etag(&policy);
+    policy
 }
 
 /// Open an in-memory SQLite database with the `iam_policy_bindings` table — the
@@ -448,9 +459,10 @@ impl PolicyStore {
 /// mirroring iam-go's `iamspanner` schema (aip #65). The primary key orders rows by
 /// `(resource, binding_index, role, member_index, member)` so a policy reconstructs
 /// in canonical order. Spanner's `STRING(MAX)`/`INT64` map to SQLite `TEXT`/
-/// `INTEGER`; the member-keyed reverse indexes iam-go also defines back the
-/// member→resource lookup `TestIamPermissions` needs and are deferred to that slice
-/// (#68).
+/// `INTEGER`. The nullable `condition` column holds the **Binding**'s **Condition**
+/// expression (NULL ⇒ unconditional), so a stored conditional grant round-trips and
+/// `TestIamPermissions` can evaluate it (#68); it looks up the **Policy** for the
+/// requested **Resource name** directly, so no member-keyed reverse index is needed.
 fn new_policies_db() -> rusqlite::Connection {
     let conn = rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
     conn.execute_batch(
@@ -460,6 +472,7 @@ fn new_policies_db() -> rusqlite::Connection {
             role          TEXT    NOT NULL,
             member_index  INTEGER NOT NULL,
             member        TEXT    NOT NULL,
+            condition     TEXT,
             PRIMARY KEY (resource, binding_index, role, member_index, member)
         );",
     )
@@ -468,14 +481,15 @@ fn new_policies_db() -> rusqlite::Connection {
 }
 
 /// Reconstruct a resource's **Bindings** from `iam_policy_bindings`, in canonical
-/// order. Rows are grouped by `binding_index` (each carries one **Role**); the
-/// `ORDER BY` makes the grouping contiguous and the **Members** deterministic. The
-/// schema persists no **Condition**, so every reconstructed **Binding** is
-/// unconditional.
+/// order. Rows are grouped by `binding_index` (each carries one **Role** and, when
+/// present, one **Condition**); the `ORDER BY` makes the grouping contiguous and the
+/// **Members** deterministic. The `condition` column is the same across a binding's
+/// member rows, so it is read off whichever row first opens the binding and lifted
+/// back into a [`google.type.Expr`](Expr) carrying just its expression (#68).
 fn read_bindings(conn: &rusqlite::Connection, resource: &str) -> Vec<Binding> {
     let mut statement = conn
         .prepare(
-            "SELECT binding_index, role, member FROM iam_policy_bindings \
+            "SELECT binding_index, role, member, condition FROM iam_policy_bindings \
              WHERE resource = ?1 ORDER BY binding_index, member_index",
         )
         .expect("prepare policy read");
@@ -485,6 +499,7 @@ fn read_bindings(conn: &rusqlite::Connection, resource: &str) -> Vec<Binding> {
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
             ))
         })
         .expect("query policy bindings");
@@ -492,12 +507,15 @@ fn read_bindings(conn: &rusqlite::Connection, resource: &str) -> Vec<Binding> {
     let mut bindings: Vec<Binding> = Vec::new();
     let mut current: Option<i64> = None;
     for row in rows {
-        let (binding_index, role, member) = row.expect("read policy binding row");
+        let (binding_index, role, member, condition) = row.expect("read policy binding row");
         if current != Some(binding_index) {
             bindings.push(Binding {
                 role,
                 members: Vec::new(),
-                condition: None,
+                condition: condition.map(|expression| Expr {
+                    expression,
+                    ..Expr::default()
+                }),
             });
             current = Some(binding_index);
         }
