@@ -35,6 +35,15 @@ pub mod authz;
 #[cfg(feature = "iam-proto")]
 pub mod policy;
 
+/// The opt-in CEL-backed **Condition** evaluation adapter — opt-in via the
+/// non-default `eval` feature (ADR-0010). Compile a **Condition** (general CEL,
+/// not the AIP-160 subset) once and evaluate it against a request context exposing
+/// the IAM-style environment (`resource.*`, `request.time`) to a `bool`. This is
+/// the execution layer, behind an opt-in feature like `aip-sql`, so a
+/// parse/validate build never compiles the `cel` parser/runtime.
+#[cfg(feature = "eval")]
+pub mod eval;
+
 /// The generated `google.iam.v1` Policy structure — opt-in via the non-default
 /// `iam-proto` feature (ADR-0010).
 ///
@@ -125,6 +134,30 @@ pub enum Error {
     /// [`SetIamPolicy`]: https://google.aip.dev/211
     #[error("policy etag mismatch: the policy was modified concurrently; re-read and retry")]
     PolicyEtagMismatch,
+    /// A **Condition** expression failed to compile — it is not valid CEL. A
+    /// *malformed* Condition, distinct from one that evaluates to `false` (opt-in
+    /// `eval` feature, ADR-0010).
+    #[cfg(feature = "eval")]
+    #[error("condition expression {expression:?} is not valid CEL: {detail}")]
+    ConditionMalformed {
+        /// The offending Condition expression.
+        expression: String,
+        /// The CEL parser's diagnostic.
+        detail: String,
+    },
+    /// A **Condition** compiled but could not be evaluated to a `bool` against the
+    /// supplied request context — a runtime failure (e.g. an unsupplied variable)
+    /// or a non-boolean result. Distinct from a `false` result: a Condition that
+    /// cannot be decided is an error, never a silent denial (opt-in `eval` feature,
+    /// ADR-0010).
+    #[cfg(feature = "eval")]
+    #[error("condition expression {expression:?} could not be evaluated to a boolean: {detail}")]
+    ConditionEvaluation {
+        /// The Condition expression that failed to evaluate.
+        expression: String,
+        /// What went wrong during evaluation.
+        detail: String,
+    },
 }
 
 /// The AIP-193 `ErrorInfo.domain` for every error this crate maps. Reason codes
@@ -187,6 +220,24 @@ impl From<Error> for tonic::Status {
                 "IAM_POLICY_ETAG_MISMATCH",
                 HashMap::new(),
             ),
+            #[cfg(feature = "eval")]
+            Error::ConditionMalformed { expression, detail } => (
+                tonic::Code::InvalidArgument,
+                "IAM_CONDITION_MALFORMED",
+                HashMap::from([
+                    ("expression".to_owned(), expression.clone()),
+                    ("detail".to_owned(), detail.clone()),
+                ]),
+            ),
+            #[cfg(feature = "eval")]
+            Error::ConditionEvaluation { expression, detail } => (
+                tonic::Code::InvalidArgument,
+                "IAM_CONDITION_EVALUATION_FAILED",
+                HashMap::from([
+                    ("expression".to_owned(), expression.clone()),
+                    ("detail".to_owned(), detail.clone()),
+                ]),
+            ),
         };
         let mut details = ErrorDetails::new();
         details.set_error_info(reason, ERROR_DOMAIN, metadata);
@@ -234,6 +285,29 @@ mod tonic_tests {
             .expect("an ErrorInfo is always attached (AIP-193)");
         assert_eq!(info.reason, "IAM_POLICY_ETAG_MISMATCH");
         assert_eq!(info.domain, ERROR_DOMAIN);
+    }
+
+    #[cfg(feature = "eval")]
+    #[test]
+    fn malformed_condition_maps_to_invalid_argument_with_metadata() {
+        // A malformed Condition is a validation error: INVALID_ARGUMENT with the
+        // expression mirrored into metadata (AIP-193), like the other mappings.
+        let status: tonic::Status = Error::ConditionMalformed {
+            expression: "1 +".to_owned(),
+            detail: "unexpected end of input".to_owned(),
+        }
+        .into();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+        let info = status
+            .get_details_error_info()
+            .expect("an ErrorInfo is always attached (AIP-193)");
+        assert_eq!(info.reason, "IAM_CONDITION_MALFORMED");
+        assert_eq!(info.domain, ERROR_DOMAIN);
+        assert_eq!(
+            info.metadata.get("expression").map(String::as_str),
+            Some("1 +")
+        );
     }
 }
 
