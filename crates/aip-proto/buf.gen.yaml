@@ -11,23 +11,47 @@
 # message left without its `message_name` fails to derive `ReflectMessage`
 # ("missing required argument 'message_name'"), so a googleapis digest bump that
 # adds messages breaks the build loudly rather than drifting silently. Regenerate
-# the list from the descriptor set after a digest bump:
+# the list after a digest bump (from this directory):
 #
-#   buf build --as-file-descriptor-set -o /tmp/fds.json
-#   jq -r '<walk messageType recursively, skip mapEntry/WKT/anchor>' /tmp/fds.json
+#   ../../scripts/buf-message-names.py --skip aip.proto
 #
 # Comments are disabled: the googleapis docs carry ```-fenced JSON/CEL examples
 # that rustdoc would otherwise run as doctests (matches aip-iam / aip-filtering).
+#
+# The plugin is version-pinned for the same reason buf.lock digest-pins the
+# schema: regen.sh's reproducibility claim (and ADR-0011's CI drift check) holds
+# only if both halves of the generation are pinned.
 version: v2
 plugins:
-  - remote: buf.build/community/neoeinstein-prost
+  - remote: buf.build/community/neoeinstein-prost:v0.5.0
     out: src/gen
     opt:
       - disable_comments=.
       - 'type_attribute=.=#[derive(::prost_reflect::ReflectMessage)]'
       - 'type_attribute=.=#[prost_reflect(descriptor_pool = "crate::DESCRIPTOR_POOL")]'
+      - 'type_attribute=google.api.BatchingConfigProto=#[prost_reflect(message_name = "google.api.BatchingConfigProto")]'
+      - 'type_attribute=google.api.BatchingDescriptorProto=#[prost_reflect(message_name = "google.api.BatchingDescriptorProto")]'
+      - 'type_attribute=google.api.BatchingSettingsProto=#[prost_reflect(message_name = "google.api.BatchingSettingsProto")]'
+      - 'type_attribute=google.api.ClientLibrarySettings=#[prost_reflect(message_name = "google.api.ClientLibrarySettings")]'
+      - 'type_attribute=google.api.CommonLanguageSettings=#[prost_reflect(message_name = "google.api.CommonLanguageSettings")]'
+      - 'type_attribute=google.api.CppSettings=#[prost_reflect(message_name = "google.api.CppSettings")]'
+      - 'type_attribute=google.api.CustomHttpPattern=#[prost_reflect(message_name = "google.api.CustomHttpPattern")]'
+      - 'type_attribute=google.api.DotnetSettings=#[prost_reflect(message_name = "google.api.DotnetSettings")]'
+      - 'type_attribute=google.api.GoSettings=#[prost_reflect(message_name = "google.api.GoSettings")]'
+      - 'type_attribute=google.api.Http=#[prost_reflect(message_name = "google.api.Http")]'
+      - 'type_attribute=google.api.HttpRule=#[prost_reflect(message_name = "google.api.HttpRule")]'
+      - 'type_attribute=google.api.JavaSettings=#[prost_reflect(message_name = "google.api.JavaSettings")]'
+      - 'type_attribute=google.api.MethodSettings=#[prost_reflect(message_name = "google.api.MethodSettings")]'
+      - 'type_attribute=google.api.MethodSettings.LongRunning=#[prost_reflect(message_name = "google.api.MethodSettings.LongRunning")]'
+      - 'type_attribute=google.api.NodeSettings=#[prost_reflect(message_name = "google.api.NodeSettings")]'
+      - 'type_attribute=google.api.PhpSettings=#[prost_reflect(message_name = "google.api.PhpSettings")]'
+      - 'type_attribute=google.api.Publishing=#[prost_reflect(message_name = "google.api.Publishing")]'
+      - 'type_attribute=google.api.PythonSettings=#[prost_reflect(message_name = "google.api.PythonSettings")]'
+      - 'type_attribute=google.api.PythonSettings.ExperimentalFeatures=#[prost_reflect(message_name = "google.api.PythonSettings.ExperimentalFeatures")]'
       - 'type_attribute=google.api.ResourceDescriptor=#[prost_reflect(message_name = "google.api.ResourceDescriptor")]'
       - 'type_attribute=google.api.ResourceReference=#[prost_reflect(message_name = "google.api.ResourceReference")]'
+      - 'type_attribute=google.api.RubySettings=#[prost_reflect(message_name = "google.api.RubySettings")]'
+      - 'type_attribute=google.api.SelectiveGapicGeneration=#[prost_reflect(message_name = "google.api.SelectiveGapicGeneration")]'
       - 'type_attribute=google.api.expr.v1alpha1.CheckedExpr=#[prost_reflect(message_name = "google.api.expr.v1alpha1.CheckedExpr")]'
       - 'type_attribute=google.api.expr.v1alpha1.Constant=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Constant")]'
       - 'type_attribute=google.api.expr.v1alpha1.Decl=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Decl")]'
@@ -58,6 +82,12 @@ plugins:
       - 'type_attribute=google.iam.v1.AuditLogConfig=#[prost_reflect(message_name = "google.iam.v1.AuditLogConfig")]'
       - 'type_attribute=google.iam.v1.Binding=#[prost_reflect(message_name = "google.iam.v1.Binding")]'
       - 'type_attribute=google.iam.v1.BindingDelta=#[prost_reflect(message_name = "google.iam.v1.BindingDelta")]'
+      - 'type_attribute=google.iam.v1.GetIamPolicyRequest=#[prost_reflect(message_name = "google.iam.v1.GetIamPolicyRequest")]'
+      - 'type_attribute=google.iam.v1.GetPolicyOptions=#[prost_reflect(message_name = "google.iam.v1.GetPolicyOptions")]'
       - 'type_attribute=google.iam.v1.Policy=#[prost_reflect(message_name = "google.iam.v1.Policy")]'
       - 'type_attribute=google.iam.v1.PolicyDelta=#[prost_reflect(message_name = "google.iam.v1.PolicyDelta")]'
+      - 'type_attribute=google.iam.v1.SetIamPolicyRequest=#[prost_reflect(message_name = "google.iam.v1.SetIamPolicyRequest")]'
+      - 'type_attribute=google.iam.v1.TestIamPermissionsRequest=#[prost_reflect(message_name = "google.iam.v1.TestIamPermissionsRequest")]'
+      - 'type_attribute=google.iam.v1.TestIamPermissionsResponse=#[prost_reflect(message_name = "google.iam.v1.TestIamPermissionsResponse")]'
       - 'type_attribute=google.type.Expr=#[prost_reflect(message_name = "google.type.Expr")]'
+      - 'type_attribute=google.type.LatLng=#[prost_reflect(message_name = "google.type.LatLng")]'

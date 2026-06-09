@@ -1,0 +1,20 @@
+// Import anchor for `buf generate --include-imports` (the `aip-proto` idiom).
+//
+// The demo serves `google.iam.v1.IAMPolicy` *alongside* `FreightService`, but
+// no freight proto imports `iam_policy.proto` — a Policy attaches to a resource
+// out-of-band — so without this anchor the module's import closure would never
+// reach it: the IAMPolicy server trait would not be generated, and the service
+// would be missing from the embedded descriptor set (which doubles as the
+// grpcurl `-protoset`, see the README). The anchor carries no schema of its
+// own; its empty generated file is dropped by `regen.sh`.
+syntax = "proto3";
+
+package freight.imports;
+
+import "google/iam/v1/iam_policy.proto";
+
+// AIP-193 standard error details (ErrorInfo, BadRequest, …): nothing here
+// generates from them (`extern_path` maps google.rpc onto `tonic_types`, which
+// the handlers already use), but having them in the descriptor set lets grpcurl
+// decode the rich details block the README demonstrates.
+import "google/rpc/error_details.proto";
