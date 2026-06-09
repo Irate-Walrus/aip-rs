@@ -170,9 +170,51 @@ ic -d '{"resource":"shippers/acme","policy":{"bindings":[{"role":"roles/viewer",
 ic -d '{"resource":"shippers/acme","policy":{"version":1,"bindings":[{"role":"roles/viewer","members":["user:alice@example.com"],"condition":{"expression":"request.time < timestamp(\"2030-01-01T00:00:00Z\")"}}]}}' \
                                      127.0.0.1:50051 $IAMSVC/SetIamPolicy
 
-# TestIamPermissions is the next slice (#68): it decides through the opt-in
-# cel-backed eval adapter (#66), so today it returns Unimplemented.
-ic -d '{"resource":"shippers/acme","permissions":["freight.shippers.get"]}' \
+```
+
+`TestIamPermissions` (#68) decides the held subset of the requested permissions
+*through* the opt-in cel-backed `eval` adapter (#66): it expands each **Binding**'s
+**Role** to **Permissions** via an example-owned catalogue (`aip-iam` ships none —
+ADR-0010), matches the caller (the same `x-freight-caller` header the read gate
+reads), and evaluates any **Condition**. It returns only the held subset and never
+errors on a permission the caller lacks. The catalogue maps `roles/freight.viewer`
+(read verbs), `roles/freight.editor` (read + write), and `roles/freight.admin`
+(+ IAM administration).
+
+```sh
+# Grant alice the freight viewer role on shippers/acme (first write may omit etag).
+ic -d '{"resource":"shippers/acme","policy":{"version":1,"bindings":[{"role":"roles/freight.viewer","members":["user:alice@example.com"]}]}}' \
+                                     127.0.0.1:50051 $IAMSVC/SetIamPolicy
+
+# alice holds the read verb but not delete — only `freight.shippers.get` comes back.
+ic -H 'x-freight-caller: user:alice@example.com' \
+   -d '{"resource":"shippers/acme","permissions":["freight.shippers.get","freight.shippers.delete"]}' \
+                                     127.0.0.1:50051 $IAMSVC/TestIamPermissions
+# bob is in no Binding, so he holds nothing — both are omitted (no error).
+ic -H 'x-freight-caller: user:bob@example.com' \
+   -d '{"resource":"shippers/acme","permissions":["freight.shippers.get","freight.shippers.delete"]}' \
+                                     127.0.0.1:50051 $IAMSVC/TestIamPermissions
+
+# The subset changes with the policy: the editor role bundles the write verbs too,
+# so delete now comes back as well.
+ic -d '{"resource":"shippers/acme","policy":{"version":1,"bindings":[{"role":"roles/freight.editor","members":["user:alice@example.com"]}]}}' \
+                                     127.0.0.1:50051 $IAMSVC/SetIamPolicy
+ic -H 'x-freight-caller: user:alice@example.com' \
+   -d '{"resource":"shippers/acme","permissions":["freight.shippers.get","freight.shippers.delete"]}' \
+                                     127.0.0.1:50051 $IAMSVC/TestIamPermissions
+
+# A conditional Binding is honoured through the eval adapter (version 3 required).
+# A Condition that holds (request.time before the window) keeps the permission…
+ic -d '{"resource":"shippers/acme","policy":{"version":3,"bindings":[{"role":"roles/freight.viewer","members":["user:alice@example.com"],"condition":{"expression":"request.time < timestamp(\"2030-01-01T00:00:00Z\")"}}]}}' \
+                                     127.0.0.1:50051 $IAMSVC/SetIamPolicy
+ic -H 'x-freight-caller: user:alice@example.com' \
+   -d '{"resource":"shippers/acme","permissions":["freight.shippers.get"]}' \
+                                     127.0.0.1:50051 $IAMSVC/TestIamPermissions
+# …and a Condition that fails (the window has closed) excludes it — empty subset.
+ic -d '{"resource":"shippers/acme","policy":{"version":3,"bindings":[{"role":"roles/freight.viewer","members":["user:alice@example.com"],"condition":{"expression":"request.time < timestamp(\"2020-01-01T00:00:00Z\")"}}]}}' \
+                                     127.0.0.1:50051 $IAMSVC/SetIamPolicy
+ic -H 'x-freight-caller: user:alice@example.com' \
+   -d '{"resource":"shippers/acme","permissions":["freight.shippers.get"]}' \
                                      127.0.0.1:50051 $IAMSVC/TestIamPermissions
 ```
 
@@ -228,8 +270,8 @@ wired up.
 | `CreateShipment`  | `resourceid` (generate), `resourcename` (parse parent + format), `validation` (accumulate both REQUIRED endpoints → one AIP-193 response) | #5, #3, #60 | wired⁴ |
 | `ListShipments`   | `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (filter + server-composed scope/soft-delete → in-memory SQLite) | #6, #7, #43 | wired⁴ |
 | `IAMPolicy.GetIamPolicy` / `SetIamPolicy` | `iam` (Member validation + structural read-modify-write: dedupe/normalise, `etag` optimistic concurrency, conditions⟹version-3) over a decomposed SQLite policy store (iam-go's `iam_policy_bindings` schema) | #64, #65 | wired⁵ |
+| `IAMPolicy.TestIamPermissions` | `iam` + the opt-in cel-backed `eval` adapter (`aip::iam::eval`): role→permission expansion via an example-owned catalogue, Member matching, Condition evaluation | #66, #68 | wired⁷ |
 | `GetSite` / `UpdateSite` / `DeleteSite`, `BatchGetSites`, `GetShipment` / `UpdateShipment` / `DeleteShipment` | the same primitives | #11–#15 | `Unimplemented` |
-| `IAMPolicy.TestIamPermissions` | `iam` + the opt-in cel-backed `eval` adapter | #66, #68 | `Unimplemented` |
 
 ³ `ListSites` parses the `order_by` (`aip::ordering::parse_order_by`) and
 validates it against an allow-list of sortable Site paths (`validate_for_paths`,
@@ -290,16 +332,17 @@ with an `IAM_*` `ErrorInfo`), enforces the *conditions ⟹ version-3* invariant
 policy (`check_etag` — a stale token is `ABORTED`), normalises it
 (dedupe + canonical order), and replaces the resource's rows in one transaction,
 echoing the stored Policy back. `GetIamPolicy` reconstructs the stored Policy
-carrying its `etag`, or an empty one when none is set. Like iam-go's `iamspanner`,
-the schema persists neither `version` nor a **Binding**'s **Condition** — the
-version-3 invariant is enforced *before* the write, so a conditional binding is
-rejected up front while accepted policies round-trip as their `(role, members)`
-grants. The example generates its own `IAMPolicy` *service* trait + request types
-under `proto/`, but shares the `Policy` / `Binding` *message* layer with `aip-iam`
-via `extern_path` (its opt-in `iam-proto` feature), so the service operates on the
-very types the helpers mutate. `TestIamPermissions` is left as a seam — it decides
-the held subset *through* the opt-in cel-backed `eval` adapter (#66), wired in #68
-(ADR-0010).
+carrying its `etag`, or an empty one when none is set. Each row carries its
+**Binding**'s **Condition** expression (the `condition` column, NULL when
+unconditional) so a conditional grant round-trips and `TestIamPermissions` can
+evaluate it (#68); `version` is not a stored column but reconstructed from the
+*conditions ⟹ version 3* invariant (version 3 when any binding is conditional), and
+a Condition's `title` / `description` are not persisted. The invariant itself is
+still enforced *before* the write, so a conditional binding on an older version is
+rejected up front. The example generates its own `IAMPolicy` *service* trait +
+request types under `proto/`, but shares the `Policy` / `Binding` *message* layer
+with `aip-iam` via `extern_path` (its opt-in `iam-proto` feature), so the service
+operates on the very types the helpers mutate.
 
 ⁶ `GetShipper` enforces AIP-211 authorization (#67) using the `Policy` store it
 **shares** with the `IAMPolicy` service: it reads the caller identity from an
@@ -317,6 +360,25 @@ deliberately coarse **Member** membership check, not the role→permission expan
 **Condition** evaluation that is the authorization *decision* — that lands behind the
 opt-in cel-backed `eval` adapter (#66/#68, ADR-0010); #67 contributes the error
 *shape*, not the decision.
+
+⁷ `TestIamPermissions` (#68) is that authorization **decision**, made *through* the
+opt-in cel-backed `eval` adapter (#66). Over the stored **Policy**, for each
+**Binding** the caller is a **Member** of (matched the same way as the #67 read
+gate), it evaluates any **Condition** — compiling the `google.type.Expr` (general
+CEL) with `aip::iam::eval::Condition` and running it against a `RequestContext`
+carrying `resource.name` (the resource under test) and `request.time` — and, when
+the Condition holds, expands the **Binding**'s **Role** to its **Permissions**
+through an **example-owned catalogue** (`role_permissions` in `src/iam.rs`):
+`aip-iam` ships no role definitions, so the freight `roles/freight.viewer` /
+`editor` / `admin` → permission mapping is the caller's (ADR-0010). It returns the
+requested permissions intersected with that held set — a valid permission the caller
+lacks is simply omitted, never an error — while a *malformed* requested permission
+(not a `service.resource.verb`) and a *broken* stored **Condition** (invalid CEL, or
+one that cannot evaluate to a bool) both surface as `INVALID_ARGUMENT` with an
+`IAM_*` `ErrorInfo` via the AIP-193 mapping, the adapter keeping a broken Condition
+distinct from one that simply did not hold. Unlike the read gate, an **unprotected**
+resource (no Policy) holds **nothing** here — the held subset is decided purely from
+the Policy's **Bindings**.
 
 ² Real offset pagination through the `pagination` page-token codec (#6), with the
 request-checksum guard (#7) that rejects a token when a non-pagination field

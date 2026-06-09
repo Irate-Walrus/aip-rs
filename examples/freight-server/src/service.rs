@@ -787,14 +787,15 @@ const SERVICE_DOMAIN: &str = "freight.example.com";
 /// The request-metadata key the demo reads the caller's IAM **Member** identity
 /// from. A real server derives the principal from authenticated transport (mTLS, a
 /// verified JWT); the demo takes it verbatim so `grpcurl -H 'x-freight-caller: …'`
-/// can play any identity against the AIP-211 gate.
-const CALLER_METADATA_KEY: &str = "x-freight-caller";
+/// can play any identity against the AIP-211 gate (and `TestIamPermissions`, #68).
+pub(crate) const CALLER_METADATA_KEY: &str = "x-freight-caller";
 
 /// Read the caller's IAM **Member** from request metadata, or `None` when it is
 /// absent or unparseable (an anonymous caller). The credential only *identifies*
 /// the caller for the authorization gate — it is not a request field — so a bad
-/// value degrades to anonymous rather than `INVALID_ARGUMENT`.
-fn caller_member(metadata: &MetadataMap) -> Option<Member> {
+/// value degrades to anonymous rather than `INVALID_ARGUMENT`. Shared with the
+/// `IAMPolicy` service's `TestIamPermissions` (#68), which reads the same caller.
+pub(crate) fn caller_member(metadata: &MetadataMap) -> Option<Member> {
     metadata
         .get(CALLER_METADATA_KEY)
         .and_then(|value| value.to_str().ok())
@@ -806,7 +807,8 @@ fn caller_member(metadata: &MetadataMap) -> Option<Member> {
 /// present caller; a typed member admits the exact same **Member**. The grant is
 /// compared against the caller's canonical [`Member`] rendering, so only a
 /// well-formed grant matches (a malformed one was rejected at `SetIamPolicy`).
-fn member_matches(granted: &str, caller: Option<&Member>) -> bool {
+/// Shared with `TestIamPermissions` (#68), which matches the caller the same way.
+pub(crate) fn member_matches(granted: &str, caller: Option<&Member>) -> bool {
     match granted {
         "allUsers" => true,
         "allAuthenticatedUsers" => caller.is_some(),
