@@ -82,12 +82,11 @@ dependencies = [
 name = "aip-iam"
 version = "0.1.0"
 dependencies = [
+ "aip-proto",
  "cel",
  "chrono",
  "crc32fast",
  "prost",
- "prost-build",
- "protox",
  "thiserror 2.0.18",
  "tonic",
  "tonic-types",
