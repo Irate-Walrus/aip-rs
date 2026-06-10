@@ -459,5 +459,5 @@ einride sources used by
 `google.*` is vendored anymore — those imports resolve from the BSR at the
 commit pinned in [`buf.lock`](buf.lock). The `proto/imports.proto` anchor pulls
 `google/iam/v1/iam_policy.proto` (the served `IAMPolicy` service, which no
-freight proto imports) and `google/rpc/error_details.proto` (so the grpcurl
-protoset decodes AIP-193 details) into the closure.
+freight proto imports) and `google/rpc/error_details.proto` (so the reflection
+service exposes those descriptors and grpcurl can decode AIP-193 details) into the closure.
