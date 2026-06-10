@@ -95,6 +95,10 @@ tonic-types = { version = "0.14", default-features = false }
 # services use (ADR-0011); the generated code is committed, so there is no
 # build-time codegen dependency. See examples/freight-server.
 tonic-prost       = "0.14"
+# gRPC server reflection for the example server: feeds the embedded
+# FileDescriptorSet to grpcurl / grpc-go clients so `-import-path`/`-proto`
+# flags are not needed (issue #91).
+tonic-reflection  = "0.14"
 tokio             = { version = "1", features = ["rt-multi-thread", "macros"] }
 # Real SQLite engine for the example's default Site storage, proving an AIP filter
 # travels end-to-end into a database (ADR-0008). `bundled` compiles a vendored

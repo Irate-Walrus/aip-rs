@@ -51,9 +51,12 @@ aip-resourcename = { workspace = true }
 # service uses, and the protobuf message runtime. `tonic-types` lets the handlers
 # attach the same AIP-193 details to their own presence checks (e.g. a required
 # field), which no aip-rs primitive covers.
-tonic       = { workspace = true, features = ["server", "transport", "router", "codegen"] }
-tonic-types = { workspace = true }
-tonic-prost = { workspace = true }
+tonic            = { workspace = true, features = ["server", "transport", "router", "codegen"] }
+tonic-types      = { workspace = true }
+tonic-prost      = { workspace = true }
+# gRPC server reflection (issue #91): serves the embedded FileDescriptorSet so
+# grpcurl works without `-import-path`/`-proto` flags.
+tonic-reflection = { workspace = true }
 prost       = { workspace = true }
 prost-types = { workspace = true }
 # Reflection (ADR-0001 / ADR-0009): the `derive` feature emits the

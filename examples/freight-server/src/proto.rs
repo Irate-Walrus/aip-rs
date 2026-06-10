@@ -26,7 +26,7 @@ use prost_reflect::DescriptorPool;
 /// preserved — embedded so the generated messages can resolve their own
 /// descriptors at runtime (the [`ReflectMessage`](prost_reflect::ReflectMessage)
 /// derives read [`DESCRIPTOR_POOL`]).
-static FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("descriptor_set.binpb");
+pub static FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("descriptor_set.binpb");
 
 /// Shared [`DescriptorPool`] over the freight protos. Backs the generated
 /// `ReflectMessage` derives — every Typed message resolves its own

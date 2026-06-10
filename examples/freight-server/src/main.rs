@@ -16,10 +16,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tonic::transport::Server;
+use tonic_reflection::server::Builder as ReflectionBuilder;
 
 use crate::iam::IamServer;
 use crate::proto::einride::example::freight::v1::freight_service_server::FreightServiceServer;
 use crate::proto::google::iam::v1::iam_policy_server::IamPolicyServer;
+use crate::proto::FILE_DESCRIPTOR_SET;
 use crate::service::FreightServer;
 use crate::storage::PolicyStore;
 
@@ -35,11 +37,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The `google.iam.v1.IAMPolicy` service over that shared store (aip #64),
     // served alongside `FreightService`.
     let iam = IamServer::with_store(policies);
+    // gRPC server reflection (issue #91): feeds the same FileDescriptorSet the
+    // runtime DescriptorPool uses so grpcurl works without `-import-path`/`-proto`.
+    let reflection = ReflectionBuilder::configure()
+        .register_encoded_file_descriptor_set(FILE_DESCRIPTOR_SET)
+        .build_v1()?;
 
     println!("freight-server (aip-rs demo) listening on {addr}");
     Server::builder()
         .add_service(FreightServiceServer::new(server))
         .add_service(IamPolicyServer::new(iam))
+        .add_service(reflection)
         .serve(addr)
         .await?;
 
