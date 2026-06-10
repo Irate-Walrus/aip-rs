@@ -170,6 +170,10 @@ async fn shipper_crud_with_update_mask() {
         updated.create_time, created.create_time,
         "OUTPUT_ONLY create_time must not change"
     );
+    assert_ne!(
+        updated.update_time, created.update_time,
+        "update_time must advance after a write"
+    );
 
     // Masking `display_name` while the request carries no value would blank a
     // REQUIRED field — the `fieldbehavior` primitive rejects it with
@@ -643,6 +647,11 @@ async fn iam_policy_read_modify_write_etag_dance() {
         .expect("matching etag is accepted")
         .into_inner();
     assert_ne!(second.etag, stored.etag, "etag advances on each write");
+    assert_eq!(
+        second.bindings[0].members,
+        ["user:alice@example.com"],
+        "second write's binding content is stored correctly"
+    );
 
     // Replaying the now-stale etag is rejected with `ABORTED` — the IAM
     // optimistic-concurrency contract. The stale write must not take effect.
@@ -889,7 +898,10 @@ async fn aip_211_authorization_non_leaking_denial() {
 
     iam.set_iam_policy(Request::new(SetIamPolicyRequest {
         resource: shipper.name.clone(),
-        policy: Some(policy_v1("roles/viewer", &["user:alice@example.com"])),
+        policy: Some(policy_v1(
+            "roles/freight.viewer",
+            &["user:alice@example.com"],
+        )),
         update_mask: None,
     }))
     .await
@@ -946,14 +958,20 @@ async fn aip_211_authorization_non_leaking_denial() {
     // the parent collection against alice-only, so bob is unauthorized on both.
     iam.set_iam_policy(Request::new(SetIamPolicyRequest {
         resource: "shippers/ghost".to_owned(),
-        policy: Some(policy_v1("roles/viewer", &["user:alice@example.com"])),
+        policy: Some(policy_v1(
+            "roles/freight.viewer",
+            &["user:alice@example.com"],
+        )),
         update_mask: None,
     }))
     .await
     .expect("lock ghost");
     iam.set_iam_policy(Request::new(SetIamPolicyRequest {
         resource: "shippers".to_owned(),
-        policy: Some(policy_v1("roles/viewer", &["user:alice@example.com"])),
+        policy: Some(policy_v1(
+            "roles/freight.viewer",
+            &["user:alice@example.com"],
+        )),
         update_mask: None,
     }))
     .await
@@ -984,7 +1002,7 @@ async fn aip_211_authorization_non_leaking_denial() {
     iam.set_iam_policy(Request::new(SetIamPolicyRequest {
         resource: "shippers".to_owned(),
         policy: Some(policy_v1(
-            "roles/viewer",
+            "roles/freight.viewer",
             &["user:alice@example.com", "user:bob@example.com"],
         )),
         update_mask: None,
