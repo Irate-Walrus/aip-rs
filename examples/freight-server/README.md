@@ -262,7 +262,7 @@ wired up.
 | `UpdateShipper`   | `fieldmask` (typed `update` over `update_mask`), `fieldbehavior` (copy OUTPUT_ONLY from existing, validate REQUIRED in mask) | #8, #48, #59 | wired       |
 | `DeleteShipper`   | `resourcename` (validate) + generated `ShipperResourceName` (pattern match) | #4, #82      | wired       |
 | `CreateSite`      | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `SiteResourceName` (format), `validation` (accumulate REQUIRED-field violations → AIP-193) | #5, #3, #60, #82 | wired       |
-| `ListSites`       | `ordering` (parse/validate) + `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (filter + server-composed scope/soft-delete + `ORDER BY`/`LIMIT`/`OFFSET` → in-memory SQLite) | #9, #10, #6, #7, #11, #39, #40, #41, #42, #43 | wired³ |
+| `ListSites`       | `ordering` (parse/validate) + `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (filter + server-composed scope/soft-delete + `ORDER BY`/`LIMIT`/`OFFSET` → in-memory SQLite), with the in-memory `filtering` matcher pinned against SQLite | #9, #10, #6, #7, #11, #39, #40, #41, #42, #43, #92 | wired³ |
 | `CreateShipment`  | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `ShipmentResourceName` (format), `validation` (accumulate both REQUIRED endpoints → one AIP-193 response) | #5, #3, #60, #82 | wired⁴ |
 | `ListShipments`   | `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (filter + server-composed scope/soft-delete → in-memory SQLite) | #6, #7, #43 | wired⁴ |
 | `IAMPolicy.GetIamPolicy` / `SetIamPolicy` | `iam` (Member validation + structural read-modify-write: dedupe/normalise, `etag` optimistic concurrency, conditions⟹version-3) over a decomposed SQLite policy store (iam-go's `iam_policy_bindings` schema) | #64, #65 | wired⁵ |
@@ -301,8 +301,13 @@ the server's own predicates — `Predicate::scope_to_parent("name", parent)` (a
 single coherent placeholder numbering. So a user `a OR b` is parenthesized under
 the server's `AND`s instead of silently re-associating, and the page boundaries are
 computed over exactly the in-scope, non-deleted rows (no in-memory post-filter that
-could under-fill a page). The remaining Site/Shipment handlers await their methods
-(#11–#15) before they drop `Unimplemented`.
+could under-fill a page). The same checked `filter` is also evaluated **in memory**
+by the reflective matcher (`aip::filtering::matches`, #92): an agreement test seeds a
+Site corpus and asserts the matcher and the SQLite-backed `ListSites` select the same
+sites for every advertised filter — so the in-memory and SQL paths can't drift on the
+operator set, the enum/timestamp lowering, or the `NULL`/absent (three-valued) cases.
+The remaining Site/Shipment handlers await their methods (#11–#15) before they drop
+`Unimplemented`.
 
 ⁴ `ListShipments` runs the **same** server-side composition as `ListSites` (#43)
 against its own in-memory SQLite store: `aip::filtering` parses + type-checks the
