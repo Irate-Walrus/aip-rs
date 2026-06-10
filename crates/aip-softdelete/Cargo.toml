@@ -1,0 +1,20 @@
+[package]
+name = "aip-softdelete"
+description = "AIP-164 soft delete / undelete state rules and the AIP-165 purge contract"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tonic = { workspace = true, optional = true }
+tonic-types = { workspace = true, optional = true }
+
+[features]
+# Adds `From<Error> for tonic::Status` mapping a hidden soft-deleted read to
+# NOT_FOUND, an undelete of a live resource to ALREADY_EXISTS, and a missing
+# purge filter to INVALID_ARGUMENT, each with AIP-193 standard error details
+# (ErrorInfo). See docs/adr/0007-aip193-error-details.md.
+tonic = ["dep:tonic", "dep:tonic-types"]

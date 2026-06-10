@@ -68,6 +68,7 @@ plugins:
       - 'type_attribute=einride.example.freight.v1.Shipment=#[prost_reflect(message_name = "einride.example.freight.v1.Shipment")]'
       - 'type_attribute=einride.example.freight.v1.Shipper=#[prost_reflect(message_name = "einride.example.freight.v1.Shipper")]'
       - 'type_attribute=einride.example.freight.v1.Site=#[prost_reflect(message_name = "einride.example.freight.v1.Site")]'
+      - 'type_attribute=einride.example.freight.v1.UndeleteShipperRequest=#[prost_reflect(message_name = "einride.example.freight.v1.UndeleteShipperRequest")]'
       - 'type_attribute=einride.example.freight.v1.UpdateShipmentRequest=#[prost_reflect(message_name = "einride.example.freight.v1.UpdateShipmentRequest")]'
       - 'type_attribute=einride.example.freight.v1.UpdateShipperRequest=#[prost_reflect(message_name = "einride.example.freight.v1.UpdateShipperRequest")]'
       - 'type_attribute=einride.example.freight.v1.UpdateSiteRequest=#[prost_reflect(message_name = "einride.example.freight.v1.UpdateSiteRequest")]'

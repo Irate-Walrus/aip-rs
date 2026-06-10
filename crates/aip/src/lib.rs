@@ -44,6 +44,18 @@ pub use aip_fieldbehavior as fieldbehavior;
 #[cfg(feature = "etag")]
 pub use aip_etag as etag;
 
+/// AIP-164 soft delete / AIP-165 purge (issue #96) — default-on via the
+/// `softdelete` feature: the soft-delete [`State`](aip_softdelete::State) rules
+/// ([`is_visible`](aip_softdelete::is_visible) /
+/// [`check_visible`](aip_softdelete::check_visible) for `show_deleted` gating,
+/// [`check_deleted`](aip_softdelete::check_deleted) for the undelete
+/// precondition) and the AIP-165 purge contract
+/// ([`PurgeMode`](aip_softdelete::PurgeMode) /
+/// [`require_filter`](aip_softdelete::require_filter) /
+/// [`purge_result`](aip_softdelete::purge_result)).
+#[cfg(feature = "softdelete")]
+pub use aip_softdelete as softdelete;
+
 /// Field-violation accumulator (issue #60): collects per-field validation
 /// failures into one AIP-193 error. Default-on via the `validation` feature.
 #[cfg(feature = "validation")]

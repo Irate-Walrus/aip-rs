@@ -18,7 +18,8 @@ use crate::iam::IamServer;
 use crate::proto::einride::example::freight::v1::{
     freight_service_server::FreightService, CreateShipmentRequest, CreateShipperRequest,
     CreateSiteRequest, DeleteShipperRequest, GetShipperRequest, ListShipmentsRequest,
-    ListShippersRequest, ListSitesRequest, Shipment, Shipper, Site, UpdateShipperRequest,
+    ListShippersRequest, ListSitesRequest, Shipment, Shipper, Site, UndeleteShipperRequest,
+    UpdateShipperRequest,
 };
 use crate::proto::google::iam::v1::{
     iam_policy_server::IamPolicy, GetIamPolicyRequest, SetIamPolicyRequest,
@@ -144,6 +145,7 @@ async fn shipper_crud_with_update_mask() {
     let got = freight
         .get_shipper(Request::new(GetShipperRequest {
             name: created.name.clone(),
+            ..Default::default()
         }))
         .await
         .expect("get_shipper succeeds")
@@ -216,23 +218,92 @@ async fn shipper_crud_with_update_mask() {
     assert_eq!(bad.field_violations[0].field, "display_name");
 
     // DeleteShipper carries the current etag on the request (it can't piggyback on
-    // the resource); the fresh one permits the delete (#93). A subsequent
-    // GetShipper is NOT_FOUND.
-    freight
+    // the resource); the fresh one permits the delete (#93). The delete is now a
+    // soft delete (AIP-164, #96): it stamps `delete_time` and keeps the record.
+    let deleted = freight
         .delete_shipper(Request::new(DeleteShipperRequest {
             name: created.name.clone(),
             etag: updated.etag.clone(),
         }))
         .await
-        .expect("delete_shipper succeeds");
+        .expect("delete_shipper succeeds")
+        .into_inner();
+    assert!(
+        deleted.delete_time.is_some(),
+        "a soft delete stamps delete_time"
+    );
 
+    // A plain GetShipper no longer sees it — a soft-deleted shipper is hidden
+    // (NOT_FOUND) unless the caller asks for it.
     let status = freight
         .get_shipper(Request::new(GetShipperRequest {
             name: created.name.clone(),
+            show_deleted: false,
         }))
         .await
-        .expect_err("deleted shipper is not found");
+        .expect_err("a soft-deleted shipper is hidden");
     assert_eq!(status.code(), tonic::Code::NotFound);
+
+    // With `show_deleted` it comes back, delete_time and all; and ListShippers
+    // likewise omits it by default but includes it under `show_deleted`.
+    let revealed = freight
+        .get_shipper(Request::new(GetShipperRequest {
+            name: created.name.clone(),
+            show_deleted: true,
+        }))
+        .await
+        .expect("show_deleted reveals the soft-deleted shipper")
+        .into_inner();
+    assert!(revealed.delete_time.is_some());
+    let default_list = freight
+        .list_shippers(Request::new(ListShippersRequest::default()))
+        .await
+        .expect("list_shippers succeeds")
+        .into_inner();
+    assert!(
+        default_list.shippers.is_empty(),
+        "ListShippers omits soft-deleted shippers by default"
+    );
+    let show_deleted_list = freight
+        .list_shippers(Request::new(ListShippersRequest {
+            show_deleted: true,
+            ..Default::default()
+        }))
+        .await
+        .expect("list_shippers succeeds")
+        .into_inner();
+    assert_eq!(show_deleted_list.shippers.len(), 1);
+
+    // UndeleteShipper clears the stamp; the shipper is live and visible again.
+    let restored = freight
+        .undelete_shipper(Request::new(UndeleteShipperRequest {
+            name: created.name.clone(),
+        }))
+        .await
+        .expect("undelete restores the shipper")
+        .into_inner();
+    assert!(
+        restored.delete_time.is_none(),
+        "undelete clears delete_time"
+    );
+    let live = freight
+        .get_shipper(Request::new(GetShipperRequest {
+            name: created.name.clone(),
+            show_deleted: false,
+        }))
+        .await
+        .expect("the undeleted shipper is visible again")
+        .into_inner();
+    assert_eq!(live.name, created.name);
+
+    // Undeleting a now-live shipper has nothing to recover: ALREADY_EXISTS.
+    let status = freight
+        .undelete_shipper(Request::new(UndeleteShipperRequest {
+            name: created.name.clone(),
+        }))
+        .await
+        .expect_err("undeleting a live shipper is rejected");
+    assert_eq!(status.code(), tonic::Code::AlreadyExists);
 }
 
 /// README flow: `CreateShipper` with an empty `shipper` body (no `display_name`)
@@ -935,6 +1006,7 @@ async fn aip_211_authorization_non_leaking_denial() {
             "user:alice@example.com",
             GetShipperRequest {
                 name: shipper.name.clone(),
+                ..Default::default()
             },
         ))
         .await
@@ -950,10 +1022,12 @@ async fn aip_211_authorization_non_leaking_denial() {
                 c,
                 GetShipperRequest {
                     name: shipper.name.clone(),
+                    ..Default::default()
                 },
             ),
             None => Request::new(GetShipperRequest {
                 name: shipper.name.clone(),
+                ..Default::default()
             }),
         };
         let status = freight
@@ -1006,6 +1080,7 @@ async fn aip_211_authorization_non_leaking_denial() {
             "user:bob@example.com",
             GetShipperRequest {
                 name: "shippers/ghost".to_owned(),
+                ..Default::default()
             },
         ))
         .await
@@ -1037,6 +1112,7 @@ async fn aip_211_authorization_non_leaking_denial() {
             "user:bob@example.com",
             GetShipperRequest {
                 name: "shippers/ghost".to_owned(),
+                ..Default::default()
             },
         ))
         .await

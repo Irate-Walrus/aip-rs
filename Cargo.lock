@@ -26,6 +26,7 @@ dependencies = [
  "aip-requestid",
  "aip-resourceid",
  "aip-resourcename",
+ "aip-softdelete",
  "aip-sql",
  "aip-validation",
 ]
@@ -178,6 +179,15 @@ dependencies = [
 
 [[package]]
 name = "aip-resourcename"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
+ "tonic",
+ "tonic-types",
+]
+
+[[package]]
+name = "aip-softdelete"
 version = "0.1.0"
 dependencies = [
  "thiserror 2.0.18",

@@ -193,6 +193,10 @@ pub struct GetShipperRequest {
     /// Format: shippers/{shipper}
     #[prost(string, tag="1")]
     pub name: ::prost::alloc::string::String,
+    /// If true, the shipper is returned even when it has been soft-deleted
+    /// (AIP-164); otherwise a soft-deleted shipper is reported as `NOT_FOUND`.
+    #[prost(bool, tag="2")]
+    pub show_deleted: bool,
 }
 /// Request message for FreightService.ListShippers.
 #[derive(::prost_reflect::ReflectMessage)]
@@ -210,6 +214,10 @@ pub struct ListShippersRequest {
     /// returned from the previous call to `ListShippers` method.
     #[prost(string, tag="2")]
     pub page_token: ::prost::alloc::string::String,
+    /// If true, soft-deleted shippers (AIP-164) are included in the results;
+    /// otherwise they are omitted.
+    #[prost(bool, tag="3")]
+    pub show_deleted: bool,
 }
 /// Response message for FreightService.ListShippers.
 #[derive(::prost_reflect::ReflectMessage)]
@@ -285,6 +293,17 @@ pub struct DeleteShipperRequest {
     /// an `ABORTED` error; if omitted, the delete is unconditional.
     #[prost(string, tag="2")]
     pub etag: ::prost::alloc::string::String,
+}
+/// Request message for FreightService.UndeleteShipper.
+#[derive(::prost_reflect::ReflectMessage)]
+#[prost_reflect(descriptor_pool = "crate::proto::DESCRIPTOR_POOL")]
+#[prost_reflect(message_name = "einride.example.freight.v1.UndeleteShipperRequest")]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UndeleteShipperRequest {
+    /// The resource name of the shipper to undelete.
+    /// Format: shippers/{shipper}
+    #[prost(string, tag="1")]
+    pub name: ::prost::alloc::string::String,
 }
 /// Request message for FreightService.GetSite.
 #[derive(::prost_reflect::ReflectMessage)]
