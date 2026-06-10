@@ -93,7 +93,6 @@ async fn seed_site(freight: &FreightServer, display_name: &str) {
                 display_name: display_name.to_owned(),
                 ..Default::default()
             }),
-            request_id: String::new(),
             ..Default::default()
         }))
         .await
@@ -120,7 +119,6 @@ async fn shipper_crud_with_update_mask() {
                 display_name: "Acme".to_owned(),
                 ..Default::default()
             }),
-            request_id: String::new(),
             ..Default::default()
         }))
         .await
@@ -250,7 +248,6 @@ async fn create_shipper_missing_display_name_aip193_details() {
     let status = freight
         .create_shipper(Request::new(CreateShipperRequest {
             shipper: Some(Shipper::default()),
-            request_id: String::new(),
             ..Default::default()
         }))
         .await
@@ -468,7 +465,6 @@ async fn list_sites_aip160_filtering_and_error_details() {
         .create_site(Request::new(CreateSiteRequest {
             parent: PARENT.to_owned(),
             site: Some(Site::default()),
-            request_id: String::new(),
             ..Default::default()
         }))
         .await
@@ -517,7 +513,6 @@ async fn list_shipments_filtering_and_missing_endpoints_aip193() {
                         .collect(),
                     ..Default::default()
                 }),
-                request_id: String::new(),
                 ..Default::default()
             }))
             .await
@@ -573,7 +568,6 @@ async fn list_shipments_filtering_and_missing_endpoints_aip193() {
         .create_shipment(Request::new(CreateShipmentRequest {
             parent: PARENT.to_owned(),
             shipment: Some(Shipment::default()),
-            request_id: String::new(),
             ..Default::default()
         }))
         .await
@@ -918,7 +912,6 @@ async fn aip_211_authorization_non_leaking_denial() {
                 display_name: "Locked Corp".to_owned(),
                 ..Default::default()
             }),
-            request_id: String::new(),
             ..Default::default()
         }))
         .await

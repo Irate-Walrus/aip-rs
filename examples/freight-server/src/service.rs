@@ -1028,7 +1028,6 @@ mod tests {
             .create_site(Request::new(CreateSiteRequest {
                 parent: PARENT.to_owned(),
                 site: Some(site),
-                request_id: String::new(),
                 ..Default::default()
             }))
             .await
@@ -1046,7 +1045,6 @@ mod tests {
                     state: state as i32,
                     ..Default::default()
                 }),
-                request_id: String::new(),
                 ..Default::default()
             }))
             .await
@@ -1073,7 +1071,6 @@ mod tests {
                     tags: tags.iter().map(|t| t.to_string()).collect(),
                     ..Default::default()
                 }),
-                request_id: String::new(),
                 ..Default::default()
             }))
             .await
@@ -1347,7 +1344,6 @@ mod tests {
                     display_name: display_name.to_owned(),
                     ..Default::default()
                 }),
-                request_id: String::new(),
                 ..Default::default()
             }))
             .await
@@ -1766,7 +1762,6 @@ mod tests {
         let status = server
             .create_shipper(Request::new(CreateShipperRequest {
                 shipper: Some(Shipper::default()),
-                request_id: String::new(),
                 ..Default::default()
             }))
             .await
@@ -1851,7 +1846,6 @@ mod tests {
             .create_shipment(Request::new(CreateShipmentRequest {
                 parent: PARENT.to_owned(),
                 shipment: Some(Shipment::default()),
-                request_id: String::new(),
                 ..Default::default()
             }))
             .await
@@ -2194,7 +2188,6 @@ mod tests {
                 .create_site(Request::new(CreateSiteRequest {
                     parent: PARENT.to_owned(),
                     site: Some(site),
-                    request_id: String::new(),
                     ..Default::default()
                 }))
                 .await
@@ -2257,7 +2250,6 @@ mod tests {
                         display_name: "Theirs".to_owned(),
                         ..Default::default()
                     }),
-                    request_id: String::new(),
                     ..Default::default()
                 }))
                 .await
@@ -2302,7 +2294,6 @@ mod tests {
                         .collect(),
                     ..Default::default()
                 }),
-                request_id: String::new(),
                 ..Default::default()
             }))
             .await
@@ -2342,7 +2333,6 @@ mod tests {
                     destination_site: site.to_owned(),
                     ..Default::default()
                 }),
-                request_id: String::new(),
                 ..Default::default()
             }))
             .await
