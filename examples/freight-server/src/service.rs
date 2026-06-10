@@ -225,6 +225,11 @@ impl FreightService for FreightServer {
         shipper.create_time = Some(ts);
         shipper.update_time = Some(ts);
         shipper.delete_time = None;
+        // Stamp the AIP-154 content etag the client will echo back on a later
+        // update/delete (#93). `compute_etag` digests the content — it ignores the
+        // OUTPUT_ONLY timestamps just stamped and the etag field itself — so the
+        // token tracks name/display_name, not server churn.
+        shipper.etag = aip::etag::compute_etag(&shipper);
         self.storage.put_shipper(shipper.clone());
         // Record the result so a retry carrying the same `request_id` replays it.
         idempotent_record(&self.storage, &request_id, fingerprint, &shipper);
@@ -243,6 +248,14 @@ impl FreightService for FreightServer {
             .storage
             .get_shipper(&incoming.name)
             .ok_or_else(|| Status::not_found(format!("shipper `{}` not found", incoming.name)))?;
+
+        // AIP-154 freshness check (#93): an Update piggybacks the etag on the
+        // resource, so the client's `shipper.etag` is the token it read. Verify it
+        // against the stored shipper *before* doing any work — a stale etag means a
+        // concurrent writer intervened (`ABORTED`, re-read and retry), a malformed
+        // one is `INVALID_ARGUMENT`; both convert via the crate's AIP-193
+        // `From<Error> for Status`. An empty etag opts out (an unconditional write).
+        aip::etag::check_etag(&incoming.etag, &existing)?;
 
         // Apply the AIP-134 update mask via the field-mask primitive. The mask is
         // validated against the `Shipper` descriptor — sourced from the type
@@ -273,6 +286,11 @@ impl FreightService for FreightServer {
         aip::fieldbehavior::copy_fields(&mut shipper, &existing, &[FieldBehavior::OutputOnly]);
         // Stamp the server-controlled update_time regardless of what was copied.
         shipper.update_time = Some(now());
+        // Recompute the AIP-154 etag over the updated content (#93). `compute_etag`
+        // ignores the etag field, so whatever the mask copied into it is replaced
+        // by the fresh token; the response carries the value the next read-modify-
+        // write must echo.
+        shipper.etag = aip::etag::compute_etag(&shipper);
         self.storage.put_shipper(shipper.clone());
         Ok(Response::new(shipper))
     }
@@ -281,13 +299,23 @@ impl FreightService for FreightServer {
         &self,
         request: Request<DeleteShipperRequest>,
     ) -> Result<Response<Shipper>, Status> {
-        let name = request.into_inner().name;
+        let req = request.into_inner();
         // Soft delete (AIP-164) is deferred; this is a hard delete.
-        validate_shipper_name("name", &name)?;
-        self.storage
-            .remove_shipper(&name)
-            .map(Response::new)
-            .ok_or_else(|| Status::not_found(format!("shipper `{name}` not found")))
+        validate_shipper_name("name", &req.name)?;
+        // AIP-154 freshness check (#93): a Delete can't piggyback the etag on the
+        // resource, so it rides on the request. Look up the shipper (a missing one
+        // is `NOT_FOUND`, which takes precedence) and verify the supplied etag — a
+        // stale token is `ABORTED`, a malformed one `INVALID_ARGUMENT` (AIP-193); an
+        // empty etag makes the delete unconditional.
+        let existing = self
+            .storage
+            .get_shipper(&req.name)
+            .ok_or_else(|| Status::not_found(format!("shipper `{}` not found", req.name)))?;
+        aip::etag::check_etag(&req.etag, &existing)?;
+        // Existence was just established, so the removal returns the same record;
+        // hand `existing` back as the deleted resource.
+        self.storage.remove_shipper(&req.name);
+        Ok(Response::new(existing))
     }
 
     // ----- Site: not yet wired (will mirror the Shipper handlers) -----
@@ -1539,6 +1567,145 @@ mod tests {
             .expect("get_shipper succeeds")
             .into_inner();
         assert_eq!(stored.display_name, "Acme");
+    }
+
+    #[tokio::test]
+    async fn update_shipper_runs_the_aip154_read_modify_write_cycle() {
+        use tonic_types::StatusExt as _;
+
+        // #93 / AIP-154: a Create stamps a content etag, an Update piggybacks it
+        // back for the freshness check, and a stale token is rejected so a
+        // concurrent writer can no longer silently clobber.
+        let server = FreightServer::new();
+        let created = create_shipper(&server, "Acme").await;
+        assert!(!created.etag.is_empty(), "create stamps a content etag");
+
+        // The read-modify-write with the etag the client just read succeeds, and
+        // the server returns a *new* etag because the content changed.
+        let updated = server
+            .update_shipper(Request::new(UpdateShipperRequest {
+                shipper: Some(Shipper {
+                    name: created.name.clone(),
+                    display_name: "Acme Corp".to_owned(),
+                    etag: created.etag.clone(),
+                    ..Default::default()
+                }),
+                update_mask: Some(field_mask(&["display_name"])),
+            }))
+            .await
+            .expect("update with a fresh etag succeeds")
+            .into_inner();
+        assert_eq!(updated.display_name, "Acme Corp");
+        assert_ne!(
+            updated.etag, created.etag,
+            "a content change moves the etag",
+        );
+
+        // Replaying the original (now stale) etag is rejected with ABORTED — the
+        // optimistic-concurrency guard that makes the cycle safe.
+        let status = server
+            .update_shipper(Request::new(UpdateShipperRequest {
+                shipper: Some(Shipper {
+                    name: created.name.clone(),
+                    display_name: "Stale Write".to_owned(),
+                    etag: created.etag.clone(),
+                    ..Default::default()
+                }),
+                update_mask: Some(field_mask(&["display_name"])),
+            }))
+            .await
+            .expect_err("a stale etag is rejected");
+        assert_eq!(status.code(), tonic::Code::Aborted);
+        let info = status
+            .get_details_error_info()
+            .expect("an ErrorInfo is attached (AIP-193 MUST)");
+        assert_eq!(info.reason, "ETAG_MISMATCH");
+
+        // The stale write never reached storage.
+        let stored = server
+            .get_shipper(Request::new(GetShipperRequest {
+                name: created.name.clone(),
+            }))
+            .await
+            .expect("get_shipper succeeds")
+            .into_inner();
+        assert_eq!(stored.display_name, "Acme Corp");
+        assert_eq!(
+            stored.etag, updated.etag,
+            "the stored etag is the fresh one"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_shipper_rejects_a_malformed_etag() {
+        use tonic_types::StatusExt as _;
+
+        // A token that could not have come from a prior read is INVALID_ARGUMENT,
+        // not a concurrency conflict — distinct from the stale-etag ABORTED above.
+        let server = FreightServer::new();
+        let created = create_shipper(&server, "Acme").await;
+        let status = server
+            .update_shipper(Request::new(UpdateShipperRequest {
+                shipper: Some(Shipper {
+                    name: created.name,
+                    display_name: "Acme Corp".to_owned(),
+                    etag: "not-a-real-etag".to_owned(),
+                    ..Default::default()
+                }),
+                update_mask: Some(field_mask(&["display_name"])),
+            }))
+            .await
+            .expect_err("a malformed etag is rejected");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        let info = status
+            .get_details_error_info()
+            .expect("an ErrorInfo is attached (AIP-193 MUST)");
+        assert_eq!(info.reason, "ETAG_MALFORMED");
+    }
+
+    #[tokio::test]
+    async fn delete_shipper_honours_the_etag() {
+        // Delete carries the etag on the request (it can't piggyback on the
+        // resource). A stale token blocks the delete; the fresh one permits it.
+        let server = FreightServer::new();
+        let created = create_shipper(&server, "Acme").await;
+        let updated = server
+            .update_shipper(Request::new(UpdateShipperRequest {
+                shipper: Some(Shipper {
+                    name: created.name.clone(),
+                    display_name: "Acme Corp".to_owned(),
+                    etag: created.etag.clone(),
+                    ..Default::default()
+                }),
+                update_mask: Some(field_mask(&["display_name"])),
+            }))
+            .await
+            .expect("update succeeds")
+            .into_inner();
+
+        // The original etag is now stale: deleting with it is ABORTED.
+        let status = server
+            .delete_shipper(Request::new(DeleteShipperRequest {
+                name: created.name.clone(),
+                etag: created.etag,
+            }))
+            .await
+            .expect_err("a stale etag blocks the delete");
+        assert_eq!(status.code(), tonic::Code::Aborted);
+
+        // The fresh etag permits the delete, and the shipper is gone.
+        server
+            .delete_shipper(Request::new(DeleteShipperRequest {
+                name: created.name.clone(),
+                etag: updated.etag,
+            }))
+            .await
+            .expect("a fresh etag permits the delete");
+        let gone = server
+            .get_shipper(Request::new(GetShipperRequest { name: created.name }))
+            .await
+            .expect_err("the deleted shipper is gone");
+        assert_eq!(gone.code(), tonic::Code::NotFound);
     }
 
     #[tokio::test]

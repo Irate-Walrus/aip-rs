@@ -97,6 +97,13 @@ pub struct Shipper {
     /// The display name of the shipper.
     #[prost(string, tag="5")]
     pub display_name: ::prost::alloc::string::String,
+    /// An opaque checksum of the shipper's content (AIP-154). The server computes
+    /// it from the other fields and returns it on every read; a client echoes it
+    /// back on update/delete so a stale write (one racing a concurrent edit) is
+    /// rejected instead of silently clobbering. Per AIP-154 it is a `string`, named
+    /// `etag`, and carries no behavior annotation.
+    #[prost(string, tag="6")]
+    pub etag: ::prost::alloc::string::String,
 }
 /// A site is a node in a [shipper][einride.example.freight.v1.Shipper]'s
 /// transport network.
@@ -260,6 +267,12 @@ pub struct DeleteShipperRequest {
     /// Format: shippers/{shipper}
     #[prost(string, tag="1")]
     pub name: ::prost::alloc::string::String,
+    /// The current etag of the shipper (AIP-154). Unlike Update, Delete cannot
+    /// piggyback on the resource's own `etag` field, so it carries one here. If
+    /// provided and it does not match the stored shipper, deletion is blocked with
+    /// an `ABORTED` error; if omitted, the delete is unconditional.
+    #[prost(string, tag="2")]
+    pub etag: ::prost::alloc::string::String,
 }
 /// Request message for FreightService.GetSite.
 #[derive(::prost_reflect::ReflectMessage)]

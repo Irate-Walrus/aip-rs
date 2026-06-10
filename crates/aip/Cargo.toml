@@ -16,6 +16,7 @@ aip-fieldmask    = { workspace = true, optional = true }
 aip-ordering     = { workspace = true, optional = true }
 aip-filtering     = { workspace = true, optional = true }
 aip-fieldbehavior = { workspace = true, optional = true }
+aip-etag          = { workspace = true, optional = true }
 aip-validation    = { workspace = true, optional = true }
 aip-reflect       = { workspace = true, optional = true }
 # Optional IAM primitives (ADR-0010): off by default while the slice matures, like
@@ -26,7 +27,7 @@ aip-iam           = { workspace = true, optional = true }
 aip-sql           = { workspace = true, optional = true }
 
 [features]
-default = ["resourcename", "resourceid", "requestid", "pagination", "fieldmask", "ordering", "filtering", "fieldbehavior", "validation", "reflect"]
+default = ["resourcename", "resourceid", "requestid", "pagination", "fieldmask", "ordering", "filtering", "fieldbehavior", "etag", "validation", "reflect"]
 
 resourcename  = ["dep:aip-resourcename"]
 resourceid    = ["dep:aip-resourceid"]
@@ -36,6 +37,8 @@ fieldmask     = ["dep:aip-fieldmask"]
 ordering      = ["dep:aip-ordering"]
 filtering     = ["dep:aip-filtering"]
 fieldbehavior = ["dep:aip-fieldbehavior"]
+# AIP-154 content etags (issue #93): surfaced as `aip::etag`.
+etag          = ["dep:aip-etag"]
 validation    = ["dep:aip-validation"]
 # Resource-annotation reflection (issue #61): surfaced as `aip::reflect`.
 reflect       = ["dep:aip-reflect"]
@@ -55,6 +58,7 @@ tonic = [
     "aip-ordering?/tonic",
     "aip-filtering?/tonic",
     "aip-fieldbehavior?/tonic",
+    "aip-etag?/tonic",
     "aip-validation?/tonic",
     "aip-reflect?/tonic",
     "aip-iam?/tonic",

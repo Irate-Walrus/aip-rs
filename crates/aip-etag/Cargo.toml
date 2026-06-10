@@ -1,0 +1,34 @@
+[package]
+name = "aip-etag"
+description = "AIP-154 resource freshness validation: content etags for optimistic concurrency"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+# `prost::Message` supplies `encode_to_vec`/`decode`, used to transcode a concrete
+# message to a `DynamicMessage` so the etag field and OUTPUT_ONLY fields can be
+# cleared by reflection before the digest (ADR-0009).
+prost.workspace = true
+prost-reflect.workspace = true
+# CRC32-IEEE content digest — the same scheme `aip-iam`'s Policy etag and
+# `aip-pagination`'s request checksum use.
+crc32fast.workspace = true
+# Reused to clear OUTPUT_ONLY fields by their `google.api.field_behavior`
+# annotation (ADR-0009): the content etag excludes server-owned noise.
+aip-fieldbehavior.workspace = true
+tonic = { workspace = true, optional = true }
+tonic-types = { workspace = true, optional = true }
+
+[features]
+# Adds `From<Error> for tonic::Status` mapping a stale etag to ABORTED and a
+# malformed one to INVALID_ARGUMENT, each with AIP-193 standard error details
+# (ErrorInfo). See docs/adr/0007-aip193-error-details.md.
+tonic = ["dep:tonic", "dep:tonic-types"]
+
+[dev-dependencies]
+# Shared DescriptorPool + JSON -> DynamicMessage fixtures for the reflective tests.
+test-fixtures.workspace = true

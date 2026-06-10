@@ -42,6 +42,8 @@ gc() { grpcurl -plaintext "$@"; }
 # name from the response into the calls below (shown here as `shippers/$ID`).
 gc -d '{"shipper":{"display_name":"Acme"}}' 127.0.0.1:50051 $SVC/CreateShipper
 gc -d '{}'                                  127.0.0.1:50051 $SVC/ListShippers
+# Every read carries an opaque AIP-154 `etag` (#93). Copy it from the response
+# (an 8-char hex string) into the read-modify-write calls below (as `$ETAG`).
 gc -d '{"name":"shippers/$ID"}'             127.0.0.1:50051 $SVC/GetShipper
 
 # AIP-155 idempotency (#94): a `request_id` (a UUID) makes the create safe to
@@ -60,10 +62,18 @@ gc -d '{"shipper":{"display_name":"Acme"},"requestId":"not-a-uuid"}' 127.0.0.1:5
 # UpdateShipper applies an AIP-134 update_mask via the typed `fieldmask::update`
 # facade (#48): only `display_name` is masked, so it changes while the rest of the
 # stored shipper is left untouched. Omit `display_name` from the request with the
-# same mask and it is cleared instead.
-gc -d '{"shipper":{"name":"shippers/$ID","display_name":"Acme Corp"},"updateMask":{"paths":["display_name"]}}' \
+# same mask and it is cleared instead. It also runs the AIP-154 read-modify-write
+# (#93): echo the etag you just read and the write succeeds, returning a *new* etag.
+gc -d '{"shipper":{"name":"shippers/$ID","display_name":"Acme Corp","etag":"$ETAG"},"updateMask":{"paths":["display_name"]}}' \
                                             127.0.0.1:50051 $SVC/UpdateShipper
-gc -d '{"name":"shippers/$ID"}'             127.0.0.1:50051 $SVC/DeleteShipper
+# Replaying the now-stale etag is rejected with ABORTED (reason ETAG_MISMATCH) —
+# the optimistic-concurrency guard against a racing writer. A garbage etag is
+# InvalidArgument (reason ETAG_MALFORMED) instead; omitting it writes unconditionally.
+gc -d '{"shipper":{"name":"shippers/$ID","display_name":"Clobber","etag":"$ETAG"},"updateMask":{"paths":["display_name"]}}' \
+                                            127.0.0.1:50051 $SVC/UpdateShipper
+# DeleteShipper carries the etag on the request (it can't piggyback on the
+# resource): the current etag permits the delete, a stale one is ABORTED.
+gc -d '{"name":"shippers/$ID","etag":"$ETAG"}' 127.0.0.1:50051 $SVC/DeleteShipper
 ```
 
 Sites live under a shipper, and `ListSites` honors an AIP-132 `order_by`.
@@ -272,9 +282,9 @@ wired up.
 | ----------------- | -------------------------------------------- | ------------ | ----------- |
 | `GetShipper`      | `resourcename` (validate) + generated `ShipperResourceName` (pattern match), `iam` (AIP-211 authorization → non-leaking `PERMISSION_DENIED` / `NOT_FOUND`-via-parent over the shared Policy store) | #4, #67, #82 | wired⁶ |
 | `ListShippers`    | `pagination` (offset page-token codec + request-checksum guard) | #6, #7 | wired² |
-| `CreateShipper`   | `resourceid` (generate), generated `ShipperResourceName` (format), `fieldbehavior` (clear OUTPUT_ONLY/IMMUTABLE, validate REQUIRED), `requestid` (AIP-155 `request_id` validation + idempotent replay) | #5, #3, #59, #82, #94 | wired       |
-| `UpdateShipper`   | `fieldmask` (typed `update` over `update_mask`), `fieldbehavior` (copy OUTPUT_ONLY from existing, validate REQUIRED in mask) | #8, #48, #59 | wired       |
-| `DeleteShipper`   | `resourcename` (validate) + generated `ShipperResourceName` (pattern match) | #4, #82      | wired       |
+| `CreateShipper`   | `resourceid` (generate), generated `ShipperResourceName` (format), `fieldbehavior` (clear OUTPUT_ONLY/IMMUTABLE, validate REQUIRED), `etag` (stamp the AIP-154 content etag), `requestid` (AIP-155 `request_id` validation + idempotent replay) | #5, #3, #59, #82, #93, #94 | wired⁸ |
+| `UpdateShipper`   | `fieldmask` (typed `update` over `update_mask`), `fieldbehavior` (copy OUTPUT_ONLY from existing, validate REQUIRED in mask), `etag` (AIP-154 freshness check + re-stamp) | #8, #48, #59, #93 | wired⁸ |
+| `DeleteShipper`   | `resourcename` (validate) + generated `ShipperResourceName` (pattern match), `etag` (AIP-154 freshness check) | #4, #82, #93 | wired⁸ |
 | `CreateSite`      | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `SiteResourceName` (format), `validation` (accumulate REQUIRED-field violations → AIP-193), `requestid` (AIP-155 idempotent replay) | #5, #3, #60, #82, #94 | wired       |
 | `ListSites`       | `ordering` (parse/validate) + `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (filter + server-composed scope/soft-delete + `ORDER BY`/`LIMIT`/`OFFSET` → in-memory SQLite), with the in-memory `filtering` matcher pinned against SQLite | #9, #10, #6, #7, #11, #39, #40, #41, #42, #43, #92 | wired³ |
 | `CreateShipment`  | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `ShipmentResourceName` (format), `validation` (accumulate both REQUIRED endpoints → one AIP-193 response), `requestid` (AIP-155 idempotent replay) | #5, #3, #60, #82, #94 | wired⁴ |
@@ -394,6 +404,19 @@ one that cannot evaluate to a bool) both surface as `INVALID_ARGUMENT` with an
 distinct from one that simply did not hold. Unlike the read gate, an **unprotected**
 resource (no Policy) holds **nothing** here — the held subset is decided purely from
 the Policy's **Bindings**.
+
+⁸ Shipper carries an AIP-154 `etag` (#93): an opaque content digest the server
+returns on every read and the client echoes back to make a read-modify-write
+safe. `CreateShipper`/`UpdateShipper` stamp it with `aip::etag::compute_etag` —
+a CRC32 over the resource that excludes the `etag` field *and* the OUTPUT_ONLY
+timestamps, so it tracks content rather than server churn (the same digest
+scheme `aip::iam`'s Policy etag uses, generalized to any resource via reflection,
+ADR-0009). `UpdateShipper` runs `aip::etag::check_etag` over the etag the client
+piggybacks on the resource; `DeleteShipper` over the one on the request (Delete
+can't piggyback). A stale token is `ABORTED` (re-read and retry), a malformed one
+`INVALID_ARGUMENT`, both via the crate's AIP-193 `From<Error>` (#16); an empty
+etag opts out (an unconditional write). Site and Shipment gain the same once
+their standard methods land.
 
 ² Real offset pagination through the `pagination` page-token codec (#6), with the
 request-checksum guard (#7) that rejects a token when a non-pagination field
