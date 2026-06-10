@@ -17,10 +17,12 @@ use prost_reflect::EnumDescriptor;
 mod checker;
 mod lexer;
 mod macros;
+mod matcher;
 mod parser;
 mod token;
 
 pub use macros::{apply_macros, Cursor};
+pub use matcher::{matches, matches_dynamic, MatchError};
 
 /// The standard AIP-160 function and operator names that the [parser](parse)
 /// emits and the checker resolves. Walk a [`Filter`] by matching

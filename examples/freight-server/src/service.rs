@@ -1566,6 +1566,139 @@ mod tests {
         );
     }
 
+    /// The README's advertised `ListSites` filter corpus — one filter per
+    /// operator the matcher and the SQL path both implement, including the
+    /// three-valued (`NULL`) cases (`annotations.owner` on a site lacking the
+    /// key, `lat_lng.latitude` on a site lacking a location) where the two paths
+    /// must agree that an absent operand excludes the row.
+    const FILTER_CORPUS: &[&str] = &[
+        r#"display_name = "Alpha""#,
+        r#"display_name = "Alpha" OR display_name = "Bravo""#,
+        r#"display_name = "Alpha" AND display_name = "Bravo""#,
+        "lat_lng.latitude > 0",
+        r#"create_time > "2000-01-01T00:00:00Z""#,
+        r#"create_time > "2999-01-01T00:00:00Z""#,
+        "state = STATE_ACTIVE",
+        "state != STATE_ACTIVE",
+        "NOT state = STATE_ACTIVE",
+        "annotations:owner",
+        r#"annotations.owner = "ops""#,
+        "tags:refrigerated",
+        "display_name:lph",
+        r#"display_name = "Alpha" OR tags:refrigerated"#,
+    ];
+
+    /// `names` sorted, so two list-method results compare independently of order.
+    fn sorted(mut names: Vec<String>) -> Vec<String> {
+        names.sort();
+        names
+    }
+
+    /// Seed a heterogeneous Site corpus under `PARENT`, returning the created
+    /// Sites (each with its server-set `name` / `create_time`). The shapes vary
+    /// across state, location, annotations, and tags so every corpus filter both
+    /// keeps and drops at least one site — and some sites lack a key / a location,
+    /// to exercise the `NULL`/absent agreement.
+    async fn seed_filter_corpus(server: &FreightServer) -> Vec<Site> {
+        let annotations = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        let specs = vec![
+            Site {
+                display_name: "Alpha".to_owned(),
+                state: site::State::Active as i32,
+                lat_lng: Some(LatLng {
+                    latitude: 60.0,
+                    longitude: 0.0,
+                }),
+                annotations: annotations(&[("owner", "ops")]),
+                tags: vec!["refrigerated".to_owned(), "hazmat".to_owned()],
+                ..Default::default()
+            },
+            Site {
+                display_name: "Bravo".to_owned(),
+                state: site::State::Inactive as i32,
+                lat_lng: Some(LatLng {
+                    latitude: -30.0,
+                    longitude: 0.0,
+                }),
+                annotations: annotations(&[("region", "west")]),
+                tags: vec!["bulk".to_owned()],
+                ..Default::default()
+            },
+            Site {
+                display_name: "Charlie".to_owned(),
+                state: site::State::Active as i32,
+                lat_lng: Some(LatLng {
+                    latitude: 0.0,
+                    longitude: 0.0,
+                }),
+                tags: vec!["refrigerated".to_owned()],
+                ..Default::default()
+            },
+            // No location and no `owner` annotation, but a display name that still
+            // contains the `lph` substring (`De-lph-i`).
+            Site {
+                display_name: "Delphi".to_owned(),
+                state: site::State::Unspecified as i32,
+                annotations: annotations(&[("region", "east")]),
+                ..Default::default()
+            },
+        ];
+
+        let mut created = Vec::new();
+        for site in specs {
+            let response = server
+                .create_site(Request::new(CreateSiteRequest {
+                    parent: PARENT.to_owned(),
+                    site: Some(site),
+                }))
+                .await
+                .expect("create_site succeeds")
+                .into_inner();
+            created.push(response);
+        }
+        created
+    }
+
+    #[tokio::test]
+    async fn in_memory_matcher_agrees_with_sqlite_over_the_filter_corpus() {
+        // Issue #92: the in-memory reflective matcher (`aip::filtering::matches`)
+        // and the `aip-sql` + SQLite path must select the *same* Sites for every
+        // advertised filter — so an AIP-160 Filter means one thing whether a caller
+        // has a database or not. For each filter we compare the display names
+        // SQLite returns (`ListSites`, whose parent scope and soft-delete drop
+        // nothing here) against the ones the matcher keeps over the same corpus.
+        let server = FreightServer::new();
+        let corpus = seed_filter_corpus(&server).await;
+        let declarations = site_declarations();
+
+        for filter in FILTER_CORPUS {
+            let from_sqlite = sorted(list_filtered_display_names(&server, filter).await);
+
+            let checked = aip::filtering::check(filter, &declarations)
+                .unwrap_or_else(|error| panic!("corpus filter {filter:?} type-checks: {error}"));
+            let from_matcher = sorted(
+                corpus
+                    .iter()
+                    .filter(|site| {
+                        aip::filtering::matches(&checked, &declarations, *site)
+                            .unwrap_or_else(|error| panic!("matcher evaluates {filter:?}: {error}"))
+                    })
+                    .map(|site| site.display_name.clone())
+                    .collect(),
+            );
+
+            assert_eq!(
+                from_matcher, from_sqlite,
+                "matcher and SQLite disagree on filter {filter:?}",
+            );
+        }
+    }
+
     #[tokio::test]
     async fn list_sites_scopes_to_parent_in_sql() {
         // The parent scope now runs in the SQL `WHERE` (#43, `scope_to_parent`),

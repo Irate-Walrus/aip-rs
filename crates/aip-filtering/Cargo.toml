@@ -10,6 +10,12 @@ authors.workspace = true
 [dependencies]
 thiserror.workspace = true
 prost-reflect.workspace = true
+# The reflective matcher transcodes a Typed message to a `DynamicMessage` through
+# its wire bytes (ADR-0009) via prost's `Message` encode/decode, so `prost` is a
+# hard dependency — not only the optional `cel-proto` path. `prost-reflect`
+# re-exports it transitively, but we pin it directly so the transcode does not
+# rest on that re-export.
+prost.workspace = true
 # `cel-proto` enables conversion to/from google.api.expr.v1alpha1 CEL protos.
 # The types come from `aip-proto` (ADR-0011) rather than a crate-local build.rs.
 aip-proto = { workspace = true, features = ["cel"], optional = true }
