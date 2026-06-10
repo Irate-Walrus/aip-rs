@@ -94,6 +94,7 @@ async fn seed_site(freight: &FreightServer, display_name: &str) {
                 ..Default::default()
             }),
             request_id: String::new(),
+            ..Default::default()
         }))
         .await
         .expect("create_site succeeds");
@@ -120,6 +121,7 @@ async fn shipper_crud_with_update_mask() {
                 ..Default::default()
             }),
             request_id: String::new(),
+            ..Default::default()
         }))
         .await
         .expect("create_shipper succeeds")
@@ -169,6 +171,7 @@ async fn shipper_crud_with_update_mask() {
             update_mask: Some(prost_types::FieldMask {
                 paths: vec!["display_name".to_owned()],
             }),
+            ..Default::default()
         }))
         .await
         .expect("update_shipper succeeds")
@@ -199,6 +202,7 @@ async fn shipper_crud_with_update_mask() {
             update_mask: Some(prost_types::FieldMask {
                 paths: vec!["display_name".to_owned()],
             }),
+            ..Default::default()
         }))
         .await
         .expect_err("blanking a REQUIRED field is rejected");
@@ -247,6 +251,7 @@ async fn create_shipper_missing_display_name_aip193_details() {
         .create_shipper(Request::new(CreateShipperRequest {
             shipper: Some(Shipper::default()),
             request_id: String::new(),
+            ..Default::default()
         }))
         .await
         .expect_err("an empty display_name is rejected");
@@ -464,6 +469,7 @@ async fn list_sites_aip160_filtering_and_error_details() {
             parent: PARENT.to_owned(),
             site: Some(Site::default()),
             request_id: String::new(),
+            ..Default::default()
         }))
         .await
         .expect_err("a site without display_name is rejected");
@@ -512,6 +518,7 @@ async fn list_shipments_filtering_and_missing_endpoints_aip193() {
                     ..Default::default()
                 }),
                 request_id: String::new(),
+                ..Default::default()
             }))
             .await
             .expect("create_shipment succeeds");
@@ -567,6 +574,7 @@ async fn list_shipments_filtering_and_missing_endpoints_aip193() {
             parent: PARENT.to_owned(),
             shipment: Some(Shipment::default()),
             request_id: String::new(),
+            ..Default::default()
         }))
         .await
         .expect_err("a shipment missing both endpoints is rejected");
@@ -911,6 +919,7 @@ async fn aip_211_authorization_non_leaking_denial() {
                 ..Default::default()
             }),
             request_id: String::new(),
+            ..Default::default()
         }))
         .await
         .expect("create_shipper succeeds")
