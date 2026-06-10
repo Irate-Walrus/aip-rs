@@ -241,6 +241,12 @@ pub struct CreateShipperRequest {
     /// `request_id` is provided. See: <https://google.aip.dev/155.>
     #[prost(string, tag="2")]
     pub request_id: ::prost::alloc::string::String,
+    /// If set, run the full validation pipeline and return the shipper that would
+    /// be created, but do not persist it (and mint no idempotency record). The
+    /// request fails identically to a real create if it would fail.
+    /// See: <https://google.aip.dev/163.>
+    #[prost(bool, tag="3")]
+    pub validate_only: bool,
 }
 /// Request message for FreightService.UpdateShipper.
 #[derive(::prost_reflect::ReflectMessage)]
@@ -256,6 +262,12 @@ pub struct UpdateShipperRequest {
     /// The list of fields to be updated.
     #[prost(message, optional, tag="2")]
     pub update_mask: ::core::option::Option<::prost_types::FieldMask>,
+    /// If set, run the full validation pipeline and return the shipper that would
+    /// result from the update, but do not persist it. The request fails
+    /// identically to a real update if it would fail.
+    /// See: <https://google.aip.dev/163.>
+    #[prost(bool, tag="3")]
+    pub validate_only: bool,
 }
 /// Request message for FreightService.DeleteShipper.
 #[derive(::prost_reflect::ReflectMessage)]
@@ -360,6 +372,12 @@ pub struct CreateSiteRequest {
     /// `request_id` is provided. See: <https://google.aip.dev/155.>
     #[prost(string, tag="3")]
     pub request_id: ::prost::alloc::string::String,
+    /// If set, run the full validation pipeline and return the site that would be
+    /// created, but do not persist it (and mint no idempotency record). The
+    /// request fails identically to a real create if it would fail.
+    /// See: <https://google.aip.dev/163.>
+    #[prost(bool, tag="4")]
+    pub validate_only: bool,
 }
 /// Request message for FreightService.UpdateSite.
 #[derive(::prost_reflect::ReflectMessage)]
@@ -487,6 +505,12 @@ pub struct CreateShipmentRequest {
     /// `request_id` is provided. See: <https://google.aip.dev/155.>
     #[prost(string, tag="3")]
     pub request_id: ::prost::alloc::string::String,
+    /// If set, run the full validation pipeline and return the shipment that would
+    /// be created, but do not persist it (and mint no idempotency record). The
+    /// request fails identically to a real create if it would fail.
+    /// See: <https://google.aip.dev/163.>
+    #[prost(bool, tag="4")]
+    pub validate_only: bool,
 }
 /// Request message for FreightService.UpdateShipment.
 #[derive(::prost_reflect::ReflectMessage)]

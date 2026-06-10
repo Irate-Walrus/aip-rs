@@ -230,9 +230,14 @@ impl FreightService for FreightServer {
         // OUTPUT_ONLY timestamps just stamped and the etag field itself — so the
         // token tracks name/display_name, not server churn.
         shipper.etag = aip::etag::compute_etag(&shipper);
-        self.storage.put_shipper(shipper.clone());
-        // Record the result so a retry carrying the same `request_id` replays it.
-        idempotent_record(&self.storage, &request_id, fingerprint, &shipper);
+        // AIP-163: a `validate_only` request previews the would-be shipper —
+        // system-assigned id and etag minted — without persisting it or recording
+        // an idempotency entry, so a later real create still mints a new shipper.
+        commit_unless_preview(req.validate_only, || {
+            self.storage.put_shipper(shipper.clone());
+            // Record the result so a retry carrying the same `request_id` replays it.
+            idempotent_record(&self.storage, &request_id, fingerprint, &shipper);
+        });
         Ok(Response::new(shipper))
     }
 
@@ -291,7 +296,11 @@ impl FreightService for FreightServer {
         // by the fresh token; the response carries the value the next read-modify-
         // write must echo.
         shipper.etag = aip::etag::compute_etag(&shipper);
-        self.storage.put_shipper(shipper.clone());
+        // AIP-163: a `validate_only` request previews the merged shipper without
+        // persisting it, so the stored shipper is left untouched.
+        commit_unless_preview(req.validate_only, || {
+            self.storage.put_shipper(shipper.clone())
+        });
         Ok(Response::new(shipper))
     }
 
@@ -431,8 +440,12 @@ impl FreightService for FreightServer {
         site.create_time = Some(ts);
         site.update_time = Some(ts);
         site.delete_time = None;
-        self.storage.put_site(site.clone());
-        idempotent_record(&self.storage, &request_id, fingerprint, &site);
+        // AIP-163: a `validate_only` request previews the would-be site without
+        // persisting it or recording an idempotency entry.
+        commit_unless_preview(req.validate_only, || {
+            self.storage.put_site(site.clone());
+            idempotent_record(&self.storage, &request_id, fingerprint, &site);
+        });
         Ok(Response::new(site))
     }
 
@@ -550,8 +563,12 @@ impl FreightService for FreightServer {
         shipment.create_time = Some(ts);
         shipment.update_time = Some(ts);
         shipment.delete_time = None;
-        self.storage.put_shipment(shipment.clone());
-        idempotent_record(&self.storage, &request_id, fingerprint, &shipment);
+        // AIP-163: a `validate_only` request previews the would-be shipment
+        // without persisting it or recording an idempotency entry.
+        commit_unless_preview(req.validate_only, || {
+            self.storage.put_shipment(shipment.clone());
+            idempotent_record(&self.storage, &request_id, fingerprint, &shipment);
+        });
         Ok(Response::new(shipment))
     }
 
@@ -940,6 +957,21 @@ fn idempotent_record(
     storage.idempotent_put(request_id.to_owned(), fingerprint, response.encode_to_vec());
 }
 
+/// AIP-163 preview gate: persist a mutation only when the request is a real
+/// write. A `validate_only` request has already run the full validation pipeline
+/// above (REQUIRED fields, the [`Validator`] accumulator, resource-name and etag
+/// checks) and built the would-be resource; this skips `commit`, so the preview
+/// leaves the store — and the AIP-155 idempotency cache — untouched while the
+/// handler still returns the resource it would have committed. Validation runs
+/// unconditionally before this point, so a request that would fail fails
+/// identically with or without the flag, and `validate_only` stays one line per
+/// handler rather than a forked validation path.
+fn commit_unless_preview(validate_only: bool, commit: impl FnOnce()) {
+    if !validate_only {
+        commit();
+    }
+}
+
 /// The standard `Unimplemented` status for a method that hasn't been wired yet.
 fn unimplemented(method: &str) -> Status {
     Status::unimplemented(format!(
@@ -997,6 +1029,7 @@ mod tests {
                 parent: PARENT.to_owned(),
                 site: Some(site),
                 request_id: String::new(),
+                ..Default::default()
             }))
             .await
             .expect("create_site succeeds");
@@ -1014,6 +1047,7 @@ mod tests {
                     ..Default::default()
                 }),
                 request_id: String::new(),
+                ..Default::default()
             }))
             .await
             .expect("create_site succeeds");
@@ -1040,6 +1074,7 @@ mod tests {
                     ..Default::default()
                 }),
                 request_id: String::new(),
+                ..Default::default()
             }))
             .await
             .expect("create_site succeeds");
@@ -1313,6 +1348,7 @@ mod tests {
                     ..Default::default()
                 }),
                 request_id: String::new(),
+                ..Default::default()
             }))
             .await
             .expect("create_shipper succeeds")
@@ -1334,6 +1370,7 @@ mod tests {
                 ..Default::default()
             }),
             request_id: REQUEST_ID.to_owned(),
+            ..Default::default()
         };
 
         let first = server
@@ -1367,6 +1404,7 @@ mod tests {
                     ..Default::default()
                 }),
                 request_id: REQUEST_ID.to_owned(),
+                ..Default::default()
             }))
             .await
             .expect("first create succeeds");
@@ -1378,6 +1416,7 @@ mod tests {
                     ..Default::default()
                 }),
                 request_id: REQUEST_ID.to_owned(),
+                ..Default::default()
             }))
             .await
             .expect_err("a conflicting body under the same request_id is rejected");
@@ -1410,6 +1449,7 @@ mod tests {
                     ..Default::default()
                 }),
                 request_id: "not-a-uuid".to_owned(),
+                ..Default::default()
             }))
             .await
             .expect_err("a malformed request_id is rejected");
@@ -1447,6 +1487,7 @@ mod tests {
                 ..Default::default()
             }),
             request_id: REQUEST_ID.to_owned(),
+            ..Default::default()
         };
 
         let first = server
@@ -1481,6 +1522,7 @@ mod tests {
             .update_shipper(Request::new(UpdateShipperRequest {
                 shipper: Some(shipper),
                 update_mask: Some(field_mask(mask)),
+                ..Default::default()
             }))
             .await
             .expect("update_shipper succeeds")
@@ -1544,6 +1586,7 @@ mod tests {
                     ..Default::default()
                 }),
                 update_mask: Some(field_mask(&["display_name"])),
+                ..Default::default()
             }))
             .await
             .expect_err("blanking a required display_name is rejected");
@@ -1591,6 +1634,7 @@ mod tests {
                     ..Default::default()
                 }),
                 update_mask: Some(field_mask(&["display_name"])),
+                ..Default::default()
             }))
             .await
             .expect("update with a fresh etag succeeds")
@@ -1612,6 +1656,7 @@ mod tests {
                     ..Default::default()
                 }),
                 update_mask: Some(field_mask(&["display_name"])),
+                ..Default::default()
             }))
             .await
             .expect_err("a stale etag is rejected");
@@ -1653,6 +1698,7 @@ mod tests {
                     ..Default::default()
                 }),
                 update_mask: Some(field_mask(&["display_name"])),
+                ..Default::default()
             }))
             .await
             .expect_err("a malformed etag is rejected");
@@ -1678,6 +1724,7 @@ mod tests {
                     ..Default::default()
                 }),
                 update_mask: Some(field_mask(&["display_name"])),
+                ..Default::default()
             }))
             .await
             .expect("update succeeds")
@@ -1720,6 +1767,7 @@ mod tests {
             .create_shipper(Request::new(CreateShipperRequest {
                 shipper: Some(Shipper::default()),
                 request_id: String::new(),
+                ..Default::default()
             }))
             .await
             .expect_err("an empty display_name is rejected");
@@ -1804,6 +1852,7 @@ mod tests {
                 parent: PARENT.to_owned(),
                 shipment: Some(Shipment::default()),
                 request_id: String::new(),
+                ..Default::default()
             }))
             .await
             .expect_err("a shipment missing both endpoints is rejected");
@@ -1827,6 +1876,76 @@ mod tests {
             .expect("an ErrorInfo is attached (AIP-193 MUST)");
         assert_eq!(info.reason, "FIELD_REQUIRED");
         assert_eq!(info.domain, "freight.example.com");
+    }
+
+    #[tokio::test]
+    async fn create_shipper_validate_only_previews_without_persisting() {
+        // AIP-163: `validate_only` runs the full pipeline and returns the would-be
+        // shipper — a system-assigned name and a stamped etag — but stores nothing,
+        // so a later real create still mints a fresh shipper.
+        let server = FreightServer::new();
+        let preview = server
+            .create_shipper(Request::new(CreateShipperRequest {
+                shipper: Some(Shipper {
+                    display_name: "Acme".to_owned(),
+                    ..Default::default()
+                }),
+                validate_only: true,
+                ..Default::default()
+            }))
+            .await
+            .expect("a valid validate_only create returns the would-be shipper")
+            .into_inner();
+        // The preview is the would-be resource: the id is minted and the etag stamped.
+        assert!(preview.name.starts_with("shippers/"));
+        assert!(!preview.etag.is_empty());
+        // Nothing was committed.
+        assert!(server.storage.list_shippers().is_empty());
+
+        // A subsequent real create succeeds and is the only stored shipper.
+        let created = server
+            .create_shipper(Request::new(CreateShipperRequest {
+                shipper: Some(Shipper {
+                    display_name: "Acme".to_owned(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }))
+            .await
+            .expect("the real create succeeds")
+            .into_inner();
+        assert_eq!(server.storage.list_shippers().len(), 1);
+        // The preview did not reserve the id — the committed shipper has its own.
+        assert_ne!(preview.name, created.name);
+    }
+
+    #[tokio::test]
+    async fn validate_only_create_failure_is_byte_identical() {
+        // AIP-163: a request that would fail fails *identically* with or without
+        // the flag — same code, message, and AIP-193 detail bytes — because
+        // validation runs unconditionally before the commit gate.
+        let server = FreightServer::new();
+        let invalid = |validate_only| CreateShipmentRequest {
+            parent: PARENT.to_owned(),
+            shipment: Some(Shipment::default()),
+            validate_only,
+            ..Default::default()
+        };
+
+        let real = server
+            .create_shipment(Request::new(invalid(false)))
+            .await
+            .expect_err("the real create is rejected");
+        let preview = server
+            .create_shipment(Request::new(invalid(true)))
+            .await
+            .expect_err("the validate_only create is rejected identically");
+
+        assert_eq!(real.code(), preview.code());
+        assert_eq!(real.message(), preview.message());
+        // The AIP-193 detail payload (the BadRequest + ErrorInfo) is byte-for-byte
+        // the same — the flag does not branch the validation path.
+        assert_eq!(real.details(), preview.details());
     }
 
     /// Lists sites under `PARENT` carrying an AIP-160 `filter`, returning their
@@ -2076,6 +2195,7 @@ mod tests {
                     parent: PARENT.to_owned(),
                     site: Some(site),
                     request_id: String::new(),
+                    ..Default::default()
                 }))
                 .await
                 .expect("create_site succeeds")
@@ -2138,6 +2258,7 @@ mod tests {
                         ..Default::default()
                     }),
                     request_id: String::new(),
+                    ..Default::default()
                 }))
                 .await
                 .expect("create_site succeeds");
@@ -2182,6 +2303,7 @@ mod tests {
                     ..Default::default()
                 }),
                 request_id: String::new(),
+                ..Default::default()
             }))
             .await
             .expect("create_shipment succeeds")
@@ -2221,6 +2343,7 @@ mod tests {
                     ..Default::default()
                 }),
                 request_id: String::new(),
+                ..Default::default()
             }))
             .await
             .expect("create_shipment succeeds");

@@ -59,12 +59,23 @@ gc -d '{"shipper":{"display_name":"Acme"},"requestId":"'$RID'"}' 127.0.0.1:50051
 gc -d '{"shipper":{"display_name":"Other"},"requestId":"'$RID'"}' 127.0.0.1:50051 $SVC/CreateShipper
 # A malformed (non-UUID) id is InvalidArgument (reason REQUEST_ID_INVALID).
 gc -d '{"shipper":{"display_name":"Acme"},"requestId":"not-a-uuid"}' 127.0.0.1:50051 $SVC/CreateShipper
+# AIP-163 validate_only (#95): preview a create without committing. The full
+# validation pipeline runs and the would-be shipper comes back (a system-assigned
+# name + etag), but nothing is stored — ListShippers is unchanged afterwards, and
+# a request that would fail (here a missing display_name) fails identically with
+# the flag set.
+gc -d '{"shipper":{"display_name":"Preview"},"validateOnly":true}' 127.0.0.1:50051 $SVC/CreateShipper
+gc -d '{"shipper":{},"validateOnly":true}'                         127.0.0.1:50051 $SVC/CreateShipper
 # UpdateShipper applies an AIP-134 update_mask via the typed `fieldmask::update`
 # facade (#48): only `display_name` is masked, so it changes while the rest of the
 # stored shipper is left untouched. Omit `display_name` from the request with the
 # same mask and it is cleared instead. It also runs the AIP-154 read-modify-write
 # (#93): echo the etag you just read and the write succeeds, returning a *new* etag.
 gc -d '{"shipper":{"name":"shippers/$ID","display_name":"Acme Corp","etag":"$ETAG"},"updateMask":{"paths":["display_name"]}}' \
+                                            127.0.0.1:50051 $SVC/UpdateShipper
+# UpdateShipper honours validate_only too (#95): preview the merged shipper —
+# etag check, update mask, REQUIRED re-validation all run — without persisting it.
+gc -d '{"shipper":{"name":"shippers/$ID","display_name":"Preview","etag":"$ETAG"},"updateMask":{"paths":["display_name"]},"validateOnly":true}' \
                                             127.0.0.1:50051 $SVC/UpdateShipper
 # Replaying the now-stale etag is rejected with ABORTED (reason ETAG_MISMATCH) —
 # the optimistic-concurrency guard against a racing writer. A garbage etag is
@@ -282,12 +293,12 @@ wired up.
 | ----------------- | -------------------------------------------- | ------------ | ----------- |
 | `GetShipper`      | `resourcename` (validate) + generated `ShipperResourceName` (pattern match), `iam` (AIP-211 authorization → non-leaking `PERMISSION_DENIED` / `NOT_FOUND`-via-parent over the shared Policy store) | #4, #67, #82 | wired⁶ |
 | `ListShippers`    | `pagination` (offset page-token codec + request-checksum guard) | #6, #7 | wired² |
-| `CreateShipper`   | `resourceid` (generate), generated `ShipperResourceName` (format), `fieldbehavior` (clear OUTPUT_ONLY/IMMUTABLE, validate REQUIRED), `etag` (stamp the AIP-154 content etag), `requestid` (AIP-155 `request_id` validation + idempotent replay) | #5, #3, #59, #82, #93, #94 | wired⁸ |
-| `UpdateShipper`   | `fieldmask` (typed `update` over `update_mask`), `fieldbehavior` (copy OUTPUT_ONLY from existing, validate REQUIRED in mask), `etag` (AIP-154 freshness check + re-stamp) | #8, #48, #59, #93 | wired⁸ |
+| `CreateShipper`   | `resourceid` (generate), generated `ShipperResourceName` (format), `fieldbehavior` (clear OUTPUT_ONLY/IMMUTABLE, validate REQUIRED), `etag` (stamp the AIP-154 content etag), `requestid` (AIP-155 `request_id` validation + idempotent replay), AIP-163 `validate_only` preview | #5, #3, #59, #82, #93, #94, #95 | wired⁸⁹ |
+| `UpdateShipper`   | `fieldmask` (typed `update` over `update_mask`), `fieldbehavior` (copy OUTPUT_ONLY from existing, validate REQUIRED in mask), `etag` (AIP-154 freshness check + re-stamp), AIP-163 `validate_only` preview | #8, #48, #59, #93, #95 | wired⁸⁹ |
 | `DeleteShipper`   | `resourcename` (validate) + generated `ShipperResourceName` (pattern match), `etag` (AIP-154 freshness check) | #4, #82, #93 | wired⁸ |
-| `CreateSite`      | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `SiteResourceName` (format), `validation` (accumulate REQUIRED-field violations → AIP-193), `requestid` (AIP-155 idempotent replay) | #5, #3, #60, #82, #94 | wired       |
+| `CreateSite`      | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `SiteResourceName` (format), `validation` (accumulate REQUIRED-field violations → AIP-193), `requestid` (AIP-155 idempotent replay), AIP-163 `validate_only` preview | #5, #3, #60, #82, #94, #95 | wired⁹ |
 | `ListSites`       | `ordering` (parse/validate) + `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (filter + server-composed scope/soft-delete + `ORDER BY`/`LIMIT`/`OFFSET` → in-memory SQLite), with the in-memory `filtering` matcher pinned against SQLite | #9, #10, #6, #7, #11, #39, #40, #41, #42, #43, #92 | wired³ |
-| `CreateShipment`  | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `ShipmentResourceName` (format), `validation` (accumulate both REQUIRED endpoints → one AIP-193 response), `requestid` (AIP-155 idempotent replay) | #5, #3, #60, #82, #94 | wired⁴ |
+| `CreateShipment`  | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `ShipmentResourceName` (format), `validation` (accumulate both REQUIRED endpoints → one AIP-193 response), `requestid` (AIP-155 idempotent replay), AIP-163 `validate_only` preview | #5, #3, #60, #82, #94, #95 | wired⁴⁹ |
 | `ListShipments`   | `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (filter + server-composed scope/soft-delete → in-memory SQLite) | #6, #7, #43 | wired⁴ |
 | `IAMPolicy.GetIamPolicy` / `SetIamPolicy` | `iam` (Member validation + structural read-modify-write: dedupe/normalise, `etag` optimistic concurrency, conditions⟹version-3) over a decomposed SQLite policy store (iam-go's `iam_policy_bindings` schema) | #64, #65 | wired⁵ |
 | `IAMPolicy.TestIamPermissions` | `iam` + the opt-in cel-backed `eval` adapter (`aip::iam::eval`): role→permission expansion via an example-owned catalogue, Member matching, Condition evaluation | #66, #68 | wired⁷ |
@@ -417,6 +428,19 @@ can't piggyback). A stale token is `ABORTED` (re-read and retry), a malformed on
 `INVALID_ARGUMENT`, both via the crate's AIP-193 `From<Error>` (#16); an empty
 etag opts out (an unconditional write). Site and Shipment gain the same once
 their standard methods land.
+
+⁹ AIP-163 `validate_only` (#95): a flag on the create/update requests that runs
+the **full** validation pipeline — REQUIRED-field behavior, the
+`aip::validation::Validator` accumulator, resource-name and AIP-154 etag checks —
+and returns the resource that *would* result, but commits nothing (and mints no
+AIP-155 idempotency record), so a preview leaves the store untouched and a later
+real write still takes effect. It composes with the existing validation rather
+than forking a second path: a single `commit_unless_preview(req.validate_only, …)`
+gate wraps only the store write, so validation runs unconditionally before it and
+a request that would fail fails **byte-identically** (same AIP-193 details) with
+or without the flag. A create still mints its system-assigned id in the preview
+(returned, not stored). `DeleteShipper` and the unwired Site/Shipment standard
+methods do not carry it yet.
 
 ² Real offset pagination through the `pagination` page-token codec (#6), with the
 request-checksum guard (#7) that rejects a token when a non-pagination field

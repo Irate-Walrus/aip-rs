@@ -216,6 +216,12 @@ message CreateShipperRequest {
   // A random UUID is recommended. This request is only idempotent if a
   // `request_id` is provided. See: https://google.aip.dev/155.
   string request_id = 2 [(google.api.field_info).format = UUID4];
+
+  // If set, run the full validation pipeline and return the shipper that would
+  // be created, but do not persist it (and mint no idempotency record). The
+  // request fails identically to a real create if it would fail.
+  // See: https://google.aip.dev/163.
+  bool validate_only = 3;
 }
 
 // Request message for FreightService.UpdateShipper.
@@ -227,6 +233,12 @@ message UpdateShipperRequest {
 
   // The list of fields to be updated.
   google.protobuf.FieldMask update_mask = 2;
+
+  // If set, run the full validation pipeline and return the shipper that would
+  // result from the update, but do not persist it. The request fails
+  // identically to a real update if it would fail.
+  // See: https://google.aip.dev/163.
+  bool validate_only = 3;
 }
 
 // Request message for FreightService.DeleteShipper.
@@ -322,6 +334,12 @@ message CreateSiteRequest {
   // A random UUID is recommended. This request is only idempotent if a
   // `request_id` is provided. See: https://google.aip.dev/155.
   string request_id = 3 [(google.api.field_info).format = UUID4];
+
+  // If set, run the full validation pipeline and return the site that would be
+  // created, but do not persist it (and mint no idempotency record). The
+  // request fails identically to a real create if it would fail.
+  // See: https://google.aip.dev/163.
+  bool validate_only = 4;
 }
 
 // Request message for FreightService.UpdateSite.
@@ -431,6 +449,12 @@ message CreateShipmentRequest {
   // A random UUID is recommended. This request is only idempotent if a
   // `request_id` is provided. See: https://google.aip.dev/155.
   string request_id = 3 [(google.api.field_info).format = UUID4];
+
+  // If set, run the full validation pipeline and return the shipment that would
+  // be created, but do not persist it (and mint no idempotency record). The
+  // request fails identically to a real create if it would fail.
+  // See: https://google.aip.dev/163.
+  bool validate_only = 4;
 }
 
 // Request message for FreightService.UpdateShipment.
