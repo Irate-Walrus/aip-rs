@@ -153,12 +153,22 @@ impl FreightService for FreightServer {
         }
 
         // Unauthorized: shape the AIP-211 error without leaking existence (#67).
-        // The shipper exists ⇒ the canonical non-leaking `PERMISSION_DENIED`; it
-        // does not ⇒ the `NOT_FOUND`-via-parent fallback, which reveals the gap
-        // only to a caller that may read the parent collection's children and
-        // otherwise returns the same `PERMISSION_DENIED`.
+        // A shipper the authorized caller *could* see ⇒ the canonical non-leaking
+        // `PERMISSION_DENIED`; one that is absent — or hidden by soft delete — ⇒ the
+        // `NOT_FOUND`-via-parent fallback, which reveals the gap only to a caller
+        // that may read the parent collection's children and otherwise returns the
+        // same `PERMISSION_DENIED`. Gating on the same `show_deleted` visibility the
+        // authorized branch applies keeps a soft-deleted shipper no more
+        // discoverable to an unauthorized caller than to an authorized one
+        // (AIP-164 + #67): both branches treat a hidden shipper as absent.
         let permission = shipper_get_permission();
-        if self.storage.get_shipper(&name).is_some() {
+        let visible = self.storage.get_shipper(&name).is_some_and(|shipper| {
+            aip::softdelete::is_visible(
+                aip::softdelete::State::from_deleted(shipper.delete_time.is_some()),
+                req.show_deleted,
+            )
+        });
+        if visible {
             Err(aip::iam::authz::permission_denied(&permission, &name))
         } else {
             let parent_read = self.authorized(caller.as_ref(), SHIPPERS_COLLECTION);
@@ -2762,5 +2772,50 @@ mod tests {
             status.get_details_error_info().expect("ErrorInfo").reason,
             "IAM_RESOURCE_NOT_FOUND",
         );
+    }
+
+    #[tokio::test]
+    async fn soft_deleted_shipper_does_not_leak_existence_to_a_parent_reader() {
+        use tonic_types::StatusExt as _;
+
+        // #96 × #67: a soft-deleted shipper is hidden, so the unauthorized
+        // existence-leak branch must treat it the same way the authorized read does.
+        // A caller unauthorized on the shipper but able to read the parent collection
+        // learns the hidden shipper is *absent* (NOT_FOUND) rather than that it exists
+        // (PERMISSION_DENIED). Soft-delete the shipper, lock it to alice, grant bob
+        // the parent.
+        let server = FreightServer::new();
+        let created = create_shipper(&server, "Acme").await;
+        soft_delete_shipper(&server, &created.name).await;
+        lock_resource(&server, &created.name, &["user:alice@example.com"]);
+        lock_resource(&server, SHIPPERS_COLLECTION, &["user:bob@example.com"]);
+
+        // Without show_deleted the hidden shipper reads as absent: NOT_FOUND, the
+        // same answer an authorized caller would get — no existence tell.
+        let hidden = get_as(&server, &created.name, Some("user:bob@example.com"))
+            .await
+            .expect_err("a hidden soft-deleted shipper is reported absent");
+        assert_eq!(hidden.code(), tonic::Code::NotFound);
+        assert_eq!(
+            hidden.get_details_error_info().expect("ErrorInfo").reason,
+            "IAM_RESOURCE_NOT_FOUND",
+        );
+
+        // With show_deleted the shipper is visible, so the leak check treats it as
+        // existing: bob gets the non-leaking PERMISSION_DENIED, exactly as for a live
+        // shipper.
+        let mut request = Request::new(GetShipperRequest {
+            name: created.name.clone(),
+            show_deleted: true,
+        });
+        request.metadata_mut().insert(
+            CALLER_METADATA_KEY,
+            "user:bob@example.com".parse().expect("metadata value"),
+        );
+        let shown = server
+            .get_shipper(request)
+            .await
+            .expect_err("a visible shipper is denied, not revealed");
+        assert_eq!(shown.code(), tonic::Code::PermissionDenied);
     }
 }
