@@ -157,6 +157,13 @@ pub fn validate(policy: &Policy) -> Result<(), Error> {
 /// never parse it. The digest is a CRC32 over the encoded policy rendered as
 /// lowercase hex — the same content-digest idiom `aip-pagination`'s request
 /// checksum uses (a clone to clear the excluded field, then `crc32fast::hash`).
+///
+/// This is the **same digest scheme** the general-purpose `aip-etag` primitive
+/// (issue #93) applies to any resource via reflection. `aip-etag` additionally
+/// excludes `OUTPUT_ONLY` fields, but `google.iam.v1.Policy` carries none, so the
+/// two produce identical tokens for a Policy. This path stays a direct,
+/// reflection-free implementation over the concrete [`Policy`] type (no
+/// `prost-reflect`/`aip-etag` dependency on `aip-iam`; ADR-0001).
 pub fn compute_etag(policy: &Policy) -> Vec<u8> {
     let mut policy = policy.clone();
     policy.etag = Vec::new();

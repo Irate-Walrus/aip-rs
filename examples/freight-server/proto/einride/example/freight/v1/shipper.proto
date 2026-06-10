@@ -26,4 +26,10 @@ message Shipper {
   google.protobuf.Timestamp delete_time = 4 [(google.api.field_behavior) = OUTPUT_ONLY];
   // The display name of the shipper.
   string display_name = 5 [(google.api.field_behavior) = REQUIRED];
+  // An opaque checksum of the shipper's content (AIP-154). The server computes
+  // it from the other fields and returns it on every read; a client echoes it
+  // back on update/delete so a stale write (one racing a concurrent edit) is
+  // rejected instead of silently clobbering. Per AIP-154 it is a `string`, named
+  // `etag`, and carries no behavior annotation.
+  string etag = 6;
 }

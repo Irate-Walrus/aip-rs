@@ -237,6 +237,12 @@ message DeleteShipperRequest {
     (google.api.field_behavior) = REQUIRED,
     (google.api.resource_reference).type = "freight-example.einride.tech/Shipper"
   ];
+
+  // The current etag of the shipper (AIP-154). Unlike Update, Delete cannot
+  // piggyback on the resource's own `etag` field, so it carries one here. If
+  // provided and it does not match the stored shipper, deletion is blocked with
+  // an `ABORTED` error; if omitted, the delete is unconditional.
+  string etag = 2 [(google.api.field_behavior) = OPTIONAL];
 }
 
 // Request message for FreightService.GetSite.

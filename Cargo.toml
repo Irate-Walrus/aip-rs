@@ -35,6 +35,10 @@ aip-filtering    = { version = "0.1.0", path = "crates/aip-filtering" }
 # Opt-in via the umbrella's `iam` feature while the slice matures.
 aip-iam          = { version = "0.1.0", path = "crates/aip-iam" }
 aip-fieldbehavior = { version = "0.1.0", path = "crates/aip-fieldbehavior" }
+# AIP-154 content etags (issue #93): a CRC32 content digest over a resource,
+# excluding the etag field and OUTPUT_ONLY noise, plus the stale/malformed check.
+# Default-on via the umbrella's `etag` feature; generalizes the IAM Policy etag.
+aip-etag         = { version = "0.1.0", path = "crates/aip-etag" }
 # Field-violation accumulator (issue #60): collects per-field failures into one
 # AIP-193 error. Default-on via the umbrella's `validation` feature.
 aip-validation   = { version = "0.1.0", path = "crates/aip-validation" }

@@ -15,6 +15,7 @@ dependencies = [
 name = "aip"
 version = "0.1.0"
 dependencies = [
+ "aip-etag",
  "aip-fieldbehavior",
  "aip-fieldmask",
  "aip-filtering",
@@ -36,6 +37,20 @@ dependencies = [
  "aip-reflect",
  "aip-resourcename",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "aip-etag"
+version = "0.1.0"
+dependencies = [
+ "aip-fieldbehavior",
+ "crc32fast",
+ "prost",
+ "prost-reflect",
+ "test-fixtures",
+ "thiserror 2.0.18",
+ "tonic",
+ "tonic-types",
 ]
 
 [[package]]

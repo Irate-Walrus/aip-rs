@@ -150,14 +150,20 @@ async fn shipper_crud_with_update_mask() {
         .into_inner();
     assert_eq!(got, created);
 
+    // CreateShipper stamps an AIP-154 content etag the client echoes back to make
+    // the read-modify-write safe (#93).
+    assert!(!created.etag.is_empty(), "create stamps a content etag");
+
     // UpdateShipper with an AIP-134 update_mask: only `display_name` is named,
     // so it changes while the rest of the stored shipper (including OUTPUT_ONLY
-    // `create_time`) is left untouched.
+    // `create_time`) is left untouched. The etag just read is piggybacked back for
+    // the AIP-154 freshness check (#93), and the response carries a fresh one.
     let updated = freight
         .update_shipper(Request::new(UpdateShipperRequest {
             shipper: Some(Shipper {
                 name: created.name.clone(),
                 display_name: "Acme Corp".to_owned(),
+                etag: created.etag.clone(),
                 ..Default::default()
             }),
             update_mask: Some(prost_types::FieldMask {
@@ -175,6 +181,10 @@ async fn shipper_crud_with_update_mask() {
     assert_ne!(
         updated.update_time, created.update_time,
         "update_time must advance after a write"
+    );
+    assert_ne!(
+        updated.etag, created.etag,
+        "the content changed, so the etag advances"
     );
 
     // Masking `display_name` while the request carries no value would blank a
@@ -203,10 +213,13 @@ async fn shipper_crud_with_update_mask() {
         .expect("BadRequest is attached");
     assert_eq!(bad.field_violations[0].field, "display_name");
 
-    // DeleteShipper removes the shipper. A subsequent GetShipper is NOT_FOUND.
+    // DeleteShipper carries the current etag on the request (it can't piggyback on
+    // the resource); the fresh one permits the delete (#93). A subsequent
+    // GetShipper is NOT_FOUND.
     freight
         .delete_shipper(Request::new(DeleteShipperRequest {
             name: created.name.clone(),
+            etag: updated.etag.clone(),
         }))
         .await
         .expect("delete_shipper succeeds");
