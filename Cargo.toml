@@ -24,6 +24,9 @@ aip              = { version = "0.1.0", path = "crates/aip" }
 aip-proto        = { version = "0.1.0", path = "crates/aip-proto" }
 aip-resourcename = { version = "0.1.0", path = "crates/aip-resourcename" }
 aip-resourceid   = { version = "0.1.0", path = "crates/aip-resourceid" }
+# AIP-155 request_id validation + idempotency contract (issue #94). Pure
+# string/UUID work, no protobuf dependency, like aip-resourceid.
+aip-requestid    = { version = "0.1.0", path = "crates/aip-requestid" }
 aip-pagination   = { version = "0.1.0", path = "crates/aip-pagination" }
 aip-fieldmask    = { version = "0.1.0", path = "crates/aip-fieldmask" }
 aip-ordering     = { version = "0.1.0", path = "crates/aip-ordering" }

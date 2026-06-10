@@ -22,6 +22,7 @@ dependencies = [
  "aip-ordering",
  "aip-pagination",
  "aip-reflect",
+ "aip-requestid",
  "aip-resourceid",
  "aip-resourcename",
  "aip-sql",
@@ -68,6 +69,7 @@ name = "aip-filtering"
 version = "0.1.0"
 dependencies = [
  "aip-proto",
+ "prost",
  "prost-reflect",
  "test-fixtures",
  "thiserror 2.0.18",
@@ -137,6 +139,16 @@ dependencies = [
  "thiserror 2.0.18",
  "tonic",
  "tonic-types",
+]
+
+[[package]]
+name = "aip-requestid"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
+ "tonic",
+ "tonic-types",
+ "uuid",
 ]
 
 [[package]]

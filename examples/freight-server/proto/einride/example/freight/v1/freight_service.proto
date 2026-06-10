@@ -8,6 +8,7 @@ import "einride/example/freight/v1/site.proto";
 import "google/api/annotations.proto";
 import "google/api/client.proto";
 import "google/api/field_behavior.proto";
+import "google/api/field_info.proto";
 import "google/api/resource.proto";
 import "google/protobuf/field_mask.proto";
 
@@ -210,6 +211,11 @@ message ListShippersResponse {
 message CreateShipperRequest {
   // The shipper to create.
   Shipper shipper = 1 [(google.api.field_behavior) = REQUIRED];
+
+  // A unique identifier for this request. Restricted to 36 ASCII characters.
+  // A random UUID is recommended. This request is only idempotent if a
+  // `request_id` is provided. See: https://google.aip.dev/155.
+  string request_id = 2 [(google.api.field_info).format = UUID4];
 }
 
 // Request message for FreightService.UpdateShipper.
@@ -305,6 +311,11 @@ message CreateSiteRequest {
   ];
   // The site to create.
   Site site = 2 [(google.api.field_behavior) = REQUIRED];
+
+  // A unique identifier for this request. Restricted to 36 ASCII characters.
+  // A random UUID is recommended. This request is only idempotent if a
+  // `request_id` is provided. See: https://google.aip.dev/155.
+  string request_id = 3 [(google.api.field_info).format = UUID4];
 }
 
 // Request message for FreightService.UpdateSite.
@@ -409,6 +420,11 @@ message CreateShipmentRequest {
   ];
   // The shipment to create.
   Shipment shipment = 2 [(google.api.field_behavior) = REQUIRED];
+
+  // A unique identifier for this request. Restricted to 36 ASCII characters.
+  // A random UUID is recommended. This request is only idempotent if a
+  // `request_id` is provided. See: https://google.aip.dev/155.
+  string request_id = 3 [(google.api.field_info).format = UUID4];
 }
 
 // Request message for FreightService.UpdateShipment.

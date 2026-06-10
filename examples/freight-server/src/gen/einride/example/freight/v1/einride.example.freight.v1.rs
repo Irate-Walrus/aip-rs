@@ -229,6 +229,11 @@ pub struct CreateShipperRequest {
     /// The shipper to create.
     #[prost(message, optional, tag="1")]
     pub shipper: ::core::option::Option<Shipper>,
+    /// A unique identifier for this request. Restricted to 36 ASCII characters.
+    /// A random UUID is recommended. This request is only idempotent if a
+    /// `request_id` is provided. See: <https://google.aip.dev/155.>
+    #[prost(string, tag="2")]
+    pub request_id: ::prost::alloc::string::String,
 }
 /// Request message for FreightService.UpdateShipper.
 #[derive(::prost_reflect::ReflectMessage)]
@@ -337,6 +342,11 @@ pub struct CreateSiteRequest {
     /// The site to create.
     #[prost(message, optional, tag="2")]
     pub site: ::core::option::Option<Site>,
+    /// A unique identifier for this request. Restricted to 36 ASCII characters.
+    /// A random UUID is recommended. This request is only idempotent if a
+    /// `request_id` is provided. See: <https://google.aip.dev/155.>
+    #[prost(string, tag="3")]
+    pub request_id: ::prost::alloc::string::String,
 }
 /// Request message for FreightService.UpdateSite.
 #[derive(::prost_reflect::ReflectMessage)]
@@ -459,6 +469,11 @@ pub struct CreateShipmentRequest {
     /// The shipment to create.
     #[prost(message, optional, tag="2")]
     pub shipment: ::core::option::Option<Shipment>,
+    /// A unique identifier for this request. Restricted to 36 ASCII characters.
+    /// A random UUID is recommended. This request is only idempotent if a
+    /// `request_id` is provided. See: <https://google.aip.dev/155.>
+    #[prost(string, tag="3")]
+    pub request_id: ::prost::alloc::string::String,
 }
 /// Request message for FreightService.UpdateShipment.
 #[derive(::prost_reflect::ReflectMessage)]

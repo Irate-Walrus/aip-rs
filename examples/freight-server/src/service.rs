@@ -15,6 +15,7 @@ use aip::iam::{Member, Permission};
 use aip::ordering::OrderByRequest;
 use aip::pagination::{PageRequest, PageToken};
 use aip::validation::Validator;
+use prost::Message as _;
 use prost_reflect::{Kind, ReflectMessage};
 use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status};
@@ -190,8 +191,16 @@ impl FreightService for FreightServer {
         &self,
         request: Request<CreateShipperRequest>,
     ) -> Result<Response<Shipper>, Status> {
-        let mut shipper = request
-            .into_inner()
+        let req = request.into_inner();
+        // AIP-155 idempotency: a `request_id` makes the create safe to retry — a
+        // replay with the same id returns the original shipper instead of minting
+        // a second one. Fingerprint the request before its fields move out.
+        let request_id = req.request_id.clone();
+        let fingerprint = req.encode_to_vec();
+        if let Some(existing) = idempotent_lookup::<_, Shipper>(&self.storage, &request_id, &req)? {
+            return Ok(Response::new(existing));
+        }
+        let mut shipper = req
             .shipper
             .ok_or_else(|| Status::invalid_argument("shipper is required"))?;
         // Ignore any OUTPUT_ONLY or IMMUTABLE values the client sent (AIP-161).
@@ -217,6 +226,8 @@ impl FreightService for FreightServer {
         shipper.update_time = Some(ts);
         shipper.delete_time = None;
         self.storage.put_shipper(shipper.clone());
+        // Record the result so a retry carrying the same `request_id` replays it.
+        idempotent_record(&self.storage, &request_id, fingerprint, &shipper);
         Ok(Response::new(shipper))
     }
 
@@ -356,6 +367,13 @@ impl FreightService for FreightServer {
         request: Request<CreateSiteRequest>,
     ) -> Result<Response<Site>, Status> {
         let req = request.into_inner();
+        // AIP-155 idempotency, as in `create_shipper`: a `request_id` replay
+        // returns the original site rather than minting a second one.
+        let request_id = req.request_id.clone();
+        let fingerprint = req.encode_to_vec();
+        if let Some(existing) = idempotent_lookup::<_, Site>(&self.storage, &request_id, &req)? {
+            return Ok(Response::new(existing));
+        }
         validate_shipper_name("parent", &req.parent)?;
         let mut site = req
             .site
@@ -386,6 +404,7 @@ impl FreightService for FreightServer {
         site.update_time = Some(ts);
         site.delete_time = None;
         self.storage.put_site(site.clone());
+        idempotent_record(&self.storage, &request_id, fingerprint, &site);
         Ok(Response::new(site))
     }
 
@@ -462,6 +481,14 @@ impl FreightService for FreightServer {
         // `ListShipments` (#43) has something to filter and page. The other
         // shipment standard methods stay `Unimplemented` until their issues land.
         let req = request.into_inner();
+        // AIP-155 idempotency, as in `create_shipper`: a `request_id` replay
+        // returns the original shipment rather than minting a second one.
+        let request_id = req.request_id.clone();
+        let fingerprint = req.encode_to_vec();
+        if let Some(existing) = idempotent_lookup::<_, Shipment>(&self.storage, &request_id, &req)?
+        {
+            return Ok(Response::new(existing));
+        }
         validate_shipper_name("parent", &req.parent)?;
         let mut shipment = req
             .shipment
@@ -496,6 +523,7 @@ impl FreightService for FreightServer {
         shipment.update_time = Some(ts);
         shipment.delete_time = None;
         self.storage.put_shipment(shipment.clone());
+        idempotent_record(&self.storage, &request_id, fingerprint, &shipment);
         Ok(Response::new(shipment))
     }
 
@@ -820,6 +848,70 @@ fn shipper_get_permission() -> Permission {
         .expect("a static freight.shippers.get permission is well-formed")
 }
 
+/// AIP-155 idempotency pre-check for a create handler (issue #94).
+///
+/// Validates `request_id` (a malformed id is an AIP-193 `INVALID_ARGUMENT`) and
+/// resolves it against the server's cache of seen ids:
+/// - empty id ⇒ no idempotency requested, returns `Ok(None)` (proceed);
+/// - unseen id ⇒ `Ok(None)` (proceed, then [`idempotent_record`] the result);
+/// - same id + identical request ⇒ `Ok(Some(response))`, the recorded response
+///   decoded back into `Resp` — a safe retry replays rather than re-creates;
+/// - same id + different request ⇒ `Err` with the `REQUEST_ID_CONFLICT` status.
+///
+/// The recorded request is compared to the incoming one **structurally** (prost
+/// `PartialEq`), not byte-for-byte: a proto `map` field is a `HashMap` whose wire
+/// order is non-deterministic across encodes, so two identical requests can
+/// serialize to different bytes. Structural equality is order-independent, so a
+/// safe retry — even one carrying an `annotations` map — stays a Replayed rather
+/// than a false Conflict. The library names the
+/// [`Replay`](aip::requestid::Replay) outcomes; this server owns the storage and
+/// the comparison.
+fn idempotent_lookup<Req, Resp>(
+    storage: &Storage,
+    request_id: &str,
+    request: &Req,
+) -> Result<Option<Resp>, Status>
+where
+    Req: prost::Message + Default + PartialEq,
+    Resp: prost::Message + Default,
+{
+    if request_id.is_empty() {
+        return Ok(None);
+    }
+    aip::requestid::validate(request_id).map_err(Status::from)?;
+    let recorded = storage.idempotent_get(request_id);
+    let matches = recorded.as_ref().map(|record| {
+        Req::decode(record.request.as_slice())
+            .map(|stored| &stored == request)
+            .unwrap_or(false)
+    });
+    match aip::requestid::Replay::decide(matches) {
+        aip::requestid::Replay::New => Ok(None),
+        aip::requestid::Replay::Replayed => {
+            let record = recorded.expect("a recorded id ⇒ Replayed");
+            Ok(Some(
+                Resp::decode(record.response.as_slice()).expect("decode the recorded response"),
+            ))
+        }
+        aip::requestid::Replay::Conflict => Err(aip::requestid::conflict(request_id)),
+    }
+}
+
+/// Record a create's request + response under its `request_id`, so a later retry
+/// replays through [`idempotent_lookup`] (AIP-155, issue #94). A no-op for an
+/// empty id (no idempotency was requested).
+fn idempotent_record(
+    storage: &Storage,
+    request_id: &str,
+    fingerprint: Vec<u8>,
+    response: &impl prost::Message,
+) {
+    if request_id.is_empty() {
+        return;
+    }
+    storage.idempotent_put(request_id.to_owned(), fingerprint, response.encode_to_vec());
+}
+
 /// The standard `Unimplemented` status for a method that hasn't been wired yet.
 fn unimplemented(method: &str) -> Status {
     Status::unimplemented(format!(
@@ -876,6 +968,7 @@ mod tests {
             .create_site(Request::new(CreateSiteRequest {
                 parent: PARENT.to_owned(),
                 site: Some(site),
+                request_id: String::new(),
             }))
             .await
             .expect("create_site succeeds");
@@ -892,6 +985,7 @@ mod tests {
                     state: state as i32,
                     ..Default::default()
                 }),
+                request_id: String::new(),
             }))
             .await
             .expect("create_site succeeds");
@@ -917,6 +1011,7 @@ mod tests {
                     tags: tags.iter().map(|t| t.to_string()).collect(),
                     ..Default::default()
                 }),
+                request_id: String::new(),
             }))
             .await
             .expect("create_site succeeds");
@@ -1189,10 +1284,166 @@ mod tests {
                     display_name: display_name.to_owned(),
                     ..Default::default()
                 }),
+                request_id: String::new(),
             }))
             .await
             .expect("create_shipper succeeds")
             .into_inner()
+    }
+
+    /// A well-formed UUIDv4 `request_id`, the AIP-155 format the create requests
+    /// advertise (`(google.api.field_info).format = UUID4`).
+    const REQUEST_ID: &str = "49351204-7395-47f1-9681-d48044b48c71";
+
+    #[tokio::test]
+    async fn create_shipper_replays_on_same_request_id() {
+        // AIP-155 (#94): a retry carrying the same `request_id` returns the
+        // original shipper instead of minting a second one — a safe retry.
+        let server = FreightServer::new();
+        let request = CreateShipperRequest {
+            shipper: Some(Shipper {
+                display_name: "Acme".to_owned(),
+                ..Default::default()
+            }),
+            request_id: REQUEST_ID.to_owned(),
+        };
+
+        let first = server
+            .create_shipper(Request::new(request.clone()))
+            .await
+            .expect("first create succeeds")
+            .into_inner();
+        let replay = server
+            .create_shipper(Request::new(request))
+            .await
+            .expect("a replay with the same request_id succeeds")
+            .into_inner();
+
+        // Same resource (name and all): the second call created nothing new.
+        assert_eq!(first, replay);
+        assert_eq!(server.storage.list_shippers().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn create_shipper_rejects_conflicting_request_id() {
+        use tonic_types::StatusExt as _;
+
+        // AIP-155 (#94): the same `request_id` replayed with a *different* body is
+        // a reuse conflict — rejected with ALREADY_EXISTS + AIP-193 details, and
+        // the conflicting shipper is never created.
+        let server = FreightServer::new();
+        server
+            .create_shipper(Request::new(CreateShipperRequest {
+                shipper: Some(Shipper {
+                    display_name: "Acme".to_owned(),
+                    ..Default::default()
+                }),
+                request_id: REQUEST_ID.to_owned(),
+            }))
+            .await
+            .expect("first create succeeds");
+
+        let status = server
+            .create_shipper(Request::new(CreateShipperRequest {
+                shipper: Some(Shipper {
+                    display_name: "Other".to_owned(),
+                    ..Default::default()
+                }),
+                request_id: REQUEST_ID.to_owned(),
+            }))
+            .await
+            .expect_err("a conflicting body under the same request_id is rejected");
+
+        assert_eq!(status.code(), tonic::Code::AlreadyExists);
+        let info = status
+            .get_details_error_info()
+            .expect("an ErrorInfo is attached (AIP-193 MUST)");
+        assert_eq!(info.reason, "REQUEST_ID_CONFLICT");
+        assert_eq!(info.domain, "aip-rs");
+        assert_eq!(
+            info.metadata.get("request_id").map(String::as_str),
+            Some(REQUEST_ID)
+        );
+        // Only the first shipper exists.
+        assert_eq!(server.storage.list_shippers().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn create_shipper_rejects_malformed_request_id() {
+        use tonic_types::StatusExt as _;
+
+        // AIP-155 / AIP-193: a `request_id` that is not a UUID is INVALID_ARGUMENT,
+        // carrying the `REQUEST_ID_INVALID` reason; nothing is created.
+        let server = FreightServer::new();
+        let status = server
+            .create_shipper(Request::new(CreateShipperRequest {
+                shipper: Some(Shipper {
+                    display_name: "Acme".to_owned(),
+                    ..Default::default()
+                }),
+                request_id: "not-a-uuid".to_owned(),
+            }))
+            .await
+            .expect_err("a malformed request_id is rejected");
+
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        let info = status
+            .get_details_error_info()
+            .expect("an ErrorInfo is attached (AIP-193 MUST)");
+        assert_eq!(info.reason, "REQUEST_ID_INVALID");
+        assert_eq!(info.domain, "aip-rs");
+        assert!(server.storage.list_shippers().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_site_replays_with_annotations_map() {
+        // Regression: the replay check compares the request *structurally*, not
+        // byte-for-byte. A `Site.annotations` map is a HashMap whose wire order is
+        // non-deterministic across encodes, so a byte comparison could reject a
+        // legitimate retry as a conflict. With several keys, a safe retry must
+        // still replay (same site, no second create).
+        let server = FreightServer::new();
+        let request = CreateSiteRequest {
+            parent: PARENT.to_owned(),
+            site: Some(Site {
+                display_name: "Depot".to_owned(),
+                annotations: [
+                    ("owner", "ops"),
+                    ("region", "west"),
+                    ("tier", "gold"),
+                    ("zone", "a1"),
+                ]
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+                ..Default::default()
+            }),
+            request_id: REQUEST_ID.to_owned(),
+        };
+
+        let first = server
+            .create_site(Request::new(request.clone()))
+            .await
+            .expect("first create succeeds")
+            .into_inner();
+        let replay = server
+            .create_site(Request::new(request))
+            .await
+            .expect("a replay carrying an annotations map is not a false conflict")
+            .into_inner();
+
+        assert_eq!(first, replay);
+    }
+
+    #[tokio::test]
+    async fn create_shipper_without_request_id_is_not_idempotent() {
+        // An absent `request_id` keeps the AIP-148 default: each call mints a new
+        // system-assigned name, so two creates are two distinct shippers.
+        let server = FreightServer::new();
+        let a = create_shipper(&server, "Acme").await;
+        let b = create_shipper(&server, "Acme").await;
+        assert_ne!(a.name, b.name);
+        assert_eq!(server.storage.list_shippers().len(), 2);
     }
 
     /// Applies an `UpdateShipper` with the given incoming shipper and mask,
@@ -1301,6 +1552,7 @@ mod tests {
         let status = server
             .create_shipper(Request::new(CreateShipperRequest {
                 shipper: Some(Shipper::default()),
+                request_id: String::new(),
             }))
             .await
             .expect_err("an empty display_name is rejected");
@@ -1384,6 +1636,7 @@ mod tests {
             .create_shipment(Request::new(CreateShipmentRequest {
                 parent: PARENT.to_owned(),
                 shipment: Some(Shipment::default()),
+                request_id: String::new(),
             }))
             .await
             .expect_err("a shipment missing both endpoints is rejected");
@@ -1655,6 +1908,7 @@ mod tests {
                 .create_site(Request::new(CreateSiteRequest {
                     parent: PARENT.to_owned(),
                     site: Some(site),
+                    request_id: String::new(),
                 }))
                 .await
                 .expect("create_site succeeds")
@@ -1716,6 +1970,7 @@ mod tests {
                         display_name: "Theirs".to_owned(),
                         ..Default::default()
                     }),
+                    request_id: String::new(),
                 }))
                 .await
                 .expect("create_site succeeds");
@@ -1759,6 +2014,7 @@ mod tests {
                         .collect(),
                     ..Default::default()
                 }),
+                request_id: String::new(),
             }))
             .await
             .expect("create_shipment succeeds")
@@ -1797,6 +2053,7 @@ mod tests {
                     destination_site: site.to_owned(),
                     ..Default::default()
                 }),
+                request_id: String::new(),
             }))
             .await
             .expect("create_shipment succeeds");

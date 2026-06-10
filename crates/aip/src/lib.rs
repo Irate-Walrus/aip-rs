@@ -13,6 +13,14 @@ pub use aip_resourcename as resourcename;
 #[cfg(feature = "resourceid")]
 pub use aip_resourceid as resourceid;
 
+/// AIP-155 request identification (issue #94) — default-on via the `requestid`
+/// feature: validate a `request_id` and name the idempotency [`Replay`] contract
+/// a server enforces over its own cache of seen ids.
+///
+/// [`Replay`]: aip_requestid::Replay
+#[cfg(feature = "requestid")]
+pub use aip_requestid as requestid;
+
 #[cfg(feature = "pagination")]
 pub use aip_pagination as pagination;
 

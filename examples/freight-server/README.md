@@ -43,6 +43,20 @@ gc() { grpcurl -plaintext "$@"; }
 gc -d '{"shipper":{"display_name":"Acme"}}' 127.0.0.1:50051 $SVC/CreateShipper
 gc -d '{}'                                  127.0.0.1:50051 $SVC/ListShippers
 gc -d '{"name":"shippers/$ID"}'             127.0.0.1:50051 $SVC/GetShipper
+
+# AIP-155 idempotency (#94): a `request_id` (a UUID) makes the create safe to
+# retry. Send the SAME request twice with the same id — the second call replays
+# the first response (same name) instead of minting a second shipper, so a
+# network retry can't double-create. `aip::requestid` validates the id and names
+# the replay/conflict contract; the demo keeps the seen ids in memory.
+RID=$(uuidgen)
+gc -d '{"shipper":{"display_name":"Acme"},"requestId":"'$RID'"}' 127.0.0.1:50051 $SVC/CreateShipper
+gc -d '{"shipper":{"display_name":"Acme"},"requestId":"'$RID'"}' 127.0.0.1:50051 $SVC/CreateShipper  # same name back
+# Reusing that id with a DIFFERENT body is rejected with AlreadyExists +
+# AIP-193 details (reason REQUEST_ID_CONFLICT / domain aip-rs).
+gc -d '{"shipper":{"display_name":"Other"},"requestId":"'$RID'"}' 127.0.0.1:50051 $SVC/CreateShipper
+# A malformed (non-UUID) id is InvalidArgument (reason REQUEST_ID_INVALID).
+gc -d '{"shipper":{"display_name":"Acme"},"requestId":"not-a-uuid"}' 127.0.0.1:50051 $SVC/CreateShipper
 # UpdateShipper applies an AIP-134 update_mask via the typed `fieldmask::update`
 # facade (#48): only `display_name` is masked, so it changes while the rest of the
 # stored shipper is left untouched. Omit `display_name` from the request with the
@@ -258,12 +272,12 @@ wired up.
 | ----------------- | -------------------------------------------- | ------------ | ----------- |
 | `GetShipper`      | `resourcename` (validate) + generated `ShipperResourceName` (pattern match), `iam` (AIP-211 authorization → non-leaking `PERMISSION_DENIED` / `NOT_FOUND`-via-parent over the shared Policy store) | #4, #67, #82 | wired⁶ |
 | `ListShippers`    | `pagination` (offset page-token codec + request-checksum guard) | #6, #7 | wired² |
-| `CreateShipper`   | `resourceid` (generate), generated `ShipperResourceName` (format), `fieldbehavior` (clear OUTPUT_ONLY/IMMUTABLE, validate REQUIRED) | #5, #3, #59, #82 | wired       |
+| `CreateShipper`   | `resourceid` (generate), generated `ShipperResourceName` (format), `fieldbehavior` (clear OUTPUT_ONLY/IMMUTABLE, validate REQUIRED), `requestid` (AIP-155 `request_id` validation + idempotent replay) | #5, #3, #59, #82, #94 | wired       |
 | `UpdateShipper`   | `fieldmask` (typed `update` over `update_mask`), `fieldbehavior` (copy OUTPUT_ONLY from existing, validate REQUIRED in mask) | #8, #48, #59 | wired       |
 | `DeleteShipper`   | `resourcename` (validate) + generated `ShipperResourceName` (pattern match) | #4, #82      | wired       |
-| `CreateSite`      | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `SiteResourceName` (format), `validation` (accumulate REQUIRED-field violations → AIP-193) | #5, #3, #60, #82 | wired       |
+| `CreateSite`      | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `SiteResourceName` (format), `validation` (accumulate REQUIRED-field violations → AIP-193), `requestid` (AIP-155 idempotent replay) | #5, #3, #60, #82, #94 | wired       |
 | `ListSites`       | `ordering` (parse/validate) + `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (filter + server-composed scope/soft-delete + `ORDER BY`/`LIMIT`/`OFFSET` → in-memory SQLite), with the in-memory `filtering` matcher pinned against SQLite | #9, #10, #6, #7, #11, #39, #40, #41, #42, #43, #92 | wired³ |
-| `CreateShipment`  | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `ShipmentResourceName` (format), `validation` (accumulate both REQUIRED endpoints → one AIP-193 response) | #5, #3, #60, #82 | wired⁴ |
+| `CreateShipment`  | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `ShipmentResourceName` (format), `validation` (accumulate both REQUIRED endpoints → one AIP-193 response), `requestid` (AIP-155 idempotent replay) | #5, #3, #60, #82, #94 | wired⁴ |
 | `ListShipments`   | `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (filter + server-composed scope/soft-delete → in-memory SQLite) | #6, #7, #43 | wired⁴ |
 | `IAMPolicy.GetIamPolicy` / `SetIamPolicy` | `iam` (Member validation + structural read-modify-write: dedupe/normalise, `etag` optimistic concurrency, conditions⟹version-3) over a decomposed SQLite policy store (iam-go's `iam_policy_bindings` schema) | #64, #65 | wired⁵ |
 | `IAMPolicy.TestIamPermissions` | `iam` + the opt-in cel-backed `eval` adapter (`aip::iam::eval`): role→permission expansion via an example-owned catalogue, Member matching, Condition evaluation | #66, #68 | wired⁷ |

@@ -10,6 +10,7 @@ authors.workspace = true
 [dependencies]
 aip-resourcename = { workspace = true, optional = true }
 aip-resourceid   = { workspace = true, optional = true }
+aip-requestid    = { workspace = true, optional = true }
 aip-pagination   = { workspace = true, optional = true }
 aip-fieldmask    = { workspace = true, optional = true }
 aip-ordering     = { workspace = true, optional = true }
@@ -25,10 +26,11 @@ aip-iam           = { workspace = true, optional = true }
 aip-sql           = { workspace = true, optional = true }
 
 [features]
-default = ["resourcename", "resourceid", "pagination", "fieldmask", "ordering", "filtering", "fieldbehavior", "validation", "reflect"]
+default = ["resourcename", "resourceid", "requestid", "pagination", "fieldmask", "ordering", "filtering", "fieldbehavior", "validation", "reflect"]
 
 resourcename  = ["dep:aip-resourcename"]
 resourceid    = ["dep:aip-resourceid"]
+requestid     = ["dep:aip-requestid"]
 pagination    = ["dep:aip-pagination"]
 fieldmask     = ["dep:aip-fieldmask"]
 ordering      = ["dep:aip-ordering"]
@@ -47,6 +49,7 @@ sql           = ["dep:aip-sql"]
 tonic = [
     "aip-resourcename?/tonic",
     "aip-resourceid?/tonic",
+    "aip-requestid?/tonic",
     "aip-pagination?/tonic",
     "aip-fieldmask?/tonic",
     "aip-ordering?/tonic",
