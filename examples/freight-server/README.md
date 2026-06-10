@@ -27,15 +27,15 @@ toolchain for the bundled SQLite.
 
 ## Try it
 
-With [`grpcurl`](https://github.com/fullstorydev/grpcurl) (no server reflection,
-so hand it the committed descriptor set — the same `buf build` image that backs
-the server's runtime reflection, which also lets grpcurl decode the AIP-193
-error details below):
+With [`grpcurl`](https://github.com/fullstorydev/grpcurl) (the server speaks
+gRPC server reflection, so no `-import-path`/`-proto` flags needed):
 
 ```sh
-PROTOSET=examples/freight-server/src/descriptor_set.binpb
+# List all served services via reflection.
+grpcurl -plaintext 127.0.0.1:50051 list
+
 SVC=einride.example.freight.v1.FreightService
-gc() { grpcurl -protoset "$PROTOSET" -plaintext "$@"; }
+gc() { grpcurl -plaintext "$@"; }
 
 # CreateShipper mints a system-assigned id (a UUIDv4, per AIP-148), so it
 # returns a name like `shippers/daf1cb3e-f33b-43f1-81cc-e65fda51efa5`. Copy that
@@ -127,12 +127,10 @@ gc -d '{"parent":"shippers/$ID","filter":"annotations:priority"}'               
 ```
 
 The `google.iam.v1.IAMPolicy` service (#64, #65) stores a **Policy** keyed by
-**Resource name** and mutates it through the `aip::iam` structural helpers. It
-is in the same descriptor set (via the `proto/imports.proto` anchor), so the
-same protoset serves it:
+**Resource name** and mutates it through the `aip::iam` structural helpers:
 
 ```sh
-ic() { grpcurl -protoset "$PROTOSET" -plaintext "$@"; }
+ic() { grpcurl -plaintext "$@"; }
 IAMSVC=google.iam.v1.IAMPolicy
 
 # GetIamPolicy on a resource with no policy returns an empty Policy (not an error).
@@ -461,5 +459,5 @@ einride sources used by
 `google.*` is vendored anymore — those imports resolve from the BSR at the
 commit pinned in [`buf.lock`](buf.lock). The `proto/imports.proto` anchor pulls
 `google/iam/v1/iam_policy.proto` (the served `IAMPolicy` service, which no
-freight proto imports) and `google/rpc/error_details.proto` (so the grpcurl
-protoset decodes AIP-193 details) into the closure.
+freight proto imports) and `google/rpc/error_details.proto` (so the reflection
+service exposes those descriptors and grpcurl can decode AIP-193 details) into the closure.
