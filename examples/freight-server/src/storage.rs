@@ -32,6 +32,26 @@ pub struct Storage {
     shippers: Mutex<BTreeMap<String, Shipper>>,
     sites: Mutex<rusqlite::Connection>,
     shipments: Mutex<rusqlite::Connection>,
+    /// AIP-155 idempotency cache (issue #94): per `request_id`, the wire bytes of
+    /// the create request that first used it and of the response it produced.
+    /// The library validates the id and names the [`Replay`] contract; this cache
+    /// of seen ids is the server's, matching the parse-and-validate boundary.
+    /// In-memory and process-lifetime like the rest of the store.
+    ///
+    /// [`Replay`]: aip::requestid::Replay
+    idempotency: Mutex<BTreeMap<String, IdempotentRecord>>,
+}
+
+/// One AIP-155 idempotency-cache entry (issue #94): the wire bytes of the create
+/// request that first used a `request_id` and of the response it produced. The
+/// `request` bytes let the server tell an identical replay from a conflicting
+/// reuse; the `response` bytes are decoded back into the resource on a replay.
+#[derive(Clone)]
+pub struct IdempotentRecord {
+    /// Wire bytes of the create request that first used the `request_id`.
+    pub request: Vec<u8>,
+    /// Wire bytes of the response that request produced.
+    pub response: Vec<u8>,
 }
 
 impl Default for Storage {
@@ -48,7 +68,26 @@ impl Storage {
             shippers: Mutex::new(BTreeMap::new()),
             sites: Mutex::new(new_sites_db()),
             shipments: Mutex::new(new_shipments_db()),
+            idempotency: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// The [`IdempotentRecord`] recorded the first time `request_id` was used on a
+    /// create, or `None` if it is unseen (AIP-155, issue #94). The caller compares
+    /// the stored request against the incoming one to tell an identical replay
+    /// from a conflicting reuse.
+    pub fn idempotent_get(&self, request_id: &str) -> Option<IdempotentRecord> {
+        self.idempotency.lock().unwrap().get(request_id).cloned()
+    }
+
+    /// Record a create's request + response wire bytes under `request_id`, so a
+    /// later retry with the same id replays the response instead of acting again
+    /// (AIP-155, issue #94).
+    pub fn idempotent_put(&self, request_id: String, request: Vec<u8>, response: Vec<u8>) {
+        self.idempotency
+            .lock()
+            .unwrap()
+            .insert(request_id, IdempotentRecord { request, response });
     }
 
     /// Fetch a shipper by resource name.
