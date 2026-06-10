@@ -24,14 +24,10 @@
 
 use crate::{Constant, Expr, Filter};
 
-/// The generated CEL `google.api.expr.v1alpha1` types (`Expr`, `Constant`,
-/// `CheckedExpr`, ...). `build.rs` emits this module into `OUT_DIR` only when the
-/// `cel-proto` feature is on; `google.protobuf.*` well-known types map to
-/// [`prost_types`]. Generated code, so linting is relaxed here.
-pub mod cel {
-    #![allow(clippy::all, missing_docs, rustdoc::all)]
-    include!(concat!(env!("OUT_DIR"), "/google.api.expr.v1alpha1.rs"));
-}
+/// The CEL `google.api.expr.v1alpha1` types (`Expr`, `Constant`,
+/// `CheckedExpr`, ...), sourced from `aip-proto` (ADR-0011) rather than a
+/// crate-local `build.rs`. Generated code, so linting is relaxed here.
+pub use aip_proto::google::api::expr::v1alpha1 as cel;
 
 /// A CEL proto could not be represented in the native AST.
 ///

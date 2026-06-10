@@ -1,0 +1,18 @@
+# buf module for test-fixtures (ADR-0011).
+#
+# The module owns only the fixture `einride.example.*` protos (freight + syntax);
+# every `google.*` import is a managed dependency from the BSR, pinned by digest
+# in `buf.lock` (the same digest `aip-proto` pins). No Rust is generated here —
+# `buf build` alone produces the import-complete FileDescriptorSet that backs the
+# runtime DescriptorPool in `src/lib.rs`.
+version: v2
+modules:
+  - path: proto
+deps:
+  - buf.build/googleapis/googleapis
+lint:
+  use:
+    - STANDARD
+breaking:
+  use:
+    - PACKAGE
