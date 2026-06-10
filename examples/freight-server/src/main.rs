@@ -8,6 +8,8 @@
 //! Run with `cargo run -p freight-server`; it listens on `127.0.0.1:50051`.
 
 mod iam;
+#[cfg(test)]
+mod integration_tests;
 mod proto;
 mod service;
 mod storage;
