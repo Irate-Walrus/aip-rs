@@ -38,6 +38,14 @@ pub struct Storage {
     /// of seen ids is the server's, matching the parse-and-validate boundary.
     /// In-memory and process-lifetime like the rest of the store.
     ///
+    /// The lookup and the record are two separate lock acquisitions (the create
+    /// work between them touches no shared state), so two *concurrent* creates
+    /// with the same brand-new `request_id` can both miss and both proceed — the
+    /// demo does not reserve an id across the whole handler. A production cache
+    /// would close that window (a unique key on the seen-id row, or a reservation
+    /// like [`PolicyStore::set_checked`]'s single-lock read-modify-write);
+    /// AIP-155 leaves the timeframe and concurrency policy to the service.
+    ///
     /// [`Replay`]: aip::requestid::Replay
     idempotency: Mutex<BTreeMap<String, IdempotentRecord>>,
 }

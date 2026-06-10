@@ -197,9 +197,7 @@ impl FreightService for FreightServer {
         // a second one. Fingerprint the request before its fields move out.
         let request_id = req.request_id.clone();
         let fingerprint = req.encode_to_vec();
-        if let Some(existing) =
-            idempotent_lookup::<Shipper>(&self.storage, &request_id, &fingerprint)?
-        {
+        if let Some(existing) = idempotent_lookup::<_, Shipper>(&self.storage, &request_id, &req)? {
             return Ok(Response::new(existing));
         }
         let mut shipper = req
@@ -373,8 +371,7 @@ impl FreightService for FreightServer {
         // returns the original site rather than minting a second one.
         let request_id = req.request_id.clone();
         let fingerprint = req.encode_to_vec();
-        if let Some(existing) = idempotent_lookup::<Site>(&self.storage, &request_id, &fingerprint)?
-        {
+        if let Some(existing) = idempotent_lookup::<_, Site>(&self.storage, &request_id, &req)? {
             return Ok(Response::new(existing));
         }
         validate_shipper_name("parent", &req.parent)?;
@@ -488,8 +485,7 @@ impl FreightService for FreightServer {
         // returns the original shipment rather than minting a second one.
         let request_id = req.request_id.clone();
         let fingerprint = req.encode_to_vec();
-        if let Some(existing) =
-            idempotent_lookup::<Shipment>(&self.storage, &request_id, &fingerprint)?
+        if let Some(existing) = idempotent_lookup::<_, Shipment>(&self.storage, &request_id, &req)?
         {
             return Ok(Response::new(existing));
         }
@@ -862,22 +858,33 @@ fn shipper_get_permission() -> Permission {
 ///   decoded back into `Resp` — a safe retry replays rather than re-creates;
 /// - same id + different request ⇒ `Err` with the `REQUEST_ID_CONFLICT` status.
 ///
-/// `fingerprint` is the wire bytes of the incoming request, captured before its
-/// fields are moved out; the library names the [`Replay`](aip::requestid::Replay)
-/// outcomes, this server owns the storage and the byte comparison.
-fn idempotent_lookup<Resp: prost::Message + Default>(
+/// The recorded request is compared to the incoming one **structurally** (prost
+/// `PartialEq`), not byte-for-byte: a proto `map` field is a `HashMap` whose wire
+/// order is non-deterministic across encodes, so two identical requests can
+/// serialize to different bytes. Structural equality is order-independent, so a
+/// safe retry — even one carrying an `annotations` map — stays a Replayed rather
+/// than a false Conflict. The library names the
+/// [`Replay`](aip::requestid::Replay) outcomes; this server owns the storage and
+/// the comparison.
+fn idempotent_lookup<Req, Resp>(
     storage: &Storage,
     request_id: &str,
-    fingerprint: &[u8],
-) -> Result<Option<Resp>, Status> {
+    request: &Req,
+) -> Result<Option<Resp>, Status>
+where
+    Req: prost::Message + Default + PartialEq,
+    Resp: prost::Message + Default,
+{
     if request_id.is_empty() {
         return Ok(None);
     }
     aip::requestid::validate(request_id).map_err(Status::from)?;
     let recorded = storage.idempotent_get(request_id);
-    let matches = recorded
-        .as_ref()
-        .map(|record| record.request.as_slice() == fingerprint);
+    let matches = recorded.as_ref().map(|record| {
+        Req::decode(record.request.as_slice())
+            .map(|stored| &stored == request)
+            .unwrap_or(false)
+    });
     match aip::requestid::Replay::decide(matches) {
         aip::requestid::Replay::New => Ok(None),
         aip::requestid::Replay::Replayed => {
@@ -1386,6 +1393,46 @@ mod tests {
         assert_eq!(info.reason, "REQUEST_ID_INVALID");
         assert_eq!(info.domain, "aip-rs");
         assert!(server.storage.list_shippers().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_site_replays_with_annotations_map() {
+        // Regression: the replay check compares the request *structurally*, not
+        // byte-for-byte. A `Site.annotations` map is a HashMap whose wire order is
+        // non-deterministic across encodes, so a byte comparison could reject a
+        // legitimate retry as a conflict. With several keys, a safe retry must
+        // still replay (same site, no second create).
+        let server = FreightServer::new();
+        let request = CreateSiteRequest {
+            parent: PARENT.to_owned(),
+            site: Some(Site {
+                display_name: "Depot".to_owned(),
+                annotations: [
+                    ("owner", "ops"),
+                    ("region", "west"),
+                    ("tier", "gold"),
+                    ("zone", "a1"),
+                ]
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+                ..Default::default()
+            }),
+            request_id: REQUEST_ID.to_owned(),
+        };
+
+        let first = server
+            .create_site(Request::new(request.clone()))
+            .await
+            .expect("first create succeeds")
+            .into_inner();
+        let replay = server
+            .create_site(Request::new(request))
+            .await
+            .expect("a replay carrying an annotations map is not a false conflict")
+            .into_inner();
+
+        assert_eq!(first, replay);
     }
 
     #[tokio::test]
