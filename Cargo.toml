@@ -39,6 +39,11 @@ aip-fieldbehavior = { version = "0.1.0", path = "crates/aip-fieldbehavior" }
 # excluding the etag field and OUTPUT_ONLY noise, plus the stale/malformed check.
 # Default-on via the umbrella's `etag` feature; generalizes the IAM Policy etag.
 aip-etag         = { version = "0.1.0", path = "crates/aip-etag" }
+# AIP-164 soft delete / undelete state rules + the AIP-165 purge contract (issue
+# #96): value-based (a State over delete_time presence), so no datastore or
+# reflection dependency, like aip-requestid. Default-on via the umbrella's
+# `softdelete` feature.
+aip-softdelete   = { version = "0.1.0", path = "crates/aip-softdelete" }
 # Field-violation accumulator (issue #60): collects per-field failures into one
 # AIP-193 error. Default-on via the umbrella's `validation` feature.
 aip-validation   = { version = "0.1.0", path = "crates/aip-validation" }

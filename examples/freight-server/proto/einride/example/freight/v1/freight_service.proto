@@ -70,6 +70,21 @@ service FreightService {
     option (google.api.method_signature) = "name";
   }
 
+  // Undelete a shipper.
+  //
+  // Recovers a shipper soft-deleted by `DeleteShipper`, clearing its
+  // `delete_time`. Undeleting a shipper that is not soft-deleted fails with
+  // `ALREADY_EXISTS`.
+  //
+  // See: https://google.aip.dev/164 (Soft delete).
+  rpc UndeleteShipper(UndeleteShipperRequest) returns (Shipper) {
+    option (google.api.http) = {
+      post: "/v1/{name=shippers/*}:undelete"
+      body: "*"
+    };
+    option (google.api.method_signature) = "name";
+  }
+
   // Get a site.
   //
   // See: https://google.aip.dev/131 (Standard methods: Get).
@@ -180,6 +195,10 @@ message GetShipperRequest {
     (google.api.field_behavior) = REQUIRED,
     (google.api.resource_reference).type = "freight-example.einride.tech/Shipper"
   ];
+
+  // If true, the shipper is returned even when it has been soft-deleted
+  // (AIP-164); otherwise a soft-deleted shipper is reported as `NOT_FOUND`.
+  bool show_deleted = 2;
 }
 
 // Request message for FreightService.ListShippers.
@@ -193,6 +212,10 @@ message ListShippersRequest {
   // [ListShippersResponse.next_page_token][einride.example.freight.v1.ListShippersResponse.next_page_token]
   // returned from the previous call to `ListShippers` method.
   string page_token = 2;
+
+  // If true, soft-deleted shippers (AIP-164) are included in the results;
+  // otherwise they are omitted.
+  bool show_deleted = 3;
 }
 
 // Response message for FreightService.ListShippers.
@@ -255,6 +278,16 @@ message DeleteShipperRequest {
   // provided and it does not match the stored shipper, deletion is blocked with
   // an `ABORTED` error; if omitted, the delete is unconditional.
   string etag = 2 [(google.api.field_behavior) = OPTIONAL];
+}
+
+// Request message for FreightService.UndeleteShipper.
+message UndeleteShipperRequest {
+  // The resource name of the shipper to undelete.
+  // Format: shippers/{shipper}
+  string name = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (google.api.resource_reference).type = "freight-example.einride.tech/Shipper"
+  ];
 }
 
 // Request message for FreightService.GetSite.

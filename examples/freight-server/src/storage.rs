@@ -108,17 +108,15 @@ impl Storage {
         self.shippers.lock().unwrap().values().cloned().collect()
     }
 
-    /// Insert or overwrite a shipper, keyed by its `name`.
+    /// Insert or overwrite a shipper, keyed by its `name`. Soft delete (AIP-164)
+    /// stamps a `delete_time` and re-puts the shipper rather than removing it, so
+    /// it stays addressable for `GetShipper`/`ListShippers` with `show_deleted`
+    /// and recoverable by `UndeleteShipper` (#96) — there is no shipper removal.
     pub fn put_shipper(&self, shipper: Shipper) {
         self.shippers
             .lock()
             .unwrap()
             .insert(shipper.name.clone(), shipper);
-    }
-
-    /// Remove a shipper by name, returning it if it existed.
-    pub fn remove_shipper(&self, name: &str) -> Option<Shipper> {
-        self.shippers.lock().unwrap().remove(name)
     }
 
     /// Insert or overwrite a site, keyed by its `name`. The full site is stored as

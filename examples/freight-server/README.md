@@ -83,8 +83,23 @@ gc -d '{"shipper":{"name":"shippers/$ID","display_name":"Preview","etag":"$ETAG"
 gc -d '{"shipper":{"name":"shippers/$ID","display_name":"Clobber","etag":"$ETAG"},"updateMask":{"paths":["display_name"]}}' \
                                             127.0.0.1:50051 $SVC/UpdateShipper
 # DeleteShipper carries the etag on the request (it can't piggyback on the
-# resource): the current etag permits the delete, a stale one is ABORTED.
+# resource): the current etag permits the delete, a stale one is ABORTED. The
+# delete is a *soft* delete (AIP-164, #96): it stamps `delete_time` and keeps the
+# record, returning the shipper rather than removing it.
 gc -d '{"name":"shippers/$ID","etag":"$ETAG"}' 127.0.0.1:50051 $SVC/DeleteShipper
+# A soft-deleted shipper is now hidden: a plain GetShipper is NOT_FOUND (reason
+# SOFT_DELETE_NOT_FOUND), and ListShippers omits it — `aip::softdelete` owns the
+# visibility rule and its AIP-193 mapping.
+gc -d '{"name":"shippers/$ID"}'                127.0.0.1:50051 $SVC/GetShipper
+gc -d '{}'                                     127.0.0.1:50051 $SVC/ListShippers
+# Pass `showDeleted` to see it again — on the Get and in the List.
+gc -d '{"name":"shippers/$ID","showDeleted":true}' 127.0.0.1:50051 $SVC/GetShipper
+gc -d '{"showDeleted":true}'                       127.0.0.1:50051 $SVC/ListShippers
+# UndeleteShipper clears the stamp; the shipper is live and visible again.
+# Undeleting a shipper that is *not* deleted is ALREADY_EXISTS (reason
+# SOFT_DELETE_NOT_DELETED) — there is nothing to recover.
+gc -d '{"name":"shippers/$ID"}'                127.0.0.1:50051 $SVC/UndeleteShipper
+gc -d '{"name":"shippers/$ID"}'                127.0.0.1:50051 $SVC/GetShipper
 ```
 
 Sites live under a shipper, and `ListSites` honors an AIP-132 `order_by`.
@@ -291,11 +306,12 @@ wired up.
 
 | Method            | aip-rs primitive(s)                          | Issue        | Status      |
 | ----------------- | -------------------------------------------- | ------------ | ----------- |
-| `GetShipper`      | `resourcename` (validate) + generated `ShipperResourceName` (pattern match), `iam` (AIP-211 authorization → non-leaking `PERMISSION_DENIED` / `NOT_FOUND`-via-parent over the shared Policy store) | #4, #67, #82 | wired⁶ |
-| `ListShippers`    | `pagination` (offset page-token codec + request-checksum guard) | #6, #7 | wired² |
+| `GetShipper`      | `resourcename` (validate) + generated `ShipperResourceName` (pattern match), `iam` (AIP-211 authorization → non-leaking `PERMISSION_DENIED` / `NOT_FOUND`-via-parent over the shared Policy store), `softdelete` (AIP-164 `show_deleted` visibility gating) | #4, #67, #82, #96 | wired⁶¹⁰ |
+| `ListShippers`    | `pagination` (offset page-token codec + request-checksum guard) + `softdelete` (AIP-164 `show_deleted` filtering) | #6, #7, #96 | wired²¹⁰ |
 | `CreateShipper`   | `resourceid` (generate), generated `ShipperResourceName` (format), `fieldbehavior` (clear OUTPUT_ONLY/IMMUTABLE, validate REQUIRED), `etag` (stamp the AIP-154 content etag), `requestid` (AIP-155 `request_id` validation + idempotent replay), AIP-163 `validate_only` preview | #5, #3, #59, #82, #93, #94, #95 | wired⁸⁹ |
 | `UpdateShipper`   | `fieldmask` (typed `update` over `update_mask`), `fieldbehavior` (copy OUTPUT_ONLY from existing, validate REQUIRED in mask), `etag` (AIP-154 freshness check + re-stamp), AIP-163 `validate_only` preview | #8, #48, #59, #93, #95 | wired⁸⁹ |
-| `DeleteShipper`   | `resourcename` (validate) + generated `ShipperResourceName` (pattern match), `etag` (AIP-154 freshness check) | #4, #82, #93 | wired⁸ |
+| `DeleteShipper`   | `resourcename` (validate) + generated `ShipperResourceName` (pattern match), `etag` (AIP-154 freshness check), `softdelete` (AIP-164 soft delete — stamp `delete_time`, keep the record) | #4, #82, #93, #96 | wired⁸¹⁰ |
+| `UndeleteShipper` | `resourcename` (validate) + generated `ShipperResourceName` (pattern match), `softdelete` (AIP-164 undelete — clear `delete_time` after confirming the shipper is soft-deleted, else `ALREADY_EXISTS`) | #96 | wired¹⁰ |
 | `CreateSite`      | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `SiteResourceName` (format), `validation` (accumulate REQUIRED-field violations → AIP-193), `requestid` (AIP-155 idempotent replay), AIP-163 `validate_only` preview | #5, #3, #60, #82, #94, #95 | wired⁹ |
 | `ListSites`       | `ordering` (parse/validate) + `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (filter + server-composed scope/soft-delete + `ORDER BY`/`LIMIT`/`OFFSET` → in-memory SQLite), with the in-memory `filtering` matcher pinned against SQLite | #9, #10, #6, #7, #11, #39, #40, #41, #42, #43, #92 | wired³ |
 | `CreateShipment`  | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `ShipmentResourceName` (format), `validation` (accumulate both REQUIRED endpoints → one AIP-193 response), `requestid` (AIP-155 idempotent replay), AIP-163 `validate_only` preview | #5, #3, #60, #82, #94, #95 | wired⁴⁹ |
@@ -441,6 +457,25 @@ a request that would fail fails **byte-identically** (same AIP-193 details) with
 or without the flag. A create still mints its system-assigned id in the preview
 (returned, not stored). `DeleteShipper` and the unwired Site/Shipment standard
 methods do not carry it yet.
+
+¹⁰ Soft delete (AIP-164, #96) over the `aip::softdelete` primitive, which owns the
+state rules and their AIP-193 mappings while the example keeps the storage.
+`DeleteShipper` is now a **soft** delete: it stamps the OUTPUT_ONLY `delete_time`
+and re-puts the shipper instead of removing it (the content `etag` is unchanged,
+since `compute_etag` excludes OUTPUT_ONLY fields), so it can be recovered; a second
+delete of an already-hidden shipper is `NOT_FOUND` (this demo has no
+`allow_missing`). `GetShipper` / `ListShippers` gate visibility on a `show_deleted`
+flag through one rule — a soft-deleted shipper is hidden (`NOT_FOUND`, reason
+`SOFT_DELETE_NOT_FOUND`) unless `show_deleted` is set — applied as a `List` filter
+(`is_visible`) and a `Get`/`Delete` error (`check_visible`). `UndeleteShipper`
+clears the stamp after `check_deleted` confirms the shipper is soft-deleted;
+undeleting a live one is `ALREADY_EXISTS` (reason `SOFT_DELETE_NOT_DELETED`).
+Shippers live in the in-memory map, so their `show_deleted` filtering runs in
+memory; the SQL-backed `ListSites` / `ListShipments` already compose `delete_time
+IS NULL` as a `Predicate` (#43) and are unchanged. The crate also defines the
+AIP-165 purge contract — a required `filter`, a `force` preview/execute decision,
+and the count/sample shape — which a future criteria-based Purge RPC over the
+SQL-backed collections would use.
 
 ² Real offset pagination through the `pagination` page-token codec (#6), with the
 request-checksum guard (#7) that rejects a token when a non-pagination field

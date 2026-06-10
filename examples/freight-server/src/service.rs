@@ -26,8 +26,8 @@ use crate::proto::einride::example::freight::v1::{
     DeleteShipperRequest, DeleteSiteRequest, GetShipmentRequest, GetShipperRequest, GetSiteRequest,
     ListShipmentsRequest, ListShipmentsResponse, ListShippersRequest, ListShippersResponse,
     ListSitesRequest, ListSitesResponse, Shipment, ShipmentResourceName, Shipper,
-    ShipperResourceName, Site, SiteResourceName, UpdateShipmentRequest, UpdateShipperRequest,
-    UpdateSiteRequest,
+    ShipperResourceName, Site, SiteResourceName, UndeleteShipperRequest, UpdateShipmentRequest,
+    UpdateShipperRequest, UpdateSiteRequest,
 };
 use crate::storage::{PolicyStore, Storage};
 
@@ -129,26 +129,46 @@ impl FreightService for FreightServer {
         // an example-owned credential carried in request metadata; a real server
         // derives the principal from authenticated transport instead.
         let caller = caller_member(request.metadata());
-        let name = request.into_inner().name;
+        let req = request.into_inner();
+        let name = req.name;
 
         if self.authorized(caller.as_ref(), &name) {
             // Authorized: a missing shipper is an honest `NOT_FOUND` (the caller is
             // allowed to know), and a malformed name is the usual `INVALID_ARGUMENT`.
             validate_shipper_name("name", &name)?;
-            return self
+            let shipper = self
                 .storage
                 .get_shipper(&name)
-                .map(Response::new)
-                .ok_or_else(|| Status::not_found(format!("shipper `{name}` not found")));
+                .ok_or_else(|| Status::not_found(format!("shipper `{name}` not found")))?;
+            // AIP-164: a soft-deleted shipper is hidden unless `show_deleted` was
+            // set — a hidden one is `NOT_FOUND`, indistinguishable from a name that
+            // never existed. The visibility rule (and its AIP-193 mapping) lives in
+            // `aip::softdelete`; the `delete_time` stamp is the soft-delete state.
+            aip::softdelete::check_visible(
+                aip::softdelete::State::from_deleted(shipper.delete_time.is_some()),
+                req.show_deleted,
+                &name,
+            )?;
+            return Ok(Response::new(shipper));
         }
 
         // Unauthorized: shape the AIP-211 error without leaking existence (#67).
-        // The shipper exists ⇒ the canonical non-leaking `PERMISSION_DENIED`; it
-        // does not ⇒ the `NOT_FOUND`-via-parent fallback, which reveals the gap
-        // only to a caller that may read the parent collection's children and
-        // otherwise returns the same `PERMISSION_DENIED`.
+        // A shipper the authorized caller *could* see ⇒ the canonical non-leaking
+        // `PERMISSION_DENIED`; one that is absent — or hidden by soft delete — ⇒ the
+        // `NOT_FOUND`-via-parent fallback, which reveals the gap only to a caller
+        // that may read the parent collection's children and otherwise returns the
+        // same `PERMISSION_DENIED`. Gating on the same `show_deleted` visibility the
+        // authorized branch applies keeps a soft-deleted shipper no more
+        // discoverable to an unauthorized caller than to an authorized one
+        // (AIP-164 + #67): both branches treat a hidden shipper as absent.
         let permission = shipper_get_permission();
-        if self.storage.get_shipper(&name).is_some() {
+        let visible = self.storage.get_shipper(&name).is_some_and(|shipper| {
+            aip::softdelete::is_visible(
+                aip::softdelete::State::from_deleted(shipper.delete_time.is_some()),
+                req.show_deleted,
+            )
+        });
+        if visible {
             Err(aip::iam::authz::permission_denied(&permission, &name))
         } else {
             let parent_read = self.authorized(caller.as_ref(), SHIPPERS_COLLECTION);
@@ -170,7 +190,23 @@ impl FreightService for FreightServer {
         // against that checksum (rejecting a request that changed mid-pagination),
         // and resolves the page size; an empty token starts at offset 0.
         let page = parse_page(&req)?;
-        let mut shippers = self.storage.list_shippers();
+        // AIP-164: soft-deleted shippers are dropped unless `show_deleted` was set.
+        // `show_deleted` is a non-pagination field, so `parse_page`'s request
+        // checksum covers it — flipping it mid-pagination rejects the stale token.
+        // The visibility rule is the same `aip::softdelete` primitive `GetShipper`
+        // uses; here it filters the in-memory listing before the page is sliced, so
+        // page boundaries are computed over exactly the visible shippers.
+        let mut shippers: Vec<Shipper> = self
+            .storage
+            .list_shippers()
+            .into_iter()
+            .filter(|shipper| {
+                aip::softdelete::is_visible(
+                    aip::softdelete::State::from_deleted(shipper.delete_time.is_some()),
+                    req.show_deleted,
+                )
+            })
+            .collect();
         let total = shippers.len();
         let start = usize::try_from(page.token.offset).unwrap_or(0).min(total);
         let end = start.saturating_add(page.size).min(total);
@@ -309,22 +345,65 @@ impl FreightService for FreightServer {
         request: Request<DeleteShipperRequest>,
     ) -> Result<Response<Shipper>, Status> {
         let req = request.into_inner();
-        // Soft delete (AIP-164) is deferred; this is a hard delete.
         validate_shipper_name("name", &req.name)?;
-        // AIP-154 freshness check (#93): a Delete can't piggyback the etag on the
-        // resource, so it rides on the request. Look up the shipper (a missing one
-        // is `NOT_FOUND`, which takes precedence) and verify the supplied etag — a
-        // stale token is `ABORTED`, a malformed one `INVALID_ARGUMENT` (AIP-193); an
-        // empty etag makes the delete unconditional.
+        // Look up the shipper; a missing one is `NOT_FOUND`, which takes precedence.
         let existing = self
             .storage
             .get_shipper(&req.name)
             .ok_or_else(|| Status::not_found(format!("shipper `{}` not found", req.name)))?;
+        // AIP-164: a delete targets a live shipper. An already-soft-deleted one is
+        // hidden — `NOT_FOUND` — since this demo does not implement `allow_missing`;
+        // the same `show_deleted = false` visibility rule the Get path applies gives
+        // exactly that, so a double delete is rejected rather than re-stamped.
+        aip::softdelete::check_visible(
+            aip::softdelete::State::from_deleted(existing.delete_time.is_some()),
+            false,
+            &req.name,
+        )?;
+        // AIP-154 freshness check (#93): a Delete can't piggyback the etag on the
+        // resource, so it rides on the request. A stale token is `ABORTED`, a
+        // malformed one `INVALID_ARGUMENT` (AIP-193); an empty etag makes the delete
+        // unconditional.
         aip::etag::check_etag(&req.etag, &existing)?;
-        // Existence was just established, so the removal returns the same record;
-        // hand `existing` back as the deleted resource.
-        self.storage.remove_shipper(&req.name);
-        Ok(Response::new(existing))
+        // AIP-164 soft delete: stamp `delete_time` and keep the record (so it can be
+        // undeleted) rather than removing it. `delete_time` / `update_time` are
+        // OUTPUT_ONLY, so the content etag (`aip::etag`) is unchanged — the same
+        // token still addresses the now-deleted shipper.
+        let mut shipper = existing;
+        let ts = now();
+        shipper.delete_time = Some(ts);
+        shipper.update_time = Some(ts);
+        self.storage.put_shipper(shipper.clone());
+        Ok(Response::new(shipper))
+    }
+
+    async fn undelete_shipper(
+        &self,
+        request: Request<UndeleteShipperRequest>,
+    ) -> Result<Response<Shipper>, Status> {
+        let req = request.into_inner();
+        validate_shipper_name("name", &req.name)?;
+        // Undelete operates on the soft-deleted record, so the shipper is fetched
+        // regardless of its delete state; a name that was never created is
+        // `NOT_FOUND`.
+        let existing = self
+            .storage
+            .get_shipper(&req.name)
+            .ok_or_else(|| Status::not_found(format!("shipper `{}` not found", req.name)))?;
+        // AIP-164 undelete precondition: the shipper must actually be soft-deleted.
+        // Undeleting a live one is `ALREADY_EXISTS` via the crate's AIP-193 mapping.
+        aip::softdelete::check_deleted(
+            aip::softdelete::State::from_deleted(existing.delete_time.is_some()),
+            &req.name,
+        )?;
+        // Clear the deletion stamp and restamp `update_time`; the shipper is live
+        // again. The content etag is unchanged (OUTPUT_ONLY fields are excluded), so
+        // the token a prior read returned still addresses the recovered shipper.
+        let mut shipper = existing;
+        shipper.delete_time = None;
+        shipper.update_time = Some(now());
+        self.storage.put_shipper(shipper.clone());
+        Ok(Response::new(shipper))
     }
 
     // ----- Site: not yet wired (will mirror the Shipper handlers) -----
@@ -1601,7 +1680,10 @@ mod tests {
 
         // The rejected update never reached storage: the stored display_name stands.
         let stored = server
-            .get_shipper(Request::new(GetShipperRequest { name }))
+            .get_shipper(Request::new(GetShipperRequest {
+                name,
+                ..Default::default()
+            }))
             .await
             .expect("get_shipper succeeds")
             .into_inner();
@@ -1666,6 +1748,7 @@ mod tests {
         let stored = server
             .get_shipper(Request::new(GetShipperRequest {
                 name: created.name.clone(),
+                ..Default::default()
             }))
             .await
             .expect("get_shipper succeeds")
@@ -1736,7 +1819,8 @@ mod tests {
             .expect_err("a stale etag blocks the delete");
         assert_eq!(status.code(), tonic::Code::Aborted);
 
-        // The fresh etag permits the delete, and the shipper is gone.
+        // The fresh etag permits the delete; the shipper is now soft-deleted and so
+        // hidden from a plain Get (AIP-164).
         server
             .delete_shipper(Request::new(DeleteShipperRequest {
                 name: created.name.clone(),
@@ -1745,10 +1829,167 @@ mod tests {
             .await
             .expect("a fresh etag permits the delete");
         let gone = server
-            .get_shipper(Request::new(GetShipperRequest { name: created.name }))
+            .get_shipper(Request::new(GetShipperRequest {
+                name: created.name,
+                ..Default::default()
+            }))
             .await
-            .expect_err("the deleted shipper is gone");
+            .expect_err("the soft-deleted shipper is hidden");
         assert_eq!(gone.code(), tonic::Code::NotFound);
+    }
+
+    /// Soft-deletes `name` with an unconditional (empty-etag) delete and returns
+    /// the response — the shipper carrying its fresh `delete_time` stamp.
+    async fn soft_delete_shipper(server: &FreightServer, name: &str) -> Shipper {
+        server
+            .delete_shipper(Request::new(DeleteShipperRequest {
+                name: name.to_owned(),
+                etag: String::new(),
+            }))
+            .await
+            .expect("delete_shipper succeeds")
+            .into_inner()
+    }
+
+    #[tokio::test]
+    async fn soft_delete_hides_then_show_deleted_reveals_then_undelete_restores() {
+        // The full AIP-164 lifecycle the README demonstrates: delete → invisible →
+        // show_deleted visible → undelete → visible again (#96).
+        let server = FreightServer::new();
+        let created = create_shipper(&server, "Acme").await;
+        let name = created.name.clone();
+
+        // Delete is a soft delete: the response carries a `delete_time` and the
+        // shipper survives in storage.
+        let deleted = soft_delete_shipper(&server, &name).await;
+        assert!(
+            deleted.delete_time.is_some(),
+            "a soft delete stamps delete_time",
+        );
+
+        // A plain Get no longer sees it (hidden ⇒ NOT_FOUND).
+        let hidden = server
+            .get_shipper(Request::new(GetShipperRequest {
+                name: name.clone(),
+                show_deleted: false,
+            }))
+            .await
+            .expect_err("a soft-deleted shipper is hidden without show_deleted");
+        assert_eq!(hidden.code(), tonic::Code::NotFound);
+
+        // With show_deleted the soft-deleted shipper is returned, delete_time and all.
+        let revealed = server
+            .get_shipper(Request::new(GetShipperRequest {
+                name: name.clone(),
+                show_deleted: true,
+            }))
+            .await
+            .expect("show_deleted reveals the soft-deleted shipper")
+            .into_inner();
+        assert_eq!(revealed.name, name);
+        assert!(revealed.delete_time.is_some());
+
+        // Undelete clears the stamp; the shipper is live and visible again.
+        let restored = server
+            .undelete_shipper(Request::new(UndeleteShipperRequest { name: name.clone() }))
+            .await
+            .expect("undelete restores the shipper")
+            .into_inner();
+        assert!(
+            restored.delete_time.is_none(),
+            "undelete clears delete_time",
+        );
+        let live = server
+            .get_shipper(Request::new(GetShipperRequest {
+                name: name.clone(),
+                show_deleted: false,
+            }))
+            .await
+            .expect("the undeleted shipper is visible again")
+            .into_inner();
+        assert_eq!(live.name, name);
+        assert!(live.delete_time.is_none());
+    }
+
+    #[tokio::test]
+    async fn undelete_of_a_live_shipper_is_already_exists() {
+        // AIP-164: undelete operates only on a soft-deleted resource; a live one has
+        // nothing to recover, so it is ALREADY_EXISTS (the `aip::softdelete` mapping).
+        let server = FreightServer::new();
+        let created = create_shipper(&server, "Acme").await;
+        let status = server
+            .undelete_shipper(Request::new(UndeleteShipperRequest { name: created.name }))
+            .await
+            .expect_err("undeleting a live shipper is rejected");
+        assert_eq!(status.code(), tonic::Code::AlreadyExists);
+    }
+
+    #[tokio::test]
+    async fn undelete_of_a_missing_shipper_is_not_found() {
+        // A name that was never created has nothing to undelete: NOT_FOUND takes
+        // precedence over the deleted-state precondition.
+        let server = FreightServer::new();
+        let status = server
+            .undelete_shipper(Request::new(UndeleteShipperRequest {
+                name: "shippers/nope".to_owned(),
+            }))
+            .await
+            .expect_err("undeleting a missing shipper is rejected");
+        assert_eq!(status.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn delete_of_an_already_soft_deleted_shipper_is_not_found() {
+        // Without allow_missing, a second delete targets a resource that is already
+        // hidden, so it is NOT_FOUND (#96) rather than a no-op re-stamp.
+        let server = FreightServer::new();
+        let created = create_shipper(&server, "Acme").await;
+        soft_delete_shipper(&server, &created.name).await;
+        let status = server
+            .delete_shipper(Request::new(DeleteShipperRequest {
+                name: created.name,
+                etag: String::new(),
+            }))
+            .await
+            .expect_err("a second delete finds the shipper already gone");
+        assert_eq!(status.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn list_shippers_honours_show_deleted() {
+        // AIP-164: ListShippers omits soft-deleted shippers by default and includes
+        // them under show_deleted (#96).
+        let server = FreightServer::new();
+        let live = create_shipper(&server, "Live").await;
+        let doomed = create_shipper(&server, "Doomed").await;
+        soft_delete_shipper(&server, &doomed.name).await;
+
+        // Default: only the live shipper is listed.
+        let default_names = list_shipper_names(&server, false).await;
+        assert_eq!(default_names, vec![live.name.clone()]);
+
+        // show_deleted: both the live and the soft-deleted shipper are listed.
+        let mut all_names = list_shipper_names(&server, true).await;
+        all_names.sort();
+        let mut expected = vec![live.name, doomed.name];
+        expected.sort();
+        assert_eq!(all_names, expected);
+    }
+
+    /// Lists every shipper's resource name with the given `show_deleted`.
+    async fn list_shipper_names(server: &FreightServer, show_deleted: bool) -> Vec<String> {
+        server
+            .list_shippers(Request::new(ListShippersRequest {
+                show_deleted,
+                ..Default::default()
+            }))
+            .await
+            .expect("list_shippers succeeds")
+            .into_inner()
+            .shippers
+            .into_iter()
+            .map(|shipper| shipper.name)
+            .collect()
     }
 
     #[tokio::test]
@@ -2418,6 +2659,7 @@ mod tests {
     ) -> Result<Shipper, Status> {
         let mut request = Request::new(GetShipperRequest {
             name: name.to_owned(),
+            ..Default::default()
         });
         if let Some(caller) = caller {
             request
@@ -2530,5 +2772,50 @@ mod tests {
             status.get_details_error_info().expect("ErrorInfo").reason,
             "IAM_RESOURCE_NOT_FOUND",
         );
+    }
+
+    #[tokio::test]
+    async fn soft_deleted_shipper_does_not_leak_existence_to_a_parent_reader() {
+        use tonic_types::StatusExt as _;
+
+        // #96 × #67: a soft-deleted shipper is hidden, so the unauthorized
+        // existence-leak branch must treat it the same way the authorized read does.
+        // A caller unauthorized on the shipper but able to read the parent collection
+        // learns the hidden shipper is *absent* (NOT_FOUND) rather than that it exists
+        // (PERMISSION_DENIED). Soft-delete the shipper, lock it to alice, grant bob
+        // the parent.
+        let server = FreightServer::new();
+        let created = create_shipper(&server, "Acme").await;
+        soft_delete_shipper(&server, &created.name).await;
+        lock_resource(&server, &created.name, &["user:alice@example.com"]);
+        lock_resource(&server, SHIPPERS_COLLECTION, &["user:bob@example.com"]);
+
+        // Without show_deleted the hidden shipper reads as absent: NOT_FOUND, the
+        // same answer an authorized caller would get — no existence tell.
+        let hidden = get_as(&server, &created.name, Some("user:bob@example.com"))
+            .await
+            .expect_err("a hidden soft-deleted shipper is reported absent");
+        assert_eq!(hidden.code(), tonic::Code::NotFound);
+        assert_eq!(
+            hidden.get_details_error_info().expect("ErrorInfo").reason,
+            "IAM_RESOURCE_NOT_FOUND",
+        );
+
+        // With show_deleted the shipper is visible, so the leak check treats it as
+        // existing: bob gets the non-leaking PERMISSION_DENIED, exactly as for a live
+        // shipper.
+        let mut request = Request::new(GetShipperRequest {
+            name: created.name.clone(),
+            show_deleted: true,
+        });
+        request.metadata_mut().insert(
+            CALLER_METADATA_KEY,
+            "user:bob@example.com".parse().expect("metadata value"),
+        );
+        let shown = server
+            .get_shipper(request)
+            .await
+            .expect_err("a visible shipper is denied, not revealed");
+        assert_eq!(shown.code(), tonic::Code::PermissionDenied);
     }
 }
