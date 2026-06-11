@@ -25,3 +25,10 @@ impl ::aip_pagination::PageRequest for ListSitesRequest {
         self.skip
     }
 }
+
+/// AIP-132 ordering accessor, generated from `ListSitesRequest`'s field shape.
+impl ::aip_ordering::OrderByRequest for ListSitesRequest {
+    fn order_by(&self) -> &str {
+        &self.order_by
+    }
+}

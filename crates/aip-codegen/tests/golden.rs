@@ -29,8 +29,8 @@ fn page_request(message_name: &str, has_skip: bool) -> RequestDescriptor {
 /// The freight inputs, mirroring `examples/freight-server`: `shipper.proto`
 /// (one variable) and `site.proto` (a parent + child variable) declare the
 /// resources, and `freight_service.proto` — no resources at all — carries the
-/// paginated List requests (`ListSitesRequest` with `skip`, `ListShippersRequest`
-/// without).
+/// paginated List requests (`ListSitesRequest` with `skip` and `order_by`,
+/// `ListShippersRequest` without either).
 fn freight_inputs() -> Vec<GenInput> {
     vec![
         GenInput {
@@ -54,7 +54,12 @@ fn freight_inputs() -> Vec<GenInput> {
             resources: vec![],
             requests: vec![
                 page_request("ListShippersRequest", false),
-                page_request("ListSitesRequest", true),
+                // `ListSites` honors an AIP-132 `order_by`, so it earns both the
+                // `PageRequest` (with `skip`) and `OrderByRequest` impls.
+                RequestDescriptor {
+                    has_order_by: true,
+                    ..page_request("ListSitesRequest", true)
+                },
                 // A non-paginated request contributes nothing.
                 RequestDescriptor {
                     message_name: "GetShipperRequest".to_owned(),

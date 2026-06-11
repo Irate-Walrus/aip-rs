@@ -101,12 +101,14 @@ fn run(request: CodeGeneratorRequest) -> CodeGeneratorResponse {
 /// `parameter` (buf's `opt:` entries, comma-joined `key=value` pairs). All
 /// default **off**; an unrecognized key or a value other than `true`/`false` is
 /// an error that fails the generation — a typo must not silently disable
-/// emission (ADR-0013). The `ordering`/`filtering` flags land with their
-/// emission slices (#117 et seq.) and are unrecognized until then.
+/// emission (ADR-0013). The `filtering` flag lands with its emission slice and
+/// is unrecognized until then.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct Flags {
     /// Emit `impl aip_pagination::PageRequest` for pagination-shaped requests.
     pagination: bool,
+    /// Emit `impl aip_ordering::OrderByRequest` for requests carrying `order_by`.
+    ordering: bool,
 }
 
 impl Flags {
@@ -132,6 +134,7 @@ impl Flags {
             };
             match key {
                 "pagination" => flags.pagination = value,
+                "ordering" => flags.ordering = value,
                 _ => return Err(format!("unrecognized parameter key {key:?}")),
             }
         }
@@ -165,8 +168,8 @@ fn generate_response(request: CodeGeneratorRequest) -> Result<Vec<File>, String>
             ));
         };
         // A disabled flag zeroes the matching presence bools, so the (pure)
-        // generator never sees a flag (ADR-0013). `ordering`/`filtering` have
-        // no emission yet (#117 et seq.), so theirs are unconditionally zeroed.
+        // generator never sees a flag (ADR-0013). `filtering` has no emission
+        // yet, so its bool is unconditionally zeroed.
         let mut requests = request_descriptors_in_file(&file);
         for request in &mut requests {
             if !flags.pagination {
@@ -174,7 +177,9 @@ fn generate_response(request: CodeGeneratorRequest) -> Result<Vec<File>, String>
                 request.has_page_size = false;
                 request.has_skip = false;
             }
-            request.has_order_by = false;
+            if !flags.ordering {
+                request.has_order_by = false;
+            }
             request.has_filter = false;
         }
         inputs.push(GenInput {
@@ -201,19 +206,62 @@ mod tests {
 
     #[test]
     fn flags_default_off() {
-        assert_eq!(Flags::parse(None).unwrap(), Flags { pagination: false });
-        assert_eq!(Flags::parse(Some("")).unwrap(), Flags { pagination: false });
+        assert_eq!(Flags::parse(None).unwrap(), Flags::default());
+        assert_eq!(Flags::parse(Some("")).unwrap(), Flags::default());
+        assert_eq!(
+            Flags::default(),
+            Flags {
+                pagination: false,
+                ordering: false
+            }
+        );
     }
 
     #[test]
     fn pagination_flag_parses() {
         assert_eq!(
             Flags::parse(Some("pagination=true")).unwrap(),
-            Flags { pagination: true }
+            Flags {
+                pagination: true,
+                ordering: false
+            }
         );
         assert_eq!(
             Flags::parse(Some("pagination=false")).unwrap(),
-            Flags { pagination: false }
+            Flags {
+                pagination: false,
+                ordering: false
+            }
+        );
+    }
+
+    #[test]
+    fn ordering_flag_parses() {
+        assert_eq!(
+            Flags::parse(Some("ordering=true")).unwrap(),
+            Flags {
+                pagination: false,
+                ordering: true
+            }
+        );
+        assert_eq!(
+            Flags::parse(Some("ordering=false")).unwrap(),
+            Flags {
+                pagination: false,
+                ordering: false
+            }
+        );
+    }
+
+    /// Each flag is parsed independently; commas join them.
+    #[test]
+    fn flags_combine() {
+        assert_eq!(
+            Flags::parse(Some("pagination=true,ordering=true")).unwrap(),
+            Flags {
+                pagination: true,
+                ordering: true
+            }
         );
     }
 
@@ -223,7 +271,8 @@ mod tests {
         assert!(Flags::parse(Some("paginatoin=true")).is_err());
         assert!(Flags::parse(Some("pagination=yes")).is_err());
         assert!(Flags::parse(Some("pagination")).is_err());
-        // `ordering`/`filtering` are unrecognized until their slices land.
-        assert!(Flags::parse(Some("ordering=true")).is_err());
+        assert!(Flags::parse(Some("ordering=yes")).is_err());
+        // `filtering` is unrecognized until its slice lands.
+        assert!(Flags::parse(Some("filtering=true")).is_err());
     }
 }

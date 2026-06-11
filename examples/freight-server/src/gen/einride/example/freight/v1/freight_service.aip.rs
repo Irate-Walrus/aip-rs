@@ -26,6 +26,13 @@ impl ::aip_pagination::PageRequest for ListSitesRequest {
     }
 }
 
+/// AIP-132 ordering accessor, generated from `ListSitesRequest`'s field shape.
+impl ::aip_ordering::OrderByRequest for ListSitesRequest {
+    fn order_by(&self) -> &str {
+        &self.order_by
+    }
+}
+
 /// AIP-158 pagination accessors, generated from `ListShipmentsRequest`'s field shape.
 impl ::aip_pagination::PageRequest for ListShipmentsRequest {
     fn page_token(&self) -> &str {

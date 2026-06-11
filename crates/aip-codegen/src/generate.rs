@@ -1,7 +1,8 @@
 //! The generation logic: walk `google.api.resource` descriptors and emit typed
 //! resource-name wrappers layered on the runtime [`aip_resourcename::Pattern`]
 //! API (ADR-0011), and walk **Request descriptors** and emit
-//! `impl aip_pagination::PageRequest` keyed on field shape (ADR-0013).
+//! `impl aip_pagination::PageRequest` / `impl aip_ordering::OrderByRequest`
+//! keyed on field shape (ADR-0013).
 //!
 //! Generated files are `use`-free and fully path-qualified
 //! (`::aip_resourcename::…`, `::aip_pagination::…`), so the consumer mounts
@@ -27,9 +28,12 @@
 //! A request message qualifies for `PageRequest` iff it has plain `string
 //! page_token` **and** `int32 page_size` fields — the Rust analog of aip-go's
 //! structural interface satisfaction — with a `skip()` override added only when
-//! it also has `int32 skip` (otherwise the trait's `0` default stands). The
-//! presence bools arrive pre-zeroed by the plugin when its `pagination` flag is
-//! off, so this generator never sees a flag.
+//! it also has `int32 skip` (otherwise the trait's `0` default stands). It
+//! qualifies for `OrderByRequest` iff it has a plain `string order_by` field.
+//! The two emissions are independent (a request can earn either, both, or
+//! neither). The presence bools arrive pre-zeroed by the plugin when the
+//! matching `pagination` / `ordering` flag is off, so this generator never sees
+//! a flag.
 //!
 //! A multi-pattern resource is emitted as the single-pattern wrapper of its
 //! first pattern (aip-go's `SinglePatternStructName`); the multi-pattern
@@ -154,6 +158,9 @@ fn generate_file(
         if request.has_page_token && request.has_page_size {
             write_page_request(&mut body, request);
         }
+        if request.has_order_by {
+            write_order_by_request(&mut body, request);
+        }
     }
     if body.is_empty() {
         return Ok(None);
@@ -194,6 +201,28 @@ fn write_page_request(out: &mut String, request: &RequestDescriptor) {
         line("        self.skip");
         line("    }");
     }
+    line("}");
+}
+
+/// Append the `aip_ordering::OrderByRequest` impl for `request`, reading its
+/// plain `string order_by` field. Named by bare path, landing in the module
+/// that holds the generated message structs (ADR-0013's mount rule).
+fn write_order_by_request(out: &mut String, request: &RequestDescriptor) {
+    let mut line = |s: &str| {
+        let _ = writeln!(out, "{s}");
+    };
+    let message_name = &request.message_name;
+
+    line("");
+    line(&format!(
+        "/// AIP-132 ordering accessor, generated from `{message_name}`'s field shape."
+    ));
+    line(&format!(
+        "impl ::aip_ordering::OrderByRequest for {message_name} {{"
+    ));
+    line("    fn order_by(&self) -> &str {");
+    line("        &self.order_by");
+    line("    }");
     line("}");
 }
 

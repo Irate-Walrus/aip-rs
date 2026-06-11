@@ -51,6 +51,11 @@ aip-resourcename = { workspace = true }
 # as `::aip_pagination::PageRequest`, so it is a direct dependency here even
 # though the handlers reach the same trait via `aip::pagination`.
 aip-pagination = { workspace = true }
+# The trait behind the generated `OrderByRequest` impl (`buf.gen.yaml`'s
+# `ordering=true`, ADR-0013): the generated `freight_service.aip.rs` names it as
+# `::aip_ordering::OrderByRequest`, so it is a direct dependency here even though
+# the handlers reach the same trait (and `parse_order_by`) via `aip::ordering`.
+aip-ordering = { workspace = true }
 
 # gRPC runtime: tonic core (server + transport), the Prost codec the generated
 # service uses, and the protobuf message runtime. `tonic-types` lets the handlers

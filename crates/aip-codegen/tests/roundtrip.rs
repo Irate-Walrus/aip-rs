@@ -1,7 +1,8 @@
 //! Compile the golden fixtures from `golden.rs` and exercise them — proving the
 //! generated code is real, working code: validated `new`, infallible `Display`,
 //! `FromStr`/`parse` round-tripping over the runtime `aip_resourcename::Pattern`
-//! API, a typed `parent()` accessor, and the `PageRequest` impls' accessors.
+//! API, a typed `parent()` accessor, and the `PageRequest` / `OrderByRequest`
+//! impls' accessors.
 //!
 //! The fixtures are `use`-free and fully path-qualified, mounted **directly in
 //! the module that holds the message structs** (ADR-0013's one mount rule, as
@@ -18,12 +19,14 @@ mod freight {
         pub page_token: String,
     }
 
-    /// Stands in for prost's `ListSitesRequest` — pagination fields plus `skip`.
+    /// Stands in for prost's `ListSitesRequest` — pagination fields plus `skip`
+    /// and an AIP-132 `order_by`.
     #[derive(Default)]
     pub struct ListSitesRequest {
         pub page_size: i32,
         pub page_token: String,
         pub skip: i32,
+        pub order_by: String,
     }
 
     include!("golden/einride/example/freight/v1/shipper.aip.rs");
@@ -33,6 +36,7 @@ mod freight {
 
 use std::str::FromStr;
 
+use aip_ordering::OrderByRequest;
 use aip_pagination::PageRequest;
 use freight::{ListShippersRequest, ListSitesRequest, ShipperResourceName, SiteResourceName};
 
@@ -121,8 +125,19 @@ fn page_request_impl_overrides_skip_when_the_field_exists() {
         page_size: 10,
         page_token: String::new(),
         skip: 30,
+        order_by: String::new(),
     };
     assert_eq!(request.page_token(), "");
     assert_eq!(request.page_size(), 10);
     assert_eq!(request.skip(), 30);
+}
+
+/// A request with an `order_by` field gets the generated `OrderByRequest` impl.
+#[test]
+fn order_by_request_impl_reads_the_order_by_field() {
+    let request = ListSitesRequest {
+        order_by: "display_name desc".to_owned(),
+        ..Default::default()
+    };
+    assert_eq!(request.order_by(), "display_name desc");
 }

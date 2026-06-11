@@ -320,16 +320,18 @@ wired up.
 | `DeleteShipper`   | `resourcename` (validate) + generated `ShipperResourceName` (pattern match), `etag` (AIP-154 freshness check), `softdelete` (AIP-164 soft delete — stamp `delete_time`, keep the record) | #4, #82, #93, #96 | wired⁸¹⁰ |
 | `UndeleteShipper` | `resourcename` (validate) + generated `ShipperResourceName` (pattern match), `softdelete` (AIP-164 undelete — clear `delete_time` after confirming the shipper is soft-deleted, else `ALREADY_EXISTS`) | #96 | wired¹⁰ |
 | `CreateSite`      | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `SiteResourceName` (validated `new` + infallible `Display`), `fieldbehavior` (reflective REQUIRED validation re-stamped to the service domain → AIP-193), `requestid` (AIP-155 idempotent replay), `preview` (AIP-163 `validate_only` gate) | #5, #3, #59, #82, #94, #95, #119, #124, #130 | wired⁹ |
-| `ListSites`       | `ordering` (parse/validate) + `pagination` (offset + checksum guard, read through the generated `PageRequest` impl — the one request with the AIP-158 `skip` override) + `filtering`/`aip-sql` (filter declarations derived from the `Site` descriptor + server-composed scope/soft-delete + `ORDER BY`/`LIMIT`/`OFFSET` → in-memory SQLite), with the in-memory `filtering` matcher pinned against SQLite | #9, #10, #6, #7, #11, #39, #40, #41, #42, #43, #92, #116, #127 | wired³ |
+| `ListSites`       | `ordering` (parse/validate, read through the generated `OrderByRequest` impl — the one request carrying `order_by`) + `pagination` (offset + checksum guard, read through the generated `PageRequest` impl — the one request with the AIP-158 `skip` override) + `filtering`/`aip-sql` (filter declarations derived from the `Site` descriptor + server-composed scope/soft-delete + `ORDER BY`/`LIMIT`/`OFFSET` → in-memory SQLite), with the in-memory `filtering` matcher pinned against SQLite | #9, #10, #6, #7, #11, #39, #40, #41, #42, #43, #92, #116, #117, #127 | wired³ |
 | `CreateShipment`  | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `ShipmentResourceName` (validated `new` + infallible `Display`), `fieldbehavior` (reflective REQUIRED validation of all six fields — endpoints + four pickup/delivery timestamps — re-stamped to the service domain → one AIP-193 response), `requestid` (AIP-155 idempotent replay), `preview` (AIP-163 `validate_only` gate) | #5, #3, #59, #82, #94, #95, #119, #124, #130 | wired⁴⁹ |
 | `ListShipments`   | `pagination` (offset + checksum guard, read through the generated `PageRequest` impl) + `filtering`/`aip-sql` (filter declarations derived from the `Shipment` descriptor + server-composed scope/soft-delete → in-memory SQLite) | #6, #7, #43, #116, #127 | wired⁴ |
 | `IAMPolicy.GetIamPolicy` / `SetIamPolicy` | `iam` (Member validation + structural read-modify-write: dedupe/normalise, `etag` optimistic concurrency, conditions⟹version-3) over a decomposed SQLite policy store (iam-go's `iam_policy_bindings` schema) | #64, #65 | wired⁵ |
 | `IAMPolicy.TestIamPermissions` | `iam` + the opt-in cel-backed `eval` adapter (`aip::iam::eval`): role→permission expansion via an example-owned catalogue, Member matching, Condition evaluation | #66, #68 | wired⁷ |
 | `GetSite` / `UpdateSite` / `DeleteSite`, `BatchGetSites`, `GetShipment` / `UpdateShipment` / `DeleteShipment` | the same primitives | #11–#15 | `Unimplemented` |
 
-³ `ListSites` parses the `order_by` (`aip::ordering::parse_order_by`) and
-validates it against an allow-list of sortable Site paths (`validate_for_paths`,
-#9). The descriptor-based `validate_for_message` (#10) guards that allow-list in
+³ `ListSites` parses the `order_by` (`aip::ordering::parse_order_by`, reading the
+field through the **generated** `OrderByRequest` impl — #117, ADR-0013 — emitted
+into `freight_service.aip.rs` behind `buf.gen.yaml`'s `ordering=true`, replacing
+the hand-written impl that lived in `service.rs`) and validates it against an
+allow-list of sortable Site paths (`validate_for_paths`, #9). The descriptor-based `validate_for_message` (#10) guards that allow-list in
 turn: a test checks every sortable path against the `Site` descriptor, so the
 allow-list can't silently drift from the proto (and a sibling test checks every
 path maps to a column in the schema). It then **sorts and pages in SQL** (#42):
@@ -549,12 +551,14 @@ protoc-gen-go-aip analog, ADR-0011): the proto annotation is the single source
 of truth for the name pattern, and the handlers parse and build resource names
 through the generated `parse()` and the validated `new(...)` + infallible
 `Display` instead of hand-written `format!("shippers/{{shipper}}")` strings.
-The same plugin also generates the `aip_pagination::PageRequest` impls (#116,
-ADR-0013): behind `buf.gen.yaml`'s opt-in `pagination=true`, every request
-message carrying the AIP-158 field shape (`page_token` + `page_size` — the
-three List requests) gets the impl emitted into `freight_service.aip.rs`, with
-the `skip()` override only where the field exists (`ListSitesRequest`), so the
-hand-written impls in `service.rs` are gone.
+The same plugin also generates the request-trait impls keyed on field shape
+(ADR-0013): behind `buf.gen.yaml`'s opt-in `pagination=true`, every request
+carrying the AIP-158 field shape (`page_token` + `page_size` — the three List
+requests) gets an `aip_pagination::PageRequest` impl (#116), with the `skip()`
+override only where the field exists (`ListSitesRequest`); behind `ordering=true`,
+every request carrying `order_by` (`ListSitesRequest`) gets an
+`aip_ordering::OrderByRequest` impl (#117). Both land in `freight_service.aip.rs`,
+so the hand-written impls in `service.rs` are gone.
 
 The generated freight messages are **Typed messages** (#46): the buf template
 adds `#[derive(prost_reflect::ReflectMessage)]` to each, resolved against the
