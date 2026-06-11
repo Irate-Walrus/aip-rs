@@ -12,7 +12,10 @@
 //!
 //! Each `google.api.resource` annotation also yields a typed resource-name
 //! wrapper (`ShipperResourceName`, …) via `protoc-gen-prost-aip` — the proto
-//! annotation is the single source of truth for the name pattern (ADR-0011).
+//! annotation is the single source of truth for the name pattern (ADR-0011) —
+//! and each pagination-shaped request message an `aip_pagination::PageRequest`
+//! impl, keyed on its field shape behind `buf.gen.yaml`'s `pagination=true`
+//! (ADR-0013).
 // `dead_code`: the generated service plumbing and resource-name wrappers carry
 // items the demo never constructs, which a binary crate flags as unused.
 #![allow(clippy::all, missing_docs, rustdoc::all, dead_code)]
@@ -45,21 +48,16 @@ pub mod einride {
                 include!("gen/einride/example/freight/v1/einride.example.freight.v1.rs");
                 include!("gen/einride/example/freight/v1/einride.example.freight.v1.tonic.rs");
 
-                // The typed resource-name wrappers, one file per annotated
-                // proto. Each carries its own `use` lines, so each gets its own
-                // module, re-exported flat alongside the messages.
-                mod shipment_aip {
-                    include!("gen/einride/example/freight/v1/shipment.aip.rs");
-                }
-                mod shipper_aip {
-                    include!("gen/einride/example/freight/v1/shipper.aip.rs");
-                }
-                mod site_aip {
-                    include!("gen/einride/example/freight/v1/site.aip.rs");
-                }
-                pub use shipment_aip::ShipmentResourceName;
-                pub use shipper_aip::ShipperResourceName;
-                pub use site_aip::SiteResourceName;
+                // The per-proto AIP code — typed resource-name wrappers and
+                // request-trait impls. The files are `use`-free and fully
+                // path-qualified, mounted directly in this message module
+                // (ADR-0013's one mount rule): an `impl … for ListSitesRequest`
+                // names the prost struct above by bare path, and the wrappers
+                // land flat alongside the messages.
+                include!("gen/einride/example/freight/v1/freight_service.aip.rs");
+                include!("gen/einride/example/freight/v1/shipment.aip.rs");
+                include!("gen/einride/example/freight/v1/shipper.aip.rs");
+                include!("gen/einride/example/freight/v1/site.aip.rs");
             }
         }
     }

@@ -1,6 +1,6 @@
 [package]
 name = "aip-codegen"
-description = "AIP resource-name code generation: codegen-only helpers (MethodType / GrammaticalName / strcase) and generate(), which emits typed resource-name wrappers layered on aip-resourcename"
+description = "AIP code generation: codegen-only helpers (MethodType / GrammaticalName / strcase) and generate(), which emits typed resource-name wrappers layered on aip-resourcename plus field-shape-keyed request-trait impls"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -18,3 +18,8 @@ aip-reflect.workspace = true
 # typed layer over the runtime, not a reimplementation of it. (Also used by the
 # `roundtrip` test, which compiles the golden fixtures and round-trips them.)
 aip-resourcename.workspace = true
+
+[dev-dependencies]
+# The trait behind the generated `PageRequest` impls — the `roundtrip` test
+# compiles the golden fixtures and calls the accessors through it.
+aip-pagination.workspace = true

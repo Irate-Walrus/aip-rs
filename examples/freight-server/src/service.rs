@@ -674,40 +674,11 @@ impl FreightService for FreightServer {
     }
 }
 
-/// Lets `aip::pagination` read the AIP-158 pagination fields off the generated
-/// request without reflection.
-impl PageRequest for ListShippersRequest {
-    fn page_token(&self) -> &str {
-        &self.page_token
-    }
-    fn page_size(&self) -> i32 {
-        self.page_size
-    }
-}
-
-/// `ListSitesRequest` carries the full pagination field set, including AIP-158
-/// `skip` (which `ListShippersRequest` omits).
-impl PageRequest for ListSitesRequest {
-    fn page_token(&self) -> &str {
-        &self.page_token
-    }
-    fn page_size(&self) -> i32 {
-        self.page_size
-    }
-    fn skip(&self) -> i32 {
-        self.skip
-    }
-}
-
-/// `ListShipmentsRequest` carries the pagination fields but no AIP-158 `skip`.
-impl PageRequest for ListShipmentsRequest {
-    fn page_token(&self) -> &str {
-        &self.page_token
-    }
-    fn page_size(&self) -> i32 {
-        self.page_size
-    }
-}
+// The `PageRequest` impls the List handlers page through are **generated**
+// (ADR-0013): `protoc-gen-prost-aip` emits them into `freight_service.aip.rs`,
+// keyed on each request's AIP-158 field shape (`ListSitesRequest` alone has
+// `skip`, so it alone gets the override), behind `buf.gen.yaml`'s
+// `pagination=true`.
 
 /// Lets `aip::ordering::parse_order_by` read the AIP-132 `order_by` field off
 /// the generated request.

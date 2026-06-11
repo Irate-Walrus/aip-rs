@@ -30,7 +30,7 @@ use std::io::{Read as _, Write as _};
 use std::process::ExitCode;
 
 use aip_codegen::{generate, GenInput};
-use aip_reflect::resource_descriptors_in_file;
+use aip_reflect::{request_descriptors_in_file, resource_descriptors_in_file};
 use prost::Message as _;
 use prost_reflect::DescriptorPool;
 use prost_types::compiler::{
@@ -97,9 +97,53 @@ fn run(request: CodeGeneratorRequest) -> CodeGeneratorResponse {
     response
 }
 
-/// Build the descriptor pool, read each requested file's resources, and run the
-/// generator. Returns the response files or a human-readable error string.
+/// The plugin's opt-in emission flags, parsed from the `CodeGeneratorRequest`
+/// `parameter` (buf's `opt:` entries, comma-joined `key=value` pairs). All
+/// default **off**; an unrecognized key or a value other than `true`/`false` is
+/// an error that fails the generation — a typo must not silently disable
+/// emission (ADR-0013). The `ordering`/`filtering` flags land with their
+/// emission slices (#117 et seq.) and are unrecognized until then.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Flags {
+    /// Emit `impl aip_pagination::PageRequest` for pagination-shaped requests.
+    pagination: bool,
+}
+
+impl Flags {
+    /// Parses `parameter` (`None`/`""` means every flag off).
+    fn parse(parameter: Option<&str>) -> Result<Self, String> {
+        let mut flags = Self::default();
+        for pair in parameter
+            .unwrap_or_default()
+            .split(',')
+            .filter(|p| !p.is_empty())
+        {
+            let (key, value) = pair
+                .split_once('=')
+                .ok_or_else(|| format!("invalid parameter {pair:?}: expected `key=value`"))?;
+            let value = match value {
+                "true" => true,
+                "false" => false,
+                _ => {
+                    return Err(format!(
+                        "invalid parameter {pair:?}: expected `{key}=true` or `{key}=false`"
+                    ))
+                }
+            };
+            match key {
+                "pagination" => flags.pagination = value,
+                _ => return Err(format!("unrecognized parameter key {key:?}")),
+            }
+        }
+        Ok(flags)
+    }
+}
+
+/// Build the descriptor pool, read each requested file's resources and request
+/// shapes, and run the generator. Returns the response files or a
+/// human-readable error string.
 fn generate_response(request: CodeGeneratorRequest) -> Result<Vec<File>, String> {
+    let flags = Flags::parse(request.parameter.as_deref())?;
     // protoc/buf send the requested files plus their imports in topological
     // order, so decoding them in turn always satisfies the imports-first rule.
     // Decoding from raw bytes (not `from_file_descriptor_set`) keeps the
@@ -120,9 +164,23 @@ fn generate_response(request: CodeGeneratorRequest) -> Result<Vec<File>, String>
                 "file {name:?} is not present in the request's protos"
             ));
         };
+        // A disabled flag zeroes the matching presence bools, so the (pure)
+        // generator never sees a flag (ADR-0013). `ordering`/`filtering` have
+        // no emission yet (#117 et seq.), so theirs are unconditionally zeroed.
+        let mut requests = request_descriptors_in_file(&file);
+        for request in &mut requests {
+            if !flags.pagination {
+                request.has_page_token = false;
+                request.has_page_size = false;
+                request.has_skip = false;
+            }
+            request.has_order_by = false;
+            request.has_filter = false;
+        }
         inputs.push(GenInput {
             proto_file: name.clone(),
             resources: resource_descriptors_in_file(&file),
+            requests,
         });
     }
 
@@ -135,4 +193,37 @@ fn generate_response(request: CodeGeneratorRequest) -> Result<Vec<File>, String>
             ..Default::default()
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Flags;
+
+    #[test]
+    fn flags_default_off() {
+        assert_eq!(Flags::parse(None).unwrap(), Flags { pagination: false });
+        assert_eq!(Flags::parse(Some("")).unwrap(), Flags { pagination: false });
+    }
+
+    #[test]
+    fn pagination_flag_parses() {
+        assert_eq!(
+            Flags::parse(Some("pagination=true")).unwrap(),
+            Flags { pagination: true }
+        );
+        assert_eq!(
+            Flags::parse(Some("pagination=false")).unwrap(),
+            Flags { pagination: false }
+        );
+    }
+
+    /// A typo must fail the generation, not silently disable emission.
+    #[test]
+    fn unrecognized_key_or_value_is_an_error() {
+        assert!(Flags::parse(Some("paginatoin=true")).is_err());
+        assert!(Flags::parse(Some("pagination=yes")).is_err());
+        assert!(Flags::parse(Some("pagination")).is_err());
+        // `ordering`/`filtering` are unrecognized until their slices land.
+        assert!(Flags::parse(Some("ordering=true")).is_err());
+    }
 }

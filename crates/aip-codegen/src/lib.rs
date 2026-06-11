@@ -11,8 +11,12 @@
 //! - The **generation logic** [`generate`], which walks `google.api.resource`
 //!   [`ResourceDescriptor`](aip_reflect::ResourceDescriptor)s and emits typed
 //!   resource-name wrappers (e.g. `ShipperResourceName { shipper: String }`)
-//!   layered on the runtime [`aip_resourcename::Pattern`] API. It does **not**
-//!   duplicate that runtime — the emitted `parse`/`format` call into it.
+//!   layered on the runtime [`aip_resourcename::Pattern`] API — it does **not**
+//!   duplicate that runtime; the emitted `parse`/`format` call into it — and
+//!   walks [`RequestDescriptor`](aip_reflect::RequestDescriptor)s and emits
+//!   `impl aip_pagination::PageRequest` keyed on field shape (ADR-0013;
+//!   [`MethodType`] is unused by that emission — it stays for the name/grammar
+//!   codegen it was ported for, issue #62).
 //!
 //! The generator is a pure function over descriptors, so it is unit-tested
 //! directly (golden tests) without spawning a `protoc` process; the plugin

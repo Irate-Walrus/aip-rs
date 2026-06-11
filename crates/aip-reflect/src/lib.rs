@@ -13,6 +13,11 @@
 //! - [`resource_descriptors_in_file`] / [`resource_descriptors_in_package`] —
 //!   enumerate the [`ResourceDescriptor`]s declared in a file or package via the
 //!   `google.api.resource` / `google.api.resource_definition` extensions.
+//! - [`request_descriptors_in_file`] — digest each top-level message's
+//!   AIP-standard request fields (`page_token`, `order_by`, …) into a
+//!   [`RequestDescriptor`], driving the codegen plugin's request-trait
+//!   emission (ADR-0013; this one has no aip-go counterpart — Go satisfies
+//!   these interfaces structurally).
 //! - [`validate_resource_references`] (and its [Dynamic core][adr9]
 //!   [`validate_resource_references_dynamic`]) — for every field carrying a
 //!   `google.api.resource_reference`, check the value is a valid name of the
@@ -35,10 +40,12 @@
 //! See <https://google.aip.dev/123> (resource types) and
 //! <https://google.aip.dev/124> (resource references).
 
+mod requests;
 mod resource_type;
 mod resources;
 mod validate;
 
+pub use requests::{request_descriptors_in_file, RequestDescriptor};
 pub use resource_type::ResourceType;
 pub use resources::{
     resource_descriptors_in_file, resource_descriptors_in_package, ResourceDescriptor,
