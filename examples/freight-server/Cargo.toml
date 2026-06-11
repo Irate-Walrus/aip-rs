@@ -33,14 +33,14 @@ publish = false
 # trait + request types, but `build.rs` `extern_path`s the `google.iam.v1` *message*
 # layer onto `aip::iam::proto`, so the service shares one `Policy` type with the
 # helpers it calls (aip #65) instead of a structurally-identical duplicate. The
-# `eval` feature exposes `aip::iam::eval` — the CEL-backed Condition evaluation
+# `iam-eval` feature exposes `aip::iam::eval` — the CEL-backed Condition evaluation
 # adapter (aip #66) — which `TestIamPermissions` will decide *through* (aip #68);
 # enabling it here keeps the demo compile-tracking the library feature. The
 # `tonic` feature also pulls in `aip::errordomain` (aip #145): the boundary
 # `Layer` `main.rs` installs once so every library error reaches clients under
 # the one service domain (`freight.example.com`) instead of the `aip-rs`
 # sentinel (ADR-0007).
-aip = { workspace = true, features = ["tonic", "sql", "iam", "iam-proto", "eval"] }
+aip = { workspace = true, features = ["tonic", "sql", "iam", "iam-proto", "iam-eval"] }
 
 # The shared `google.*` types the generated code references by `extern_path`
 # (ADR-0011): `google.iam.v1` (the one `Policy` the IAMPolicy service and the

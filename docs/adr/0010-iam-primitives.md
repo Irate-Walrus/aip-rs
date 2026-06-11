@@ -39,12 +39,13 @@ behaviour, exactly as `aip-sql` keeps SQL transpilation opt-in (ADR-0005/0008).
   reject most real conditions. To compile or evaluate a Condition we reach for
   the `cel` crate (cel-rust) behind a feature; absent that, the core treats a
   Condition as an opaque validated string.
-- **The authorization decision, as the opt-in `eval` adapter.** Given a
+- **The authorization decision, as the opt-in `iam-eval` adapter.** Given a
   **Policy**, a principal's memberships, the caller's role→permission
   catalogue, and a request context: allow/deny, with conditions evaluated.
-  Execution layer, so it lives behind the opt-in `eval` feature depending on
-  `cel`, never in a default build. It is what makes `TestIamPermissions`
-  actually decide rather than stub.
+  Execution layer, so it lives behind the opt-in `iam-eval` umbrella feature
+  (forwarding to `aip-iam`'s `eval` feature) depending on `cel`, never in a
+  default build. It is what makes `TestIamPermissions` actually decide rather
+  than stub.
 
 ## What is out of scope (a decision, not a gap)
 
@@ -67,7 +68,7 @@ A thin end-to-end slice before breadth, as ADR-0008 drove a **Filter** into
 SQLite: first the crate with Member/Role/Permission parsing wired into the
 umbrella as `aip::iam`; then the Policy structural ops with
 `GetIamPolicy`/`SetIamPolicy` in `freight-server` over a policy store keyed by
-**Resource name** (#64, #65); then the `cel`-backed `eval` adapter with
+**Resource name** (#64, #65); then the `cel`-backed `iam-eval` adapter with
 `TestIamPermissions` deciding through it, and the AIP-211 helpers (#66, #68,
 #67). The `aip-filtering` CEL bridge is *not* used — see the conditions point.
 
@@ -92,8 +93,9 @@ umbrella as `aip::iam`; then the Policy structural ops with
   feature, so default builds pull in neither `prost` nor `tonic`.
 - New AIP-193 `reason` prefix `IAM_*` under the shared default domain
   (ADR-0007).
-- The opt-in `eval` feature pulls the `cel` crate; it is never in `default`, so
-  parse/validate-only users never compile `cel`.
+- The opt-in umbrella feature `iam-eval` (forwarding to `aip-iam`'s `eval`)
+  pulls the `cel` crate; it is never in `default`, so parse/validate-only
+  users never compile `cel`.
 - `freight-server` gains an `IAMPolicy` service and a resource-name-keyed
-  policy store, with `TestIamPermissions` deciding *through* the `eval`
+  policy store, with `TestIamPermissions` deciding *through* the `iam-eval`
   adapter — demonstrating execution as an opt-in layer over the core.
