@@ -645,30 +645,29 @@ fn has_path_with_prefix(mask: &FieldMask, needle: &str) -> bool {
     false
 }
 
-/// The default AIP-193 `ErrorInfo.domain` for every error this crate maps. A
-/// deploying service overrides it per call via [`Error::into_status_with_domain`]
-/// so library-caught violations carry the service's own domain (ADR-0007).
+/// The library-internal AIP-193 `ErrorInfo.domain` every error this crate maps
+/// is stamped with. It is a sentinel meaning "replace at the serving boundary":
+/// a deploying service installs the `aip-errordomain` layer, which rewrites it
+/// to the service's own domain so clients see one domain (ADR-0007). It is the
+/// only conversion — there is no per-call-site re-stamping.
 #[cfg(feature = "tonic")]
 const ERROR_DOMAIN: &str = "aip-rs";
 
 #[cfg(feature = "tonic")]
-impl Error {
-    /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details, stamping
-    /// `domain` into the `ErrorInfo` in place of the default [`ERROR_DOMAIN`]
-    /// (`aip-rs`). The `reason` and `metadata` are unchanged — a service
-    /// re-domains a library error without inventing its own machine-readable
-    /// `reason` (for that it raises its own check through `aip-validation`).
-    ///
-    /// The details: an `ErrorInfo` on every error (the AIP-193 MUST) and, when
-    /// the error names field paths, one `BadRequest` violation per path. See
-    /// `docs/adr/0007-aip193-error-details.md`.
-    pub fn into_status_with_domain(self, domain: impl Into<String>) -> tonic::Status {
+impl From<Error> for tonic::Status {
+    /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details under the
+    /// library sentinel [`ERROR_DOMAIN`] (`aip-rs`): an `ErrorInfo` on every
+    /// error (the AIP-193 MUST) and, when the error names field paths, one
+    /// `BadRequest` violation per path. A deploying service rewrites the
+    /// sentinel domain to its own at the serving boundary with the
+    /// `aip-errordomain` layer. See `docs/adr/0007-aip193-error-details.md`.
+    fn from(err: Error) -> Self {
         use std::collections::HashMap;
         use tonic_types::{ErrorDetails, StatusExt};
 
-        let message = self.to_string();
+        let message = err.to_string();
         let (reason, metadata, violations): (&str, HashMap<String, String>, Vec<(String, String)>) =
-            match &self {
+            match &err {
                 Error::RequiredFields { paths } => (
                     "FIELD_REQUIRED",
                     // Mirror the offending paths under `fields`, matching
@@ -696,22 +695,11 @@ impl Error {
                 ),
             };
         let mut details = ErrorDetails::new();
-        details.set_error_info(reason, domain, metadata);
+        details.set_error_info(reason, ERROR_DOMAIN, metadata);
         for (field, description) in violations {
             details.add_bad_request_violation(field, description);
         }
         tonic::Status::with_error_details(tonic::Code::InvalidArgument, message, details)
-    }
-}
-
-#[cfg(feature = "tonic")]
-impl From<Error> for tonic::Status {
-    /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details under the default
-    /// [`ERROR_DOMAIN`] (`aip-rs`). A service that wants its own domain calls
-    /// [`Error::into_status_with_domain`] instead. See
-    /// `docs/adr/0007-aip193-error-details.md`.
-    fn from(err: Error) -> Self {
-        err.into_status_with_domain(ERROR_DOMAIN)
     }
 }
 
@@ -774,33 +762,19 @@ mod tonic_tests {
     }
 
     #[test]
-    fn into_status_with_domain_overrides_the_default_domain() {
-        // The default conversion yields `aip-rs`; the override stamps the
-        // caller's service domain while leaving `reason` and `metadata` intact
-        // (ADR-0007 #118).
-        let default: tonic::Status = Error::RequiredFields {
+    fn conversion_stamps_the_aip_rs_sentinel_domain() {
+        // The pre-boundary contract: `From<Error>` stamps the library sentinel
+        // `aip-rs`, carrying `reason` and the `BadRequest` it always has. A
+        // deploying service rewrites the sentinel to its own domain at the
+        // serving edge with the `aip-errordomain` layer (ADR-0007), not here.
+        let status: tonic::Status = Error::RequiredFields {
             paths: vec!["display_name".to_owned()],
         }
         .into();
-        assert_eq!(
-            default
-                .get_details_error_info()
-                .expect("ErrorInfo attached")
-                .domain,
-            "aip-rs"
-        );
-
-        let overridden = Error::RequiredFields {
-            paths: vec!["display_name".to_owned()],
-        }
-        .into_status_with_domain("freight.example.com");
-        let info = overridden
-            .get_details_error_info()
-            .expect("ErrorInfo attached");
-        assert_eq!(info.domain, "freight.example.com");
+        let info = status.get_details_error_info().expect("ErrorInfo attached");
+        assert_eq!(info.domain, ERROR_DOMAIN);
         assert_eq!(info.reason, "FIELD_REQUIRED");
-        // The override changes only the domain — the field violation is unchanged.
-        let bad = overridden
+        let bad = status
             .get_details_bad_request()
             .expect("BadRequest attached");
         assert_eq!(bad.field_violations[0].field, "display_name");

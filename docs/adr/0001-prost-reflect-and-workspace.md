@@ -24,3 +24,8 @@ is a Cargo workspace of per-feature crates re-exported by an umbrella `aip` crat
   crates — surprising at a glance, deliberate here.
 - We can still feature-gate `prost-reflect` within a reflective crate later; that
   is a non-breaking change.
+- The per-crate independence this enforces is about *shared types* — most
+  pointedly a shared `Error` (each crate owns its own; see ADR-0007). It does not
+  bar a leaf crate that holds no such type: `aip-errordomain` (#145) is a
+  transport-level tower layer with no `Error` and no aip-* dependency, so adding
+  it does not reintroduce the coupling this ADR rules out.

@@ -35,6 +35,11 @@ aip-filtering    = { version = "0.1.0", path = "crates/aip-filtering" }
 # Opt-in via the umbrella's `iam` feature while the slice matures.
 aip-iam          = { version = "0.1.0", path = "crates/aip-iam" }
 aip-fieldbehavior = { version = "0.1.0", path = "crates/aip-fieldbehavior" }
+# AIP-193 error-domain boundary layer (issue #145, ADR-0007): a tonic/tower
+# `Layer` that rewrites the `aip-rs` sentinel domain in `grpc-status-details-bin`
+# to the deploying service's own domain, set once at the serving boundary.
+# Default-on via the umbrella's `errordomain` feature (behind `tonic`).
+aip-errordomain  = { version = "0.1.0", path = "crates/aip-errordomain" }
 # AIP-154 content etags (issue #93): a CRC32 content digest over a resource,
 # excluding the etag field and OUTPUT_ONLY noise, plus the stale/malformed check.
 # Default-on via the umbrella's `etag` feature; generalizes the IAM Policy etag.
@@ -97,6 +102,21 @@ tonic = { version = "0.14", default-features = false }
 # AIP-193 standard error details (BadRequest / ErrorInfo) packed into a mapped
 # `tonic::Status`. Pulled in alongside `tonic` by each crate's `tonic` feature.
 tonic-types = { version = "0.14", default-features = false }
+
+# The tower/http building blocks the `aip-errordomain` boundary layer is built
+# from (issue #145): the `Layer`/`Service` traits, the `http` types its
+# `grpc-status-details-bin` header lives in, the `http_body` trait its wrapped
+# response body re-publishes trailers through, and `Bytes` (the body data type
+# tonic's server stack carries) / `base64` (the status header codec) /
+# `pin-project-lite` (response future + body wrapper projection).
+tower = { version = "0.5", default-features = false }
+http = "1"
+http-body = "1"
+# Collects a response body to drain its trailers — the freight smoke test reads
+# the rewritten `grpc-status-details-bin` off a through-the-stack gRPC response.
+http-body-util = "0.1"
+bytes = "1"
+pin-project-lite = "0.2"
 
 # Example gRPC server only (`examples/freight-server`) — never used by the core
 # crates. `tonic-prost` supplies the runtime Prost codec the buf-generated

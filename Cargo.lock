@@ -15,6 +15,7 @@ dependencies = [
 name = "aip"
 version = "0.1.0"
 dependencies = [
+ "aip-errordomain",
  "aip-etag",
  "aip-fieldbehavior",
  "aip-fieldmask",
@@ -41,6 +42,22 @@ dependencies = [
  "aip-reflect",
  "aip-resourcename",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "aip-errordomain"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "bytes",
+ "http",
+ "http-body",
+ "pin-project-lite",
+ "prost",
+ "prost-types",
+ "tonic",
+ "tonic-types",
+ "tower",
 ]
 
 [[package]]
@@ -514,6 +531,8 @@ version = "0.1.0"
 dependencies = [
  "aip",
  "aip-proto",
+ "http",
+ "http-body-util",
  "prost",
  "prost-reflect",
  "prost-types",
@@ -524,6 +543,7 @@ dependencies = [
  "tonic-prost",
  "tonic-reflection",
  "tonic-types",
+ "tower",
 ]
 
 [[package]]

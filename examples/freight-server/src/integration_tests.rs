@@ -461,7 +461,10 @@ async fn list_sites_ordering_and_pagination_with_checksum_guard() {
 /// An unknown `order_by` field is rejected with INVALID_ARGUMENT carrying AIP-193
 /// details (ErrorInfo reason `ORDER_BY_UNKNOWN_FIELD`, BadRequest naming the field).
 /// A `CreateSite` missing the required `display_name` is rejected with the
-/// service's own domain (`freight.example.com`).
+/// `aip-rs` sentinel domain — these direct handler calls bypass the
+/// `aip::errordomain` boundary layer, so they pin the pre-boundary contract
+/// (the through-wire rewrite to `freight.example.com` is covered by
+/// `error_domain_layer_rewrites_sentinel_to_service_domain`).
 #[tokio::test]
 async fn list_sites_aip160_filtering_and_error_details() {
     use tonic_types::StatusExt as _;
@@ -539,9 +542,11 @@ async fn list_sites_aip160_filtering_and_error_details() {
     assert_eq!(bad.field_violations[0].field, "bogus_field");
 
     // A `CreateSite` missing `display_name` is rejected by reflective REQUIRED
-    // validation (`aip-fieldbehavior`) re-stamped to the service's own AIP-193
-    // domain (`freight.example.com`), naming the request-rooted path
-    // `site.display_name` (ADR-0007 #118).
+    // validation (`aip-fieldbehavior`) under the `aip-rs` sentinel, naming the
+    // request-rooted path `site.display_name` (ADR-0007). This direct handler
+    // call bypasses the boundary layer, so the sentinel — the pre-boundary
+    // contract — is what shows here; the layer rewrites it to
+    // `freight.example.com` on the wire.
     let status = freight
         .create_site(Request::new(CreateSiteRequest {
             parent: PARENT.to_owned(),
@@ -555,7 +560,7 @@ async fn list_sites_aip160_filtering_and_error_details() {
         .get_details_error_info()
         .expect("ErrorInfo is attached");
     assert_eq!(info.reason, "FIELD_REQUIRED");
-    assert_eq!(info.domain, "freight.example.com");
+    assert_eq!(info.domain, "aip-rs");
     let bad = status
         .get_details_bad_request()
         .expect("BadRequest is attached");
@@ -655,7 +660,8 @@ async fn list_shipments_filtering_and_missing_endpoints_aip193() {
 
     // A bare `CreateShipment` accumulates all six REQUIRED-field violations into
     // one `BadRequest` — the reflective validator collects them so the client
-    // gets every one in a single response (AIP-193 + freight service domain).
+    // gets every one in a single response (AIP-193, under the `aip-rs` sentinel
+    // this direct call sees before the boundary layer rewrites it).
     let status = freight
         .create_shipment(Request::new(CreateShipmentRequest {
             parent: PARENT.to_owned(),
@@ -689,7 +695,7 @@ async fn list_shipments_filtering_and_missing_endpoints_aip193() {
         .get_details_error_info()
         .expect("ErrorInfo is attached");
     assert_eq!(info.reason, "FIELD_REQUIRED");
-    assert_eq!(info.domain, "freight.example.com");
+    assert_eq!(info.domain, "aip-rs");
 }
 
 // ─── IAMPolicy read-modify-write etag dance ───────────────────────────────────
@@ -1150,4 +1156,89 @@ async fn aip_211_authorization_non_leaking_denial() {
         .get_details_error_info()
         .expect("ErrorInfo is attached");
     assert_eq!(info.reason, "IAM_RESOURCE_NOT_FOUND");
+}
+
+// ─── AIP-193 error-domain boundary layer ──────────────────────────────────────
+
+/// Through-the-stack proof that the `aip::errordomain` boundary layer is
+/// installed (aip #145, ADR-0007). The other tests call handlers directly and so
+/// see the pre-boundary `aip-rs` sentinel; this one drives the layered service
+/// exactly as `main.rs` builds it — the error-domain `Layer` wrapping
+/// `FreightServiceServer` — and reads the rewritten `grpc-status-details-bin` off
+/// the response. A `CreateSite` missing `display_name` raises a library error
+/// stamped `aip-rs`, and the layer rewrites it to the service domain on the way
+/// out, so the client sees one `ErrorInfo.domain`.
+#[tokio::test]
+async fn error_domain_layer_rewrites_sentinel_to_service_domain() {
+    use http_body_util::BodyExt as _;
+    use prost::bytes::{BufMut, BytesMut};
+    use prost::Message as _;
+    use tonic::body::Body;
+    use tonic_types::StatusExt as _;
+    use tower::{Layer as _, ServiceExt as _};
+
+    use crate::proto::einride::example::freight::v1::freight_service_server::FreightServiceServer;
+    use crate::service::SERVICE_DOMAIN;
+
+    let (freight, _iam) = make_server();
+    // Build the stack exactly as `main.rs` does: the error-domain layer wrapping
+    // the freight service.
+    let stack =
+        aip::errordomain::Layer::new(SERVICE_DOMAIN).layer(FreightServiceServer::new(freight));
+
+    // A valid parent so the request reaches REQUIRED-field validation, with a
+    // bare `site` so `display_name` is missing — the `aip-fieldbehavior` library
+    // error stamped with the `aip-rs` sentinel.
+    let payload = CreateSiteRequest {
+        parent: PARENT.to_owned(),
+        site: Some(Site::default()),
+        ..Default::default()
+    }
+    .encode_to_vec();
+    // Frame it as a unary gRPC message: a 5-byte length prefix (compression flag
+    // + big-endian length) ahead of the encoded request.
+    let mut framed = BytesMut::with_capacity(payload.len() + 5);
+    framed.put_u8(0);
+    framed.put_u32(payload.len() as u32);
+    framed.extend_from_slice(&payload);
+
+    let request: http::Request<Body> = http::Request::builder()
+        .method(http::Method::POST)
+        .uri("/einride.example.freight.v1.FreightService/CreateSite")
+        .header(http::header::CONTENT_TYPE, "application/grpc")
+        .header("te", "trailers")
+        .body(Body::new(http_body_util::Full::new(framed.freeze())))
+        .expect("a valid gRPC request");
+
+    // `oneshot` drives readiness and the call in one step; the typed `request`
+    // pins the body type the freight service is generic over.
+    let response = stack
+        .oneshot(request)
+        .await
+        .expect("the layered service responds");
+
+    // A unary error arrives trailers-only (status in the response headers); fall
+    // back to the body's real trailers, exactly as a gRPC client reads a status.
+    let status = match tonic::Status::from_header_map(response.headers()) {
+        Some(status) => status,
+        None => {
+            let trailers = response
+                .into_body()
+                .collect()
+                .await
+                .expect("the body collects")
+                .trailers()
+                .cloned()
+                .expect("a status rides in the trailers");
+            tonic::Status::from_header_map(&trailers).expect("a status in the trailers")
+        }
+    };
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    let info = status
+        .get_details_error_info()
+        .expect("ErrorInfo is attached");
+    assert_eq!(info.reason, "FIELD_REQUIRED");
+    // The library stamped `aip-rs`; the boundary layer rewrote it on the way out.
+    assert_eq!(info.domain, SERVICE_DOMAIN);
 }

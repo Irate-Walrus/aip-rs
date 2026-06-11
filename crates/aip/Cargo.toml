@@ -16,6 +16,10 @@ aip-fieldmask    = { workspace = true, optional = true }
 aip-ordering     = { workspace = true, optional = true }
 aip-filtering     = { workspace = true, optional = true }
 aip-fieldbehavior = { workspace = true, optional = true }
+# AIP-193 error-domain boundary layer (issue #145, ADR-0007): the tonic/tower
+# `Layer` that stamps one `ErrorInfo.domain` per service. Pulled in by the
+# umbrella `tonic` feature, since it is only meaningful on a tonic server.
+aip-errordomain   = { workspace = true, optional = true }
 aip-etag          = { workspace = true, optional = true }
 aip-softdelete    = { workspace = true, optional = true }
 aip-preview       = { workspace = true, optional = true }
@@ -49,14 +53,21 @@ preview       = ["dep:aip-preview"]
 validation    = ["dep:aip-validation"]
 # Resource-annotation reflection (issue #61): surfaced as `aip::reflect`.
 reflect       = ["dep:aip-reflect"]
+# AIP-193 error-domain boundary layer (issue #145): surfaced as `aip::errordomain`.
+# Not in `default` — it is a tonic server layer, so it is pulled in by the `tonic`
+# feature below rather than carried into proto-free default builds (ADR-0007).
+errordomain   = ["dep:aip-errordomain"]
 # Deliberately not in `default` (ADR-0010): the IAM primitives are opt-in while
 # the slice matures.
 iam           = ["dep:aip-iam"]
 # Deliberately not in `default` (ADR-0005): the SQL adapter is opt-in.
 sql           = ["dep:aip-sql"]
 
-# Forward the optional integrations to whichever sub-crates are enabled.
+# Forward the optional integrations to whichever sub-crates are enabled, and pull
+# in the error-domain boundary layer (issue #145) — a service mapping errors to
+# `tonic::Status` is exactly who installs it to present one `ErrorInfo.domain`.
 tonic = [
+    "errordomain",
     "aip-resourcename?/tonic",
     "aip-resourceid?/tonic",
     "aip-requestid?/tonic",

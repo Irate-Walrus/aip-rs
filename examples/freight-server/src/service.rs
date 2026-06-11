@@ -486,11 +486,11 @@ impl FreightService for FreightServer {
         // AIP-203 REQUIRED-field validation runs reflectively over the whole
         // request, so the `BadRequest` paths are request-rooted
         // (`site.display_name`) and every missing field comes back in one
-        // response. The library error is re-stamped to the service domain so the
-        // service presents a single AIP-193 domain to clients (ADR-0007) —
-        // this replaces the hand-rolled `display_name` presence check.
-        aip::fieldbehavior::validate_required(&req)
-            .map_err(|e| e.into_status_with_domain(SERVICE_DOMAIN))?;
+        // response. A bare `?` converts the library error at the `aip-rs`
+        // sentinel; the `aip::errordomain` boundary layer in `main.rs` rewrites
+        // that to the service domain so clients see one AIP-193 domain (ADR-0007)
+        // — this replaces the hand-rolled `display_name` presence check.
+        aip::fieldbehavior::validate_required(&req)?;
         // `site` is REQUIRED, so `validate_required` already rejected a missing
         // one above; keep the explicit guard rather than unwrapping, so this
         // never panics on a malformed request even if that annotation changes.
@@ -605,10 +605,10 @@ impl FreightService for FreightServer {
         // request, enforcing **all six** REQUIRED fields the proto declares
         // (`origin_site`, `destination_site`, and the four pickup/delivery
         // timestamps) — not just the two endpoints the hand-rolled check covered.
-        // Every missing field comes back in one response, re-stamped to the
-        // service domain (ADR-0007).
-        aip::fieldbehavior::validate_required(&req)
-            .map_err(|e| e.into_status_with_domain(SERVICE_DOMAIN))?;
+        // Every missing field comes back in one response; a bare `?` converts at
+        // the `aip-rs` sentinel and the `main.rs` boundary layer rewrites it to
+        // the service domain (ADR-0007).
+        aip::fieldbehavior::validate_required(&req)?;
         // `shipment` is REQUIRED, so `validate_required` already rejected a
         // missing one above; keep the explicit guard rather than unwrapping, so
         // this never panics on a malformed request even if that annotation changes.
@@ -825,11 +825,12 @@ fn validate_shipper_name(field: &str, value: &str) -> Result<(), Status> {
 
 /// The AIP-193 `ErrorInfo.domain` the service presents to its clients. Passed to
 /// every [`Validator`] the handlers build for the policy checks no aip-rs
-/// primitive covers (e.g. the shipper-name pattern), and — per ADR-0007 —
-/// also to `Error::into_status_with_domain` so the reflective REQUIRED-field
-/// validation in `create_site` / `create_shipment` re-stamps its library error
-/// to this one service domain instead of leaking `aip-rs` to clients.
-const SERVICE_DOMAIN: &str = "freight.example.com";
+/// primitive covers (e.g. the shipper-name pattern), and — per ADR-0007 — handed
+/// once to the `aip::errordomain` boundary layer in `main.rs`, which rewrites the
+/// `aip-rs` sentinel every library error carries to this one service domain. So
+/// the handlers convert library errors with a bare `?`: the boundary, not each
+/// call site, owns the re-domaining.
+pub(crate) const SERVICE_DOMAIN: &str = "freight.example.com";
 
 /// The request-metadata key the demo reads the caller's IAM **Member** identity
 /// from. A real server derives the principal from authenticated transport (mTLS, a
@@ -1954,13 +1955,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_site_missing_display_name_carries_service_domain() {
+    async fn create_site_missing_display_name_carries_sentinel_domain() {
         use tonic_types::StatusExt as _;
 
         // `create_site` validates the required `display_name` reflectively
         // (dropping the old hand-rolled check). The request-rooted path is
-        // `site.display_name`, and the library error is re-stamped to the
-        // service domain (ADR-0007).
+        // `site.display_name`. This direct handler call bypasses the
+        // `aip::errordomain` boundary layer, so it pins the pre-boundary `aip-rs`
+        // sentinel; the layer rewrites it to the service domain on the wire
+        // (ADR-0007, proven by the through-stack test in `integration_tests`).
         let server = FreightServer::new();
         let status = server
             .create_site(Request::new(CreateSiteRequest {
@@ -1982,7 +1985,7 @@ mod tests {
             .get_details_error_info()
             .expect("an ErrorInfo is attached (AIP-193 MUST)");
         assert_eq!(info.reason, "FIELD_REQUIRED");
-        assert_eq!(info.domain, "freight.example.com");
+        assert_eq!(info.domain, "aip-rs");
     }
 
     #[tokio::test]
@@ -1992,7 +1995,8 @@ mod tests {
         // A bare shipment is missing all six REQUIRED fields (AIP-203). The
         // reflective validator accumulates them, so the client gets *every*
         // violation in a single `BadRequest` — request-rooted paths under
-        // `shipment.*` — carrying the service's own domain (ADR-0007).
+        // `shipment.*`. This direct call sees the pre-boundary `aip-rs` sentinel;
+        // the boundary layer rewrites it to the service domain (ADR-0007).
         let server = FreightServer::new();
         let status = server
             .create_shipment(Request::new(CreateShipmentRequest {
@@ -2028,7 +2032,7 @@ mod tests {
             .get_details_error_info()
             .expect("an ErrorInfo is attached (AIP-193 MUST)");
         assert_eq!(info.reason, "FIELD_REQUIRED");
-        assert_eq!(info.domain, "freight.example.com");
+        assert_eq!(info.domain, "aip-rs");
     }
 
     #[tokio::test]

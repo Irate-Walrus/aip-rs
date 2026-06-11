@@ -25,7 +25,7 @@ use crate::iam::IamServer;
 use crate::proto::einride::example::freight::v1::freight_service_server::FreightServiceServer;
 use crate::proto::google::iam::v1::iam_policy_server::IamPolicyServer;
 use crate::proto::FILE_DESCRIPTOR_SET;
-use crate::service::FreightServer;
+use crate::service::{FreightServer, SERVICE_DOMAIN};
 use crate::storage::PolicyStore;
 
 #[tokio::main]
@@ -56,6 +56,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("freight-server (aip-rs demo) listening on {addr}");
     Server::builder()
+        // Set the AIP-193 error domain once at the serving boundary (aip #145,
+        // ADR-0007): the layer rewrites the `aip-rs` sentinel every library error
+        // carries to this service's own domain, so clients always see one
+        // `ErrorInfo.domain`. The handlers convert library errors with a bare `?`
+        // and never re-stamp per call site.
+        .layer(aip::errordomain::Layer::new(SERVICE_DOMAIN))
         .add_service(FreightServiceServer::new(server))
         .add_service(IamPolicyServer::new(iam))
         .add_service(reflection_v1)
