@@ -6,13 +6,12 @@
 //! per-feature crates land. Site, Shipment, and the batch method return
 //! `Unimplemented` until they follow the same pattern.
 
-use std::cmp::Ordering;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aip::fieldbehavior::FieldBehavior;
 use aip::iam::{Member, Permission};
-use aip::pagination::{PageRequest, PageToken};
+use aip::pagination::{Page, SizeLimits};
 use aip::preview;
 use aip::validation::Validator;
 use prost::Message as _;
@@ -37,13 +36,13 @@ use crate::storage::{PolicyStore, Storage};
 /// segment (ADR-0011); a test guards the two against drifting apart.
 const SHIPPERS_COLLECTION: &str = "shippers";
 
-/// Default page size when a `ListShippers` request leaves `page_size` unset —
-/// AIP-158 says the server picks an appropriate default.
-const DEFAULT_PAGE_SIZE: usize = 50;
-
-/// Upper bound on a single page, so a client can't pull the whole store in one
-/// request — AIP-158 allows the server to return fewer results than requested.
-const MAX_PAGE_SIZE: usize = 1000;
+/// The AIP-158 page-size policy passed to [`Page::parse`]: the default the server
+/// picks when a request leaves `page_size` unset, and the cap that stops a client
+/// pulling the whole store in one request (the server may return fewer than asked).
+const PAGE_LIMITS: SizeLimits = SizeLimits {
+    default: 50,
+    max: 1000,
+};
 
 /// The Site field paths that `ListSites` accepts in an AIP-132 `order_by`. Used
 /// as the allow-list for [`OrderBy::validate_for_paths`]; the nested `lat_lng.*`
@@ -184,13 +183,14 @@ impl FreightService for FreightServer {
         request: Request<ListShippersRequest>,
     ) -> Result<Response<ListShippersResponse>, Status> {
         let req = request.into_inner();
-        // Offset pagination (AIP-158) over the stable shipper listing. `parse_page`
+        // Offset pagination (AIP-158) over the stable shipper listing. `Page::parse`
         // checksums the request's non-pagination fields, verifies the offset token
         // against that checksum (rejecting a request that changed mid-pagination),
-        // and resolves the page size; an empty token starts at offset 0.
-        let page = parse_page(&req)?;
+        // and resolves the page size against `PAGE_LIMITS`; an empty token starts at
+        // offset 0, and a negative `page_size` is `INVALID_ARGUMENT` (AIP-193).
+        let page = Page::parse(&req, PAGE_LIMITS)?;
         // AIP-164: soft-deleted shippers are dropped unless `show_deleted` was set.
-        // `show_deleted` is a non-pagination field, so `parse_page`'s request
+        // `show_deleted` is a non-pagination field, so `Page::parse`'s request
         // checksum covers it — flipping it mid-pagination rejects the stale token.
         // The visibility rule is the same `aip::softdelete` primitive `GetShipper`
         // uses; here it filters the in-memory listing before the page is sliced, so
@@ -208,13 +208,9 @@ impl FreightService for FreightServer {
             .collect();
         let total = shippers.len();
         let start = usize::try_from(page.token.offset).unwrap_or(0).min(total);
-        let end = start.saturating_add(page.size).min(total);
+        let end = start.saturating_add(page.size as usize).min(total);
         // Only hand back a `next_page_token` when results remain past this page.
-        let next_page_token = if end < total {
-            page.token.next(page.size as i32).encode()
-        } else {
-            String::new()
-        };
+        let next_page_token = page.next_token(end < total);
         let shippers = shippers.drain(start..end).collect();
         Ok(Response::new(ListShippersResponse {
             shippers,
@@ -429,9 +425,9 @@ impl FreightService for FreightServer {
         order_by.validate_for_paths(SORTABLE_SITE_PATHS)?;
 
         // Offset pagination (AIP-158). `order_by` is a non-pagination field, so
-        // the request checksum `parse_page` computes covers it: changing it
+        // the request checksum `Page::parse` computes covers it: changing it
         // mid-pagination flips the checksum and the now-stale token is rejected.
-        let page = parse_page(&req)?;
+        let page = Page::parse(&req, PAGE_LIMITS)?;
 
         // The AIP-160 `filter` is parsed + type-checked (`aip::filtering`) and
         // transpiled to a parameterized `Predicate` (`aip::sql`); an empty filter
@@ -464,14 +460,10 @@ impl FreightService for FreightServer {
         let mut sites =
             self.storage
                 .list_sites_page(&predicate, &order, page.size as u64 + 1, offset);
-        let has_more = sites.len() > page.size;
-        sites.truncate(page.size);
+        let has_more = sites.len() > page.size as usize;
+        sites.truncate(page.size as usize);
 
-        let next_page_token = if has_more {
-            page.token.next(page.size as i32).encode()
-        } else {
-            String::new()
-        };
+        let next_page_token = page.next_token(has_more);
         Ok(Response::new(ListSitesResponse {
             sites,
             next_page_token,
@@ -563,9 +555,9 @@ impl FreightService for FreightServer {
         validate_shipper_name("parent", &req.parent)?;
 
         // Offset pagination (AIP-158). `filter` is a non-pagination field, so the
-        // request checksum `parse_page` computes covers it: changing it
+        // request checksum `Page::parse` computes covers it: changing it
         // mid-pagination flips the checksum and the stale token is rejected.
-        let page = parse_page(&req)?;
+        let page = Page::parse(&req, PAGE_LIMITS)?;
 
         // The same server-side composition as `ListSites`: the user's
         // AIP-160 `filter` (parsed + type-checked + transpiled) folded with the
@@ -582,14 +574,10 @@ impl FreightService for FreightServer {
         let mut shipments =
             self.storage
                 .list_shipments_page(&predicate, &order, page.size as u64 + 1, offset);
-        let has_more = shipments.len() > page.size;
-        shipments.truncate(page.size);
+        let has_more = shipments.len() > page.size as usize;
+        shipments.truncate(page.size as usize);
 
-        let next_page_token = if has_more {
-            page.token.next(page.size as i32).encode()
-        } else {
-            String::new()
-        };
+        let next_page_token = page.next_token(has_more);
         Ok(Response::new(ListShipmentsResponse {
             shipments,
             next_page_token,
@@ -812,50 +800,6 @@ fn scoped_predicate(parent: &str, user_filter: Option<aip::sql::Predicate>) -> a
     // one was supplied.
     clauses.extend(user_filter);
     aip::sql::Predicate::all(clauses)
-}
-
-/// The resolved AIP-158 pagination state for one list page, produced by
-/// [`parse_page`]: the verified offset page token and the clamped page size.
-struct Page {
-    /// The verified offset page token. `token.offset` is where this page starts;
-    /// `token.next(size)` mints the following page's token, carrying the request
-    /// checksum forward so a mid-pagination change is still rejected.
-    token: PageToken,
-    /// The page size after the AIP-158 default/cap has been applied.
-    size: usize,
-}
-
-/// Folds the AIP-158 list-pagination preamble into a single step: checksum the
-/// request's non-pagination fields, parse and verify the offset page token
-/// against that checksum, and resolve the page size. Both list handlers open
-/// their pagination logic with `parse_page(&req)?`.
-fn parse_page<M: PageRequest + ReflectMessage>(request: &M) -> Result<Page, Status> {
-    // Compute the request checksum directly off the concrete request. The generated
-    // types are Typed messages (`ReflectMessage`, ADR-0009), so the descriptor
-    // travels with the value and `request_checksum` takes it without the
-    // `DynamicMessage` bridge or a hand-derived message name. A checksum failure
-    // would mean the type and its descriptor disagree — a build bug, not bad input
-    // — so it surfaces as `internal`.
-    let checksum = aip::pagination::request_checksum(request)
-        .map_err(|e| Status::internal(format!("compute request checksum: {e}")))?;
-    // A malformed token, version mismatch, or checksum mismatch converts via the
-    // crate's AIP-193 `From<Error> for Status` to an `INVALID_ARGUMENT`
-    // carrying an `ErrorInfo` (e.g. `PAGE_TOKEN_CHECKSUM_MISMATCH`).
-    let token = PageToken::parse(request, checksum)?;
-    let size = effective_page_size(request.page_size())?;
-    Ok(Page { token, size })
-}
-
-/// Resolves the effective page size from a request's `page_size` per AIP-158: a
-/// negative value is rejected with `INVALID_ARGUMENT`, zero/unset falls back to
-/// [`DEFAULT_PAGE_SIZE`], and a positive value is capped at [`MAX_PAGE_SIZE`] (the
-/// server may return fewer results than the client requested).
-fn effective_page_size(requested: i32) -> Result<usize, Status> {
-    match requested.cmp(&0) {
-        Ordering::Less => Err(Status::invalid_argument("page_size must not be negative")),
-        Ordering::Equal => Ok(DEFAULT_PAGE_SIZE),
-        Ordering::Greater => Ok((requested as usize).min(MAX_PAGE_SIZE)),
-    }
 }
 
 /// Validates that `value` is a well-formed shipper resource name (AIP-122): a
@@ -1245,35 +1189,20 @@ mod tests {
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
     }
 
-    #[test]
-    fn effective_page_size_applies_aip158_rules() {
-        // AIP-158: a negative `page_size` is rejected, zero/unset falls back to
-        // the default, a positive value passes through, and anything above the
-        // cap is clamped to the max.
-        assert_eq!(
-            effective_page_size(-1)
-                .expect_err("negative is rejected")
-                .code(),
-            tonic::Code::InvalidArgument,
-        );
-        assert_eq!(
-            effective_page_size(0).expect("zero is the default"),
-            DEFAULT_PAGE_SIZE
-        );
-        assert_eq!(
-            effective_page_size(10).expect("positive passes through"),
-            10
-        );
-        assert_eq!(
-            effective_page_size(i32::MAX).expect("over-max is clamped"),
-            MAX_PAGE_SIZE,
-        );
-    }
+    // The AIP-158 size-resolution rules (negative rejected, zero → default,
+    // positive capped at max) now live in `aip-pagination`'s
+    // `resolve_size_applies_aip158_rules` unit test. The handler tests below keep
+    // the end-to-end negative-`page_size` rejection for both list shapes.
 
     #[tokio::test]
     async fn list_sites_rejects_negative_page_size() {
+        use tonic_types::StatusExt as _;
+
         // A negative `page_size` is InvalidArgument (AIP-158), not a silent
-        // fall-back to the default page.
+        // fall-back to the default page. It flows through `Page::parse` and the
+        // `aip-pagination` AIP-193 `From<Error> for Status`, so the response
+        // carries the `PAGE_SIZE_NEGATIVE` `ErrorInfo` and — since `page_size` is
+        // a named request field — a `BadRequest` violation pointing at it.
         let server = FreightServer::new();
         let status = server
             .list_sites(Request::new(ListSitesRequest {
@@ -1284,11 +1213,22 @@ mod tests {
             .await
             .expect_err("negative page_size is rejected");
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+        let info = status
+            .get_details_error_info()
+            .expect("an ErrorInfo is attached (AIP-193 MUST)");
+        assert_eq!(info.reason, "PAGE_SIZE_NEGATIVE");
+        assert_eq!(info.domain, "aip-rs");
+
+        let bad = status
+            .get_details_bad_request()
+            .expect("a BadRequest field violation is attached");
+        assert_eq!(bad.field_violations[0].field, "page_size");
     }
 
     #[tokio::test]
     async fn list_shippers_rejects_negative_page_size() {
-        // The shared `parse_page` preamble rejects a negative `page_size` for
+        // The shared `Page::parse` preamble rejects a negative `page_size` for
         // `ListShippers` too — independent of whether any shippers exist.
         let server = FreightServer::new();
         let status = server
