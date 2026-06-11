@@ -315,13 +315,13 @@ wired up.
 | ----------------- | -------------------------------------------- | ------------ | ----------- |
 | `GetShipper`      | `resourcename` (validate) + generated `ShipperResourceName` (pattern match), `iam` (AIP-211 authorization → non-leaking `PERMISSION_DENIED` / `NOT_FOUND`-via-parent over the shared Policy store), `softdelete` (AIP-164 `show_deleted` visibility gating) | #4, #67, #82, #96 | wired⁶¹⁰ |
 | `ListShippers`    | `pagination` (offset page-token codec + request-checksum guard) + `softdelete` (AIP-164 `show_deleted` filtering) | #6, #7, #96 | wired²¹⁰ |
-| `CreateShipper`   | `resourceid` (generate), generated `ShipperResourceName` (validated `new` + infallible `Display`), `fieldbehavior` (clear OUTPUT_ONLY/IMMUTABLE, validate REQUIRED), `etag` (stamp the AIP-154 content etag), `requestid` (AIP-155 `request_id` validation + idempotent replay), AIP-163 `validate_only` preview | #5, #3, #59, #82, #93, #94, #95, #124 | wired⁸⁹ |
-| `UpdateShipper`   | `fieldmask` (typed `update` over `update_mask`), `fieldbehavior` (copy OUTPUT_ONLY from existing, validate REQUIRED in mask), `etag` (AIP-154 freshness check + re-stamp), AIP-163 `validate_only` preview | #8, #48, #59, #93, #95 | wired⁸⁹ |
+| `CreateShipper`   | `resourceid` (generate), generated `ShipperResourceName` (validated `new` + infallible `Display`), `fieldbehavior` (clear OUTPUT_ONLY/IMMUTABLE, validate REQUIRED), `etag` (stamp the AIP-154 content etag), `requestid` (AIP-155 `request_id` validation + idempotent replay), `preview` (AIP-163 `validate_only` gate) | #5, #3, #59, #82, #93, #94, #95, #124, #130 | wired⁸⁹ |
+| `UpdateShipper`   | `fieldmask` (typed `update` over `update_mask`), `fieldbehavior` (copy OUTPUT_ONLY from existing, validate REQUIRED in mask), `etag` (AIP-154 freshness check + re-stamp), `preview` (AIP-163 `validate_only` gate) | #8, #48, #59, #93, #95, #130 | wired⁸⁹ |
 | `DeleteShipper`   | `resourcename` (validate) + generated `ShipperResourceName` (pattern match), `etag` (AIP-154 freshness check), `softdelete` (AIP-164 soft delete — stamp `delete_time`, keep the record) | #4, #82, #93, #96 | wired⁸¹⁰ |
 | `UndeleteShipper` | `resourcename` (validate) + generated `ShipperResourceName` (pattern match), `softdelete` (AIP-164 undelete — clear `delete_time` after confirming the shipper is soft-deleted, else `ALREADY_EXISTS`) | #96 | wired¹⁰ |
-| `CreateSite`      | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `SiteResourceName` (validated `new` + infallible `Display`), `fieldbehavior` (reflective REQUIRED validation re-stamped to the service domain → AIP-193), `requestid` (AIP-155 idempotent replay), AIP-163 `validate_only` preview | #5, #3, #59, #82, #94, #95, #119, #124 | wired⁹ |
+| `CreateSite`      | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `SiteResourceName` (validated `new` + infallible `Display`), `fieldbehavior` (reflective REQUIRED validation re-stamped to the service domain → AIP-193), `requestid` (AIP-155 idempotent replay), `preview` (AIP-163 `validate_only` gate) | #5, #3, #59, #82, #94, #95, #119, #124, #130 | wired⁹ |
 | `ListSites`       | `ordering` (parse/validate) + `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (filter declarations derived from the `Site` descriptor + server-composed scope/soft-delete + `ORDER BY`/`LIMIT`/`OFFSET` → in-memory SQLite), with the in-memory `filtering` matcher pinned against SQLite | #9, #10, #6, #7, #11, #39, #40, #41, #42, #43, #92, #127 | wired³ |
-| `CreateShipment`  | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `ShipmentResourceName` (validated `new` + infallible `Display`), `fieldbehavior` (reflective REQUIRED validation of all six fields — endpoints + four pickup/delivery timestamps — re-stamped to the service domain → one AIP-193 response), `requestid` (AIP-155 idempotent replay), AIP-163 `validate_only` preview | #5, #3, #59, #82, #94, #95, #119, #124 | wired⁴⁹ |
+| `CreateShipment`  | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `ShipmentResourceName` (validated `new` + infallible `Display`), `fieldbehavior` (reflective REQUIRED validation of all six fields — endpoints + four pickup/delivery timestamps — re-stamped to the service domain → one AIP-193 response), `requestid` (AIP-155 idempotent replay), `preview` (AIP-163 `validate_only` gate) | #5, #3, #59, #82, #94, #95, #119, #124, #130 | wired⁴⁹ |
 | `ListShipments`   | `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (filter declarations derived from the `Shipment` descriptor + server-composed scope/soft-delete → in-memory SQLite) | #6, #7, #43, #127 | wired⁴ |
 | `IAMPolicy.GetIamPolicy` / `SetIamPolicy` | `iam` (Member validation + structural read-modify-write: dedupe/normalise, `etag` optimistic concurrency, conditions⟹version-3) over a decomposed SQLite policy store (iam-go's `iam_policy_bindings` schema) | #64, #65 | wired⁵ |
 | `IAMPolicy.TestIamPermissions` | `iam` + the opt-in cel-backed `eval` adapter (`aip::iam::eval`): role→permission expansion via an example-owned catalogue, Member matching, Condition evaluation | #66, #68 | wired⁷ |
@@ -462,9 +462,10 @@ the **full** validation pipeline — REQUIRED-field behavior, the
 and returns the resource that *would* result, but commits nothing (and mints no
 AIP-155 idempotency record), so a preview leaves the store untouched and a later
 real write still takes effect. It composes with the existing validation rather
-than forking a second path: a single `commit_unless_preview(req.validate_only, …)`
-gate wraps only the store write, so validation runs unconditionally before it and
-a request that would fail fails **byte-identically** (same AIP-193 details) with
+than forking a second path: a single `aip::preview::commit_unless(req.validate_only, …)`
+gate (#130) — *commit unless preview* — wraps only the store write, so validation
+runs unconditionally before it and a request that would fail fails
+**byte-identically** (same AIP-193 details) with
 or without the flag. A create still mints its system-assigned id in the preview
 (returned, not stored). `DeleteShipper` and the unwired Site/Shipment standard
 methods do not carry it yet.

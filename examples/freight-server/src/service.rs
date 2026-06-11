@@ -14,6 +14,7 @@ use aip::fieldbehavior::FieldBehavior;
 use aip::iam::{Member, Permission};
 use aip::ordering::OrderByRequest;
 use aip::pagination::{PageRequest, PageToken};
+use aip::preview;
 use aip::validation::Validator;
 use prost::Message as _;
 use prost_reflect::ReflectMessage;
@@ -272,7 +273,7 @@ impl FreightService for FreightServer {
         // AIP-163: a `validate_only` request previews the would-be shipper —
         // system-assigned id and etag minted — without persisting it or recording
         // an idempotency entry, so a later real create still mints a new shipper.
-        commit_unless_preview(req.validate_only, || {
+        preview::commit_unless(req.validate_only, || {
             self.storage.put_shipper(shipper.clone());
             // Record the result so a retry carrying the same `request_id` replays it.
             idempotent_record(&self.storage, &request_id, fingerprint, &shipper);
@@ -337,7 +338,7 @@ impl FreightService for FreightServer {
         shipper.etag = aip::etag::compute_etag(&shipper);
         // AIP-163: a `validate_only` request previews the merged shipper without
         // persisting it, so the stored shipper is left untouched.
-        commit_unless_preview(req.validate_only, || {
+        preview::commit_unless(req.validate_only, || {
             self.storage.put_shipper(shipper.clone())
         });
         Ok(Response::new(shipper))
@@ -528,7 +529,7 @@ impl FreightService for FreightServer {
         site.delete_time = None;
         // AIP-163: a `validate_only` request previews the would-be site without
         // persisting it or recording an idempotency entry.
-        commit_unless_preview(req.validate_only, || {
+        preview::commit_unless(req.validate_only, || {
             self.storage.put_site(site.clone());
             idempotent_record(&self.storage, &request_id, fingerprint, &site);
         });
@@ -651,7 +652,7 @@ impl FreightService for FreightServer {
         shipment.delete_time = None;
         // AIP-163: a `validate_only` request previews the would-be shipment
         // without persisting it or recording an idempotency entry.
-        commit_unless_preview(req.validate_only, || {
+        preview::commit_unless(req.validate_only, || {
             self.storage.put_shipment(shipment.clone());
             idempotent_record(&self.storage, &request_id, fingerprint, &shipment);
         });
@@ -1037,21 +1038,6 @@ fn idempotent_record(
         return;
     }
     storage.idempotent_put(request_id.to_owned(), fingerprint, response.encode_to_vec());
-}
-
-/// AIP-163 preview gate: persist a mutation only when the request is a real
-/// write. A `validate_only` request has already run the full validation pipeline
-/// above (REQUIRED fields, the [`Validator`] accumulator, resource-name and etag
-/// checks) and built the would-be resource; this skips `commit`, so the preview
-/// leaves the store — and the AIP-155 idempotency cache — untouched while the
-/// handler still returns the resource it would have committed. Validation runs
-/// unconditionally before this point, so a request that would fail fails
-/// identically with or without the flag, and `validate_only` stays one line per
-/// handler rather than a forked validation path.
-fn commit_unless_preview(validate_only: bool, commit: impl FnOnce()) {
-    if !validate_only {
-        commit();
-    }
 }
 
 /// The standard `Unimplemented` status for a method that hasn't been wired yet.

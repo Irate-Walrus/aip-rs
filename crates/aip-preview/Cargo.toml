@@ -1,0 +1,10 @@
+[package]
+name = "aip-preview"
+description = "AIP-163 validate_only preview gate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]

@@ -56,6 +56,14 @@ pub use aip_etag as etag;
 #[cfg(feature = "softdelete")]
 pub use aip_softdelete as softdelete;
 
+/// AIP-163 `validate_only` preview gate (issue #130) — default-on via the
+/// `preview` feature: [`commit_unless`](aip_preview::commit_unless) runs a
+/// mutation's commit only for a real write, skipping the store write and the
+/// AIP-155 idempotency record on a preview while the handler still returns the
+/// would-be resource.
+#[cfg(feature = "preview")]
+pub use aip_preview as preview;
+
 /// Field-violation accumulator (issue #60): collects per-field validation
 /// failures into one AIP-193 error. Default-on via the `validation` feature.
 #[cfg(feature = "validation")]

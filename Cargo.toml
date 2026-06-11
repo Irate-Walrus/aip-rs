@@ -44,6 +44,11 @@ aip-etag         = { version = "0.1.0", path = "crates/aip-etag" }
 # reflection dependency, like aip-requestid. Default-on via the umbrella's
 # `softdelete` feature.
 aip-softdelete   = { version = "0.1.0", path = "crates/aip-softdelete" }
+# AIP-163 validate_only preview gate (issue #130): `commit_unless` names the gate
+# the example owned as a local fn. Value-based (a bool decision over a commit
+# closure), so no datastore or reflection dependency, like aip-requestid.
+# Default-on via the umbrella's `preview` feature.
+aip-preview      = { version = "0.1.0", path = "crates/aip-preview" }
 # Field-violation accumulator (issue #60): collects per-field failures into one
 # AIP-193 error. Default-on via the umbrella's `validation` feature.
 aip-validation   = { version = "0.1.0", path = "crates/aip-validation" }

@@ -22,6 +22,7 @@ dependencies = [
  "aip-iam",
  "aip-ordering",
  "aip-pagination",
+ "aip-preview",
  "aip-reflect",
  "aip-requestid",
  "aip-resourceid",
@@ -135,6 +136,10 @@ dependencies = [
  "tonic",
  "tonic-types",
 ]
+
+[[package]]
+name = "aip-preview"
+version = "0.1.0"
 
 [[package]]
 name = "aip-proto"
