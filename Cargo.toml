@@ -88,9 +88,10 @@ base64     = "0.22"
 crc32fast  = "1"
 uuid       = { version = "1", features = ["v4"] }
 
-# CEL parser + interpreter (the cel-rust project) for `aip-iam`'s opt-in `eval`
-# adapter (ADR-0010): compile and evaluate an IAM **Condition** (general CEL, not
-# the AIP-160 subset). Strictly behind the non-default `eval` feature so
+# CEL parser + interpreter (the cel-rust project) for `aip-iam`'s opt-in `iam-eval`
+# umbrella feature (forwarding to `aip-iam`'s `eval`) (ADR-0010): compile and
+# evaluate an IAM **Condition** (general CEL, not the AIP-160 subset). Strictly
+# behind the non-default `iam-eval` feature so
 # parse/validate-only users never pull the parser/runtime. `chrono` rides with it
 # because a CEL `request.time` value is a `chrono` timestamp (cel's default
 # `chrono` feature), so a `std::time::SystemTime` is lowered through it.
