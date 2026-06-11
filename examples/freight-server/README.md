@@ -29,8 +29,9 @@ toolchain for the bundled SQLite.
 
 ## Try it
 
-With [`grpcurl`](https://github.com/fullstorydev/grpcurl) (the server speaks
-gRPC server reflection, so no `-import-path`/`-proto` flags needed):
+With [`grpcurl`](https://github.com/fullstorydev/grpcurl) and
+[`jq`](https://jqlang.org) (the server speaks gRPC server reflection, so no
+`-import-path`/`-proto` flags needed):
 
 ```sh
 # List all served services via reflection.
@@ -39,14 +40,13 @@ grpcurl -plaintext 127.0.0.1:50051 list
 SVC=einride.example.freight.v1.FreightService
 gc() { grpcurl -plaintext "$@"; }
 
-# CreateShipper mints a system-assigned id (a UUIDv4, per AIP-148), so it
-# returns a name like `shippers/daf1cb3e-f33b-43f1-81cc-e65fda51efa5`. Copy that
-# name from the response into the calls below (shown here as `shippers/$ID`).
-gc -d '{"shipper":{"display_name":"Acme"}}' 127.0.0.1:50051 $SVC/CreateShipper
+# CreateShipper mints a system-assigned id (a UUIDv4, per AIP-148). Capture the
+# returned name — a `shippers/<uuid>` string — into $ID for the calls below.
+ID=$(gc -d '{"shipper":{"display_name":"Acme"}}' 127.0.0.1:50051 $SVC/CreateShipper | jq -r .name)
 gc -d '{}'                                  127.0.0.1:50051 $SVC/ListShippers
-# Every read carries an opaque AIP-154 `etag`. Copy it from the response
-# (an 8-char hex string) into the read-modify-write calls below (as `$ETAG`).
-gc -d '{"name":"shippers/$ID"}'             127.0.0.1:50051 $SVC/GetShipper
+# Every read carries an opaque AIP-154 `etag` (an 8-char hex string). Capture it
+# from GetShipper into $ETAG for the read-modify-write calls below.
+ETAG=$(gc -d '{"name":"'"$ID"'"}' 127.0.0.1:50051 $SVC/GetShipper | jq -r .etag)
 
 # AIP-155 idempotency: a `request_id` (a UUID) makes the create safe to
 # retry. Send the SAME request twice with the same id — the second call replays
@@ -54,12 +54,12 @@ gc -d '{"name":"shippers/$ID"}'             127.0.0.1:50051 $SVC/GetShipper
 # network retry can't double-create. `aip::requestid` validates the id and names
 # the replay/conflict contract; the demo keeps the seen ids in memory.
 RID=$(uuidgen)
-gc -d '{"shipper":{"display_name":"Acme"},"requestId":"'$RID'"}' 127.0.0.1:50051 $SVC/CreateShipper
-gc -d '{"shipper":{"display_name":"Acme"},"requestId":"'$RID'"}' 127.0.0.1:50051 $SVC/CreateShipper  # same name back
+gc -d '{"shipper":{"display_name":"Acme"},"requestId":"'"$RID"'"}' 127.0.0.1:50051 $SVC/CreateShipper
+gc -d '{"shipper":{"display_name":"Acme"},"requestId":"'"$RID"'"}' 127.0.0.1:50051 $SVC/CreateShipper  # same name back
 # Reusing that id with a DIFFERENT body is rejected with AlreadyExists +
 # AIP-193 details (reason REQUEST_ID_CONFLICT / domain freight.example.com —
 # the one service domain every error carries; see "Error domain" below).
-gc -d '{"shipper":{"display_name":"Other"},"requestId":"'$RID'"}' 127.0.0.1:50051 $SVC/CreateShipper
+gc -d '{"shipper":{"display_name":"Other"},"requestId":"'"$RID"'"}' 127.0.0.1:50051 $SVC/CreateShipper
 # A malformed (non-UUID) id is InvalidArgument (reason REQUEST_ID_INVALID).
 gc -d '{"shipper":{"display_name":"Acme"},"requestId":"not-a-uuid"}' 127.0.0.1:50051 $SVC/CreateShipper
 # AIP-163 validate_only: preview a create without committing. The full
@@ -73,92 +73,98 @@ gc -d '{"shipper":{},"validateOnly":true}'                         127.0.0.1:500
 # facade: only `display_name` is masked, so it changes while the rest of the
 # stored shipper is left untouched. Omit `display_name` from the request with the
 # same mask and it is cleared instead. It also runs the AIP-154 read-modify-write:
-# echo the etag you just read and the write succeeds, returning a *new* etag.
-gc -d '{"shipper":{"name":"shippers/$ID","display_name":"Acme Corp","etag":"$ETAG"},"updateMask":{"paths":["display_name"]}}' \
-                                            127.0.0.1:50051 $SVC/UpdateShipper
+# the current etag permits the write and returns a *new* etag — capture that.
+OLD_ETAG=$ETAG
+ETAG=$(gc -d '{"shipper":{"name":"'"$ID"'","display_name":"Acme Corp","etag":"'"$OLD_ETAG"'"},"updateMask":{"paths":["display_name"]}}' \
+                                            127.0.0.1:50051 $SVC/UpdateShipper | jq -r .etag)
 # UpdateShipper honours validate_only too: preview the merged shipper —
 # etag check, update mask, REQUIRED re-validation all run — without persisting it.
-gc -d '{"shipper":{"name":"shippers/$ID","display_name":"Preview","etag":"$ETAG"},"updateMask":{"paths":["display_name"]},"validateOnly":true}' \
+gc -d '{"shipper":{"name":"'"$ID"'","display_name":"Preview","etag":"'"$ETAG"'"},"updateMask":{"paths":["display_name"]},"validateOnly":true}' \
                                             127.0.0.1:50051 $SVC/UpdateShipper
 # Replaying the now-stale etag is rejected with ABORTED (reason ETAG_MISMATCH) —
 # the optimistic-concurrency guard against a racing writer. A garbage etag is
 # InvalidArgument (reason ETAG_MALFORMED) instead; omitting it writes unconditionally.
-gc -d '{"shipper":{"name":"shippers/$ID","display_name":"Clobber","etag":"$ETAG"},"updateMask":{"paths":["display_name"]}}' \
+gc -d '{"shipper":{"name":"'"$ID"'","display_name":"Clobber","etag":"'"$OLD_ETAG"'"},"updateMask":{"paths":["display_name"]}}' \
                                             127.0.0.1:50051 $SVC/UpdateShipper
 # DeleteShipper carries the etag on the request (it can't piggyback on the
 # resource): the current etag permits the delete, a stale one is ABORTED. The
 # delete is a *soft* delete (AIP-164): it stamps `delete_time` and keeps the
 # record, returning the shipper rather than removing it.
-gc -d '{"name":"shippers/$ID","etag":"$ETAG"}' 127.0.0.1:50051 $SVC/DeleteShipper
+ETAG=$(gc -d '{"name":"'"$ID"'","etag":"'"$ETAG"'"}' 127.0.0.1:50051 $SVC/DeleteShipper | jq -r .etag)
 # A soft-deleted shipper is now hidden: a plain GetShipper is NOT_FOUND (reason
 # SOFT_DELETE_NOT_FOUND), and ListShippers omits it — `aip::softdelete` owns the
 # visibility rule and its AIP-193 mapping.
-gc -d '{"name":"shippers/$ID"}'                127.0.0.1:50051 $SVC/GetShipper
-gc -d '{}'                                     127.0.0.1:50051 $SVC/ListShippers
+gc -d '{"name":"'"$ID"'"}'                127.0.0.1:50051 $SVC/GetShipper
+gc -d '{}'                                127.0.0.1:50051 $SVC/ListShippers
 # Pass `showDeleted` to see it again — on the Get and in the List.
-gc -d '{"name":"shippers/$ID","showDeleted":true}' 127.0.0.1:50051 $SVC/GetShipper
-gc -d '{"showDeleted":true}'                       127.0.0.1:50051 $SVC/ListShippers
+gc -d '{"name":"'"$ID"'","showDeleted":true}' 127.0.0.1:50051 $SVC/GetShipper
+gc -d '{"showDeleted":true}'                  127.0.0.1:50051 $SVC/ListShippers
 # UndeleteShipper clears the stamp; the shipper is live and visible again.
 # Undeleting a shipper that is *not* deleted is ALREADY_EXISTS (reason
 # SOFT_DELETE_NOT_DELETED) — there is nothing to recover.
-gc -d '{"name":"shippers/$ID"}'                127.0.0.1:50051 $SVC/UndeleteShipper
-gc -d '{"name":"shippers/$ID"}'                127.0.0.1:50051 $SVC/GetShipper
+gc -d '{"name":"'"$ID"'"}' 127.0.0.1:50051 $SVC/UndeleteShipper
+gc -d '{"name":"'"$ID"'"}' 127.0.0.1:50051 $SVC/GetShipper
 ```
 
 Sites live under a shipper, and `ListSites` honors an AIP-132 `order_by`.
 `CreateSite` also mints a system-assigned id, returning a name like
-`shippers/$ID/sites/$SITE_ID`:
+`shippers/$ID/sites/$SITE_ID`. Capture both site names — they are used in the
+Shipment section below:
 
 ```sh
 # Seed a couple of sites under the shipper, then list them ordered by name. Each
 # carries `annotations` (a map) and `tags` (a list) for the has-operator filters.
-gc -d '{"parent":"shippers/$ID","site":{"display_name":"Bravo","state":"STATE_ACTIVE","annotations":{"owner":"ops"},"tags":["refrigerated"]}}'  127.0.0.1:50051 $SVC/CreateSite
-gc -d '{"parent":"shippers/$ID","site":{"display_name":"Alpha","state":"STATE_INACTIVE","annotations":{"region":"west"},"tags":["bulk"]}}'      127.0.0.1:50051 $SVC/CreateSite
-gc -d '{"parent":"shippers/$ID","orderBy":"display_name"}'        127.0.0.1:50051 $SVC/ListSites
-gc -d '{"parent":"shippers/$ID","orderBy":"display_name desc"}'   127.0.0.1:50051 $SVC/ListSites
+SITE_BRAVO=$(gc -d '{"parent":"'"$ID"'","site":{"display_name":"Bravo","state":"STATE_ACTIVE","annotations":{"owner":"ops"},"tags":["refrigerated"]}}' \
+                                           127.0.0.1:50051 $SVC/CreateSite | jq -r .name)
+SITE_ALPHA=$(gc -d '{"parent":"'"$ID"'","site":{"display_name":"Alpha","state":"STATE_INACTIVE","annotations":{"region":"west"},"tags":["bulk"]}}' \
+                                           127.0.0.1:50051 $SVC/CreateSite | jq -r .name)
+gc -d '{"parent":"'"$ID"'","orderBy":"display_name"}'      127.0.0.1:50051 $SVC/ListSites
+gc -d '{"parent":"'"$ID"'","orderBy":"display_name desc"}' 127.0.0.1:50051 $SVC/ListSites
 
 # Sorting and paging happen in SQL: an ORDER BY plus a LIMIT/OFFSET derived
 # from the page size and the offset page token. Ask for one site per page, then
 # pass the returned `nextPageToken` back to get the next — the page boundaries
 # stay stable because the resource name breaks ties. (Changing `orderBy` or
 # `filter` mid-pagination flips the request checksum and rejects the token.)
-gc -d '{"parent":"shippers/$ID","orderBy":"display_name","pageSize":1}'                       127.0.0.1:50051 $SVC/ListSites
-gc -d '{"parent":"shippers/$ID","orderBy":"display_name","pageSize":1,"pageToken":"<TOKEN>"}' 127.0.0.1:50051 $SVC/ListSites
+TOKEN=$(gc -d '{"parent":"'"$ID"'","orderBy":"display_name","pageSize":1}' \
+                                           127.0.0.1:50051 $SVC/ListSites | jq -r '.nextPageToken // empty')
+gc -d '{"parent":"'"$ID"'","orderBy":"display_name","pageSize":1,"pageToken":"'"$TOKEN"'"}' \
+                                           127.0.0.1:50051 $SVC/ListSites
 
 # Bad syntax or an unknown ordering field is rejected with InvalidArgument —
 # and the status carries AIP-193 details: an ErrorInfo with a
 # machine-readable reason (ORDER_BY_UNKNOWN_FIELD / domain freight.example.com)
 # plus a BadRequest naming the offending field. grpcurl prints the details block.
-gc -d '{"parent":"shippers/$ID","orderBy":"bogus_field"}'         127.0.0.1:50051 $SVC/ListSites
+gc -d '{"parent":"'"$ID"'","orderBy":"bogus_field"}' 127.0.0.1:50051 $SVC/ListSites
 
 # AIP-160 filtering: the filter is type-checked, transpiled to parameterized
 # SQL by `aip::sql`, and run in the in-memory SQLite store, so only matching
 # sites come back. The full operator set lowers — `=` `!=` `<` `<=` `>` `>=`,
 # `AND` `OR` `NOT` — over the scalar `display_name`/`name`, the nested numeric
 # `lat_lng.latitude`, the timestamp `create_time`, and the enum `state`.
-gc -d '{"parent":"shippers/$ID","filter":"display_name = \"Alpha\" OR display_name = \"Bravo\""}' 127.0.0.1:50051 $SVC/ListSites
-gc -d '{"parent":"shippers/$ID","filter":"state = STATE_ACTIVE"}'                127.0.0.1:50051 $SVC/ListSites
-gc -d '{"parent":"shippers/$ID","filter":"create_time > \"2024-01-01T00:00:00Z\""}' 127.0.0.1:50051 $SVC/ListSites
+gc -d '{"parent":"'"$ID"'","filter":"display_name = \"Alpha\" OR display_name = \"Bravo\""}' 127.0.0.1:50051 $SVC/ListSites
+gc -d '{"parent":"'"$ID"'","filter":"state = STATE_ACTIVE"}'                127.0.0.1:50051 $SVC/ListSites
+gc -d '{"parent":"'"$ID"'","filter":"create_time > \"2024-01-01T00:00:00Z\""}' 127.0.0.1:50051 $SVC/ListSites
 
 # The has operator `:`: substring on a string, key presence in the `annotations`
 # map, and membership in the `tags` list (a timestamp takes only `create_time:*`
 # for presence). The map/list tests run through SQLite `json_each`.
-gc -d '{"parent":"shippers/$ID","filter":"display_name:lph"}'     127.0.0.1:50051 $SVC/ListSites
-gc -d '{"parent":"shippers/$ID","filter":"annotations:owner"}'    127.0.0.1:50051 $SVC/ListSites
-gc -d '{"parent":"shippers/$ID","filter":"tags:refrigerated"}'    127.0.0.1:50051 $SVC/ListSites
+gc -d '{"parent":"'"$ID"'","filter":"display_name:lph"}'     127.0.0.1:50051 $SVC/ListSites
+gc -d '{"parent":"'"$ID"'","filter":"annotations:owner"}'    127.0.0.1:50051 $SVC/ListSites
+gc -d '{"parent":"'"$ID"'","filter":"tags:refrigerated"}'    127.0.0.1:50051 $SVC/ListSites
 
 # Server-side predicate composition: the user `filter` above is never run alone.
 # `aip::sql::Predicate` folds it together with the server's own predicates — an
-# AIP parent scope (`name LIKE 'shippers/$ID/%'`, the parent escaped + bound) and
-# a soft-delete (`delete_time IS NULL`) — into one fragment that owns precedence
-# and placeholder numbering, so a user `a OR b` can't re-associate against the
+# AIP parent scope (`name LIKE '$ID/%'`, the parent escaped + bound) and a
+# soft-delete (`delete_time IS NULL`) — into one fragment that owns precedence and
+# placeholder numbering, so a user `a OR b` can't re-associate against the
 # server's `AND`s. The scope runs in the SQL `WHERE`, so a site under another
 # shipper never leaks into this listing.
-gc -d '{"parent":"shippers/$ID","filter":"display_name = \"Alpha\" OR display_name = \"Bravo\""}' 127.0.0.1:50051 $SVC/ListSites
+gc -d '{"parent":"'"$ID"'","filter":"display_name = \"Alpha\" OR display_name = \"Bravo\""}' 127.0.0.1:50051 $SVC/ListSites
 
 # A missing required field is rejected the same way (here the server's own
 # presence check, reason FIELD_REQUIRED / domain freight.example.com):
-gc -d '{"shipper":{}}'                                            127.0.0.1:50051 $SVC/CreateShipper
+gc -d '{"shipper":{}}'                                       127.0.0.1:50051 $SVC/CreateShipper
 ```
 
 Shipments live under a shipper too. `CreateShipment` mints a system-assigned id;
@@ -167,23 +173,24 @@ parent scope + soft-delete + the user `filter` — against its own SQLite store,
 carries no `order_by`, so results come back in resource-name order:
 
 ```sh
-# Seed a couple of shipments between sites, each carrying `annotations` (a map).
-# All six REQUIRED fields (AIP-203) must be set: both endpoints and the four
-# pickup/delivery timestamps — a missing one is rejected (see below).
-gc -d '{"parent":"shippers/$ID","shipment":{"origin_site":"shippers/$ID/sites/a","destination_site":"shippers/$ID/sites/b","pickup_earliest_time":"2024-01-01T08:00:00Z","pickup_latest_time":"2024-01-01T12:00:00Z","delivery_earliest_time":"2024-01-02T08:00:00Z","delivery_latest_time":"2024-01-02T12:00:00Z","annotations":{"priority":"high"}}}' 127.0.0.1:50051 $SVC/CreateShipment
-gc -d '{"parent":"shippers/$ID","shipment":{"origin_site":"shippers/$ID/sites/b","destination_site":"shippers/$ID/sites/a","pickup_earliest_time":"2024-01-01T08:00:00Z","pickup_latest_time":"2024-01-01T12:00:00Z","delivery_earliest_time":"2024-01-02T08:00:00Z","delivery_latest_time":"2024-01-02T12:00:00Z","annotations":{"region":"west"}}}'   127.0.0.1:50051 $SVC/CreateShipment
+# Seed a couple of shipments between the sites created above, each carrying
+# `annotations` (a map). All six REQUIRED fields (AIP-203) must be set: both
+# endpoints and the four pickup/delivery timestamps — a missing one is rejected
+# (see below).
+gc -d '{"parent":"'"$ID"'","shipment":{"origin_site":"'"$SITE_BRAVO"'","destination_site":"'"$SITE_ALPHA"'","pickup_earliest_time":"2024-01-01T08:00:00Z","pickup_latest_time":"2024-01-01T12:00:00Z","delivery_earliest_time":"2024-01-02T08:00:00Z","delivery_latest_time":"2024-01-02T12:00:00Z","annotations":{"priority":"high"}}}' 127.0.0.1:50051 $SVC/CreateShipment
+gc -d '{"parent":"'"$ID"'","shipment":{"origin_site":"'"$SITE_ALPHA"'","destination_site":"'"$SITE_BRAVO"'","pickup_earliest_time":"2024-01-01T08:00:00Z","pickup_latest_time":"2024-01-01T12:00:00Z","delivery_earliest_time":"2024-01-02T08:00:00Z","delivery_latest_time":"2024-01-02T12:00:00Z","annotations":{"region":"west"}}}' 127.0.0.1:50051 $SVC/CreateShipment
 
 # A bare shipment is rejected with every missing REQUIRED field in one AIP-193
 # response (reason FIELD_REQUIRED / domain freight.example.com), accumulated by
 # the reflective `aip-fieldbehavior` validator:
-gc -d '{"parent":"shippers/$ID","shipment":{}}'                                              127.0.0.1:50051 $SVC/CreateShipment
+gc -d '{"parent":"'"$ID"'","shipment":{}}'                                              127.0.0.1:50051 $SVC/CreateShipment
 
 # List all in-scope shipments, then filter: a `=` on a scalar column, and the has
 # operator over the `annotations` map (via SQLite `json_each`). The parent scope
 # and soft-delete are composed in automatically.
-gc -d '{"parent":"shippers/$ID"}'                                                            127.0.0.1:50051 $SVC/ListShipments
-gc -d '{"parent":"shippers/$ID","filter":"origin_site = \"shippers/$ID/sites/a\""}'          127.0.0.1:50051 $SVC/ListShipments
-gc -d '{"parent":"shippers/$ID","filter":"annotations:priority"}'                            127.0.0.1:50051 $SVC/ListShipments
+gc -d '{"parent":"'"$ID"'"}'                                                            127.0.0.1:50051 $SVC/ListShipments
+gc -d '{"parent":"'"$ID"'","filter":"origin_site = \"'"$SITE_BRAVO"'\""}'               127.0.0.1:50051 $SVC/ListShipments
+gc -d '{"parent":"'"$ID"'","filter":"annotations:priority"}'                            127.0.0.1:50051 $SVC/ListShipments
 ```
 
 The `google.iam.v1.IAMPolicy` service stores a **Policy** keyed by
@@ -199,21 +206,20 @@ ic -d '{"resource":"shippers/acme"}' 127.0.0.1:50051 $IAMSVC/GetIamPolicy
 # SetIamPolicy validates every Member, enforces the conditions⟹version-3
 # invariant, normalises the Policy (dedupe + canonical member/binding order),
 # stamps a fresh content `etag`, and stores it through the aip::iam helpers
-# — then echoes the stored Policy. A first write may omit the etag.
-ic -d '{"resource":"shippers/acme","policy":{"version":1,"bindings":[{"role":"roles/viewer","members":["user:alice@example.com","group:ops@example.com"]}]}}' \
-                                     127.0.0.1:50051 $IAMSVC/SetIamPolicy
-# GetIamPolicy returns the stored Policy carrying that etag (base64 in JSON).
+# — then echoes the stored Policy. A first write may omit the etag. Capture
+# the returned etag (base64 in JSON) for the read-modify-write call below.
+IAM_ETAG=$(ic -d '{"resource":"shippers/acme","policy":{"version":1,"bindings":[{"role":"roles/viewer","members":["user:alice@example.com","group:ops@example.com"]}]}}' \
+                                     127.0.0.1:50051 $IAMSVC/SetIamPolicy | jq -r .etag)
+# GetIamPolicy returns the stored Policy carrying that etag.
 ic -d '{"resource":"shippers/acme"}' 127.0.0.1:50051 $IAMSVC/GetIamPolicy
 
-# Read-modify-write: send the etag from the response above back in. A matching
-# etag is accepted and the stored etag advances; replaying the now-stale one is
-# rejected with ABORTED (the IAM optimistic-concurrency contract). Paste the
-# base64 etag you got above:
-ETAG='<paste the etag field from the response above>'
-ic -d '{"resource":"shippers/acme","policy":{"version":1,"etag":"'"$ETAG"'","bindings":[{"role":"roles/viewer","members":["user:alice@example.com"]}]}}' \
+# Read-modify-write: send the etag back in. A matching etag is accepted and the
+# stored etag advances; replaying the now-stale one is rejected with ABORTED
+# (the IAM optimistic-concurrency contract).
+ic -d '{"resource":"shippers/acme","policy":{"version":1,"etag":"'"$IAM_ETAG"'","bindings":[{"role":"roles/viewer","members":["user:alice@example.com"]}]}}' \
                                      127.0.0.1:50051 $IAMSVC/SetIamPolicy
 # Replaying the same (now-stale) etag fails with ABORTED.
-ic -d '{"resource":"shippers/acme","policy":{"version":1,"etag":"'"$ETAG"'","bindings":[{"role":"roles/editor","members":["user:bob@example.com"]}]}}' \
+ic -d '{"resource":"shippers/acme","policy":{"version":1,"etag":"'"$IAM_ETAG"'","bindings":[{"role":"roles/editor","members":["user:bob@example.com"]}]}}' \
                                      127.0.0.1:50051 $IAMSVC/SetIamPolicy
 
 # A malformed Member is rejected with InvalidArgument carrying an IAM_* ErrorInfo
@@ -283,15 +289,15 @@ open `ListShippers`, so the `GetShipper` above worked for anyone until you lock 
 down. (`gc` and `ic` are the helper functions defined above.)
 
 ```sh
-# Lock shippers/$ID down to alice (use the system-assigned name from CreateShipper).
-ic -d '{"resource":"shippers/$ID","policy":{"version":1,"bindings":[{"role":"roles/viewer","members":["user:alice@example.com"]}]}}' \
+# Lock $ID down to alice.
+ic -d '{"resource":"'"$ID"'","policy":{"version":1,"bindings":[{"role":"roles/viewer","members":["user:alice@example.com"]}]}}' \
                                      127.0.0.1:50051 $IAMSVC/SetIamPolicy
 
 # alice reads it; bob gets the canonical *non-leaking* PERMISSION_DENIED — message
-# "Permission 'freight.shippers.get' denied on resource 'shippers/$ID' (or it might
-# not exist)." with an IAM_PERMISSION_DENIED ErrorInfo (domain freight.example.com).
-gc -H 'x-freight-caller: user:alice@example.com' -d '{"name":"shippers/$ID"}' 127.0.0.1:50051 $SVC/GetShipper
-gc -H 'x-freight-caller: user:bob@example.com'   -d '{"name":"shippers/$ID"}' 127.0.0.1:50051 $SVC/GetShipper
+# "Permission 'freight.shippers.get' denied on resource '$ID' (or it might not
+# exist)." with an IAM_PERMISSION_DENIED ErrorInfo (domain freight.example.com).
+gc -H 'x-freight-caller: user:alice@example.com' -d '{"name":"'"$ID"'"}' 127.0.0.1:50051 $SVC/GetShipper
+gc -H 'x-freight-caller: user:bob@example.com'   -d '{"name":"'"$ID"'"}' 127.0.0.1:50051 $SVC/GetShipper
 
 # Non-leaking: the *same* denial comes back for a name that does not exist, so an
 # unauthorized caller cannot probe existence. Lock a never-created name and the
