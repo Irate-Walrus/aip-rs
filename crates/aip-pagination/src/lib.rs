@@ -36,6 +36,14 @@ pub enum Error {
     ChecksumMismatch,
     #[error("decode page token: {0}")]
     Decode(String),
+    /// The request's `page_size` was negative. AIP-158 lets the server pick a
+    /// default for an absent (zero) size, but a negative size is nonsense, not a
+    /// default request — so it is rejected rather than coerced.
+    #[error("page_size must not be negative (got {requested})")]
+    NegativePageSize {
+        /// The negative `page_size` the client sent.
+        requested: i32,
+    },
 }
 
 /// A request carrying the AIP-158 pagination fields.
@@ -110,6 +118,106 @@ impl PageToken {
     }
 }
 
+/// The server's AIP-158 page-size policy: the size handed back for an unset
+/// request, and the ceiling no single page may exceed.
+///
+/// Plain `Copy` struct, written as a literal at the call site (`SizeLimits {
+/// default: 50, max: 1000 }`) — no constructor, because there is nothing to
+/// validate that the caller cannot read off the fields. Both fields must be
+/// positive; a non-positive `default` **or** `max` is a caller bug, not a
+/// checked error, and yields a degenerate non-positive resolved size rather than
+/// panicking (see [`Page::parse`]). The `default > max` case is the one
+/// misconfiguration that *does* self-heal, via the cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SizeLimits {
+    /// Page size used when the request leaves `page_size` unset (zero). AIP-158
+    /// lets the server pick this. Capped by [`max`](Self::max), so a misconfigured
+    /// `default > max` self-heals to `max` rather than overshooting (assuming a
+    /// positive `max`).
+    pub default: i32,
+    /// Upper bound on a single page, so a client cannot pull the whole result set
+    /// in one request — AIP-158 lets the server return fewer than requested. Must
+    /// be positive: it is the final cap on every resolved size, so a non-positive
+    /// `max` is not corrected by anything downstream.
+    pub max: i32,
+}
+
+/// The resolved AIP-158 pagination state for one list page: the verified offset
+/// [`PageToken`] and the effective [`size`](Self::size) after the policy
+/// default/cap has been applied.
+///
+/// Produced by [`Page::parse`], which folds the whole list-pagination preamble —
+/// request checksum, token parse/verify, size resolution — into one call. A list
+/// handler opens with `Page::parse(&req, limits)?` and closes with
+/// `page.next_token(has_more)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Page {
+    /// The verified offset page token. `token.offset` is where this page starts.
+    pub token: PageToken,
+    /// The page size after the [`SizeLimits`] default/cap has been applied —
+    /// always positive (a negative request is an [`Error::NegativePageSize`]).
+    pub size: i32,
+}
+
+impl Page {
+    /// Folds the AIP-158 list-pagination preamble into one step: checksum the
+    /// request's non-pagination fields ([`request_checksum`]), parse and verify
+    /// the offset page token against that checksum ([`PageToken::parse`], which
+    /// rejects a request that changed mid-pagination), and resolve the effective
+    /// page size from `limits`.
+    ///
+    /// Size resolution (AIP-158): a negative `page_size` is rejected with
+    /// [`Error::NegativePageSize`]; zero (unset) falls back to
+    /// [`limits.default`](SizeLimits::default); the resulting size is then capped
+    /// at [`limits.max`](SizeLimits::max) — the cap applies to **both** paths, so a
+    /// misconfigured `default > max` self-heals to `max`. A non-positive
+    /// `limits.default` is a documented caller bug, not a checked error: with an
+    /// unset `page_size` it yields a degenerate zero-size page.
+    pub fn parse<M: PageRequest + ReflectMessage>(
+        request: &M,
+        limits: SizeLimits,
+    ) -> Result<Self, Error> {
+        let checksum = request_checksum(request);
+        let token = PageToken::parse(request, checksum)?;
+        let size = resolve_size(request.page_size(), limits)?;
+        Ok(Self { token, size })
+    }
+
+    /// The opaque token for the page after this one, or the empty string when no
+    /// further page remains.
+    ///
+    /// `has_more` is the caller's "is there another page?" signal — a fetch-N+1
+    /// overflow row, or `end < total` for a total-count handler. When set, the
+    /// token advances the offset by this page's [`size`](Self::size), carrying the
+    /// request checksum forward so the next page still rejects a changed request;
+    /// when unset, the empty string tells the client the listing is exhausted.
+    pub fn next_token(&self, has_more: bool) -> String {
+        if has_more {
+            self.token.next(self.size).encode()
+        } else {
+            String::new()
+        }
+    }
+}
+
+/// Resolves the effective page size from a request's `page_size` per AIP-158: a
+/// negative value is [`Error::NegativePageSize`], zero/unset falls back to
+/// `limits.default`, and the result is capped at `limits.max` (the cap applies to
+/// the default too, so `default > max` self-heals to `max`).
+fn resolve_size(requested: i32, limits: SizeLimits) -> Result<i32, Error> {
+    if requested < 0 {
+        return Err(Error::NegativePageSize { requested });
+    }
+    // Zero means "unset" — take the server default; the cap then applies to
+    // whichever value we landed on.
+    let base = if requested == 0 {
+        limits.default
+    } else {
+        requested
+    };
+    Ok(base.min(limits.max))
+}
+
 /// Encodes an arbitrary cursor payload as an opaque page token.
 ///
 /// The payload is `postcard`-serialized, tagged with the 1-byte version
@@ -158,6 +266,11 @@ pub fn decode_page_token<T: serde::de::DeserializeOwned>(token: &str) -> Result<
 /// [`ReflectMessage`], a `&DynamicMessage` caller (the crate's tests, a
 /// JSON/gateway path) keeps compiling unchanged.
 ///
+/// Returns a bare `u32`: the checksum can never *fail* — the only thing that
+/// could go wrong is the descriptor-round-trip below, which is a build invariant,
+/// not bad input. So there is no error to thread back, and [`Page::parse`] calls
+/// this without a `?`.
+///
 /// Ported from `aip-go`'s `CalculateRequestChecksum`: the request is transcoded
 /// to a [`DynamicMessage`] (the pagination fields are cleared by name, which only
 /// a dynamic message can do), those fields that legitimately change between pages
@@ -165,7 +278,7 @@ pub fn decode_page_token<T: serde::de::DeserializeOwned>(token: &str) -> Result<
 /// changing flips the checksum, which is how [`PageToken::parse`] detects a
 /// request that mutated mid-pagination. A request that does not declare a given
 /// pagination field (e.g. one without `skip`) simply has nothing to clear for it.
-pub fn request_checksum<M: ReflectMessage>(request: &M) -> Result<u32, Error> {
+pub fn request_checksum<M: ReflectMessage>(request: &M) -> u32 {
     let descriptor = request.descriptor();
     // Transcode through wire bytes into a dynamic message so the pagination
     // fields can be cleared by name. The round-trip can only fail if a message
@@ -178,7 +291,7 @@ pub fn request_checksum<M: ReflectMessage>(request: &M) -> Result<u32, Error> {
             cloned.clear_field(&field);
         }
     }
-    Ok(crc32fast::hash(&cloned.encode_to_vec()))
+    crc32fast::hash(&cloned.encode_to_vec())
 }
 
 /// The AIP-193 `ErrorInfo.domain` for every error this crate maps. Reason codes
@@ -191,13 +304,17 @@ impl From<Error> for tonic::Status {
     /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details: an `ErrorInfo`
     /// carrying a machine-readable `reason` + [`domain`](ERROR_DOMAIN) and the
     /// error's dynamic values as `metadata`. A page token is an opaque value
-    /// rather than a request field path, so no `BadRequest` is attached.
+    /// rather than a request field path, so the token variants attach no
+    /// `BadRequest`; [`NegativePageSize`](Error::NegativePageSize) is the lone
+    /// exception — it names the `page_size` request field, so it carries a
+    /// `BadRequest` field violation alongside the `ErrorInfo`.
     /// See `docs/adr/0007-aip193-error-details.md`.
     fn from(err: Error) -> Self {
         use std::collections::HashMap;
         use tonic_types::{ErrorDetails, StatusExt};
 
         let message = err.to_string();
+        let mut details = ErrorDetails::new();
         let (reason, metadata): (&str, HashMap<String, String>) = match &err {
             Error::Malformed => ("PAGE_TOKEN_MALFORMED", HashMap::new()),
             Error::UnsupportedVersion { found, expected } => (
@@ -212,8 +329,17 @@ impl From<Error> for tonic::Status {
                 "PAGE_TOKEN_DECODE",
                 HashMap::from([("detail".to_owned(), detail.clone())]),
             ),
+            Error::NegativePageSize { requested } => {
+                // Unlike a page token, `page_size` is a named request field, so
+                // the validation failure points at it with a `BadRequest`
+                // (ADR-0007), the first variant in this crate to carry one.
+                details.add_bad_request_violation("page_size", &message);
+                (
+                    "PAGE_SIZE_NEGATIVE",
+                    HashMap::from([("page_size".to_owned(), requested.to_string())]),
+                )
+            }
         };
-        let mut details = ErrorDetails::new();
         details.set_error_info(reason, ERROR_DOMAIN, metadata);
         tonic::Status::with_error_details(tonic::Code::InvalidArgument, message, details)
     }
@@ -242,6 +368,29 @@ mod tonic_tests {
 
         // A page token is an opaque value, not a request field path.
         assert!(status.get_details_bad_request().is_none());
+    }
+
+    #[test]
+    fn negative_page_size_maps_to_invalid_argument_with_bad_request() {
+        let status: tonic::Status = Error::NegativePageSize { requested: -3 }.into();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+        let info = status
+            .get_details_error_info()
+            .expect("an ErrorInfo is always attached (AIP-193)");
+        assert_eq!(info.reason, "PAGE_SIZE_NEGATIVE");
+        assert_eq!(info.domain, ERROR_DOMAIN);
+        assert_eq!(
+            info.metadata.get("page_size").map(String::as_str),
+            Some("-3"),
+        );
+
+        // Unlike a page token, `page_size` is a named request field, so the
+        // violation points at it (ADR-0007).
+        let bad = status
+            .get_details_bad_request()
+            .expect("a BadRequest field violation is attached for a named field");
+        assert_eq!(bad.field_violations[0].field, "page_size");
     }
 }
 
@@ -503,7 +652,7 @@ mod tests {
         let b = list_sites(
             r#"{"parent":"shippers/acme","pageSize":99,"pageToken":"second","skip":40}"#,
         );
-        assert_eq!(request_checksum(&a).unwrap(), request_checksum(&b).unwrap());
+        assert_eq!(request_checksum(&a), request_checksum(&b));
     }
 
     #[test]
@@ -512,7 +661,7 @@ mod tests {
         // checksum, so a stale token is rejected.
         let a = list_sites(r#"{"parent":"shippers/acme"}"#);
         let b = list_sites(r#"{"parent":"shippers/other"}"#);
-        assert_ne!(request_checksum(&a).unwrap(), request_checksum(&b).unwrap());
+        assert_ne!(request_checksum(&a), request_checksum(&b));
     }
 
     #[test]
@@ -530,6 +679,75 @@ mod tests {
             r#"{"pageSize":20,"pageToken":"second"}"#,
         )
         .expect("ListShippersRequest fixture builds");
-        assert_eq!(request_checksum(&a).unwrap(), request_checksum(&b).unwrap());
+        assert_eq!(request_checksum(&a), request_checksum(&b));
+    }
+
+    #[test]
+    fn resolve_size_applies_aip158_rules() {
+        // AIP-158 size resolution, migrated from freight-server's
+        // `effective_page_size_applies_aip158_rules`: a negative `page_size` is
+        // rejected, zero/unset falls back to the default, a positive value passes
+        // through, and anything above the cap is clamped to the max.
+        let limits = SizeLimits {
+            default: 50,
+            max: 1000,
+        };
+        let err = resolve_size(-1, limits).expect_err("negative is rejected");
+        assert!(
+            matches!(err, Error::NegativePageSize { requested } if requested == -1),
+            "{err:?}",
+        );
+        assert_eq!(resolve_size(0, limits).expect("zero is the default"), 50);
+        assert_eq!(
+            resolve_size(10, limits).expect("positive passes through"),
+            10
+        );
+        assert_eq!(
+            resolve_size(i32::MAX, limits).expect("over-max is clamped"),
+            1000,
+        );
+    }
+
+    #[test]
+    fn resolve_size_caps_a_misconfigured_default() {
+        // The cap applies to the default path too: a `default > max` self-heals to
+        // `max` rather than overshooting when the request leaves `page_size` unset.
+        let limits = SizeLimits {
+            default: 5000,
+            max: 1000,
+        };
+        assert_eq!(
+            resolve_size(0, limits).expect("the over-cap default is itself capped"),
+            1000,
+        );
+    }
+
+    // `Page::parse` folds `request_checksum` + `PageToken::parse` + `resolve_size`,
+    // each unit-tested above. The fold needs a `PageRequest + ReflectMessage`
+    // request — a generated type, which the crate's `DynamicMessage` fixtures are
+    // not (`PageRequest` returns `&str`, which a reflective field read cannot
+    // yield) — so its end-to-end coverage (empty token, negative size, stale-token
+    // guard) lives in freight-server's `list_*` handler tests, where the generated
+    // requests carry both impls.
+
+    #[test]
+    fn next_token_is_empty_at_the_end_and_advances_otherwise() {
+        // `next_token(false)` ends the listing with the empty string; `(true)`
+        // mints the follow-on token, advancing the offset by the page size and
+        // carrying the checksum forward.
+        let page = Page {
+            token: PageToken {
+                offset: 20,
+                request_checksum: 0x1234,
+            },
+            size: 10,
+        };
+        assert_eq!(page.next_token(false), "");
+
+        let next = page.next_token(true);
+        assert!(!next.is_empty());
+        let decoded: PageToken = decode_page_token(&next).expect("the next token round-trips");
+        assert_eq!(decoded.offset, 30);
+        assert_eq!(decoded.request_checksum, 0x1234);
     }
 }

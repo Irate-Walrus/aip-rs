@@ -79,6 +79,20 @@ last-seen key) rather than an offset.
 **Page size**:
 The maximum number of results a single page may contain, requested by the client.
 
+**Size limits**:
+A list method's AIP-158 page-size policy: the **Page size** the server picks when
+the client leaves one unset (the *default*), and the ceiling no single page may
+exceed (the *max*). A negative requested **Page size** is rejected; zero takes the
+default; the result is capped at the max.
+_Avoid_: policy (that's the IAM term), page config, bounds.
+
+**Page**:
+The resolved AIP-158 pagination state for one list page: the verified **Offset
+page token** paired with the effective **Page size** after the **Size limits**
+default/cap is applied. Folds the request-consistency check, **Page token**
+verification, and size resolution into one value the list handler reads.
+_Avoid_: page state, cursor, result set.
+
 **Skip**:
 A count of leading results to discard before the page begins (AIP-158 skip),
 applied on top of a **Page token**'s position.
