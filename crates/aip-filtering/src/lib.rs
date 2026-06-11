@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use prost_reflect::EnumDescriptor;
+use prost_reflect::{EnumDescriptor, FieldDescriptor, Kind, MessageDescriptor, ReflectMessage};
 
 mod checker;
 mod lexer;
@@ -68,6 +68,14 @@ pub enum Error {
     Type(String),
     #[error("undeclared identifier: {0}")]
     UndeclaredIdent(String),
+    #[error("field path '{path}' does not resolve on message {message}")]
+    UnknownField { path: String, message: String },
+    #[error("field path '{path}' on message {message} has unfilterable type ({detail})")]
+    UnfilterableField {
+        path: String,
+        message: String,
+        detail: String,
+    },
 }
 
 /// The type of a filter expression or declared identifier (CEL-equivalent).
@@ -87,6 +95,18 @@ pub enum Type {
     List(Box<Type>),
     Dyn,
     Null,
+}
+
+impl Type {
+    /// A `map<key, value>` type — the boxing [`Type::Map`] needs, done for you.
+    pub fn map(key: Type, value: Type) -> Type {
+        Type::Map(Box::new(key), Box::new(value))
+    }
+
+    /// A `list<element>` type — the boxing [`Type::List`] needs, done for you.
+    pub fn list(element: Type) -> Type {
+        Type::List(Box::new(element))
+    }
 }
 
 /// A literal constant value within a filter.
@@ -151,6 +171,23 @@ impl Declarations {
         DeclarationsBuilder::default()
     }
 
+    /// Start building declarations whose identifiers are *derived* from the
+    /// descriptor of the generated message `M`, via
+    /// [`fields`](DeclarationsBuilder::fields).
+    ///
+    /// The descriptor travels with the Typed message (ADR-0009), so no
+    /// descriptor pool is built or threaded — `M::default().descriptor()` is the
+    /// reified type the paths resolve against. The explicit
+    /// [`ident`](DeclarationsBuilder::ident) /
+    /// [`enum_ident`](DeclarationsBuilder::enum_ident) path stays available on
+    /// the returned builder for identifiers the descriptor can't supply.
+    pub fn for_message<M: ReflectMessage + Default>() -> DeclarationsBuilder {
+        DeclarationsBuilder {
+            descriptor: Some(M::default().descriptor()),
+            ..DeclarationsBuilder::default()
+        }
+    }
+
     /// The declared [`Type`] of a filterable identifier, if it was declared.
     ///
     /// [`check`] discards types (it yields only the untyped [`Expr`]), so a
@@ -175,6 +212,12 @@ impl Declarations {
 pub struct DeclarationsBuilder {
     idents: HashMap<String, Type>,
     functions: HashMap<String, Vec<Overload>>,
+    /// The message descriptor [`fields`](Self::fields) resolves paths against,
+    /// set by [`Declarations::for_message`]. `None` for the explicit builder.
+    descriptor: Option<MessageDescriptor>,
+    /// The first error a chained derivation hit; surfaced at [`build`](Self::build)
+    /// so the builder methods stay infallible and chainable.
+    deferred: Option<Error>,
 }
 
 impl DeclarationsBuilder {
@@ -228,11 +271,8 @@ impl DeclarationsBuilder {
         let has = || {
             vec![
                 Overload::new(Bool, vec![String, String]),
-                Overload::new(
-                    Bool,
-                    vec![Type::Map(Box::new(String), Box::new(String)), String],
-                ),
-                Overload::new(Bool, vec![Type::List(Box::new(String)), String]),
+                Overload::new(Bool, vec![Type::map(String, String), String]),
+                Overload::new(Bool, vec![Type::list(String), String]),
                 Overload::new(Bool, vec![Timestamp, String]),
             ]
         };
@@ -289,6 +329,60 @@ impl DeclarationsBuilder {
         builder
     }
 
+    /// Derive filterable identifiers from the message descriptor, one per named
+    /// `path`, deriving each identifier's [`Type`] from the descriptor instead of
+    /// the caller spelling it out.
+    ///
+    /// Requires the builder to carry a descriptor (start from
+    /// [`Declarations::for_message`]). Each `path` resolves field-by-field,
+    /// descending through `.`-separated subfields into nested **singular** message
+    /// fields, and the leaf field's kind fixes the [`Type`]:
+    ///
+    /// - string → [`String`](Type::String); double/float → [`Double`](Type::Double);
+    ///   signed ints → [`Int`](Type::Int); unsigned ints → [`Uint`](Type::Uint);
+    ///   bool → [`Bool`](Type::Bool)
+    /// - `google.protobuf.Timestamp` → [`Timestamp`](Type::Timestamp)
+    /// - an enum gets the full [`enum_ident`](Self::enum_ident) treatment (the
+    ///   path, every value name, and the `=` / `!=` overloads) — no caller-side
+    ///   descriptor extraction
+    /// - a map field → [`Type::map`] with key/value types from the entry descriptor
+    /// - a repeated field → [`Type::list`] with the element type from the field kind
+    ///
+    /// An unknown path or an unfilterable leaf kind (e.g. bytes, or a non-Timestamp
+    /// singular message) is **not** silently skipped: the first such failure is
+    /// recorded and surfaced at [`build`](Self::build) as a descriptive
+    /// [`Error`] naming the path. The explicit [`ident`](Self::ident) /
+    /// [`enum_ident`](Self::enum_ident) path stays available for anything the
+    /// descriptor can't supply.
+    pub fn fields<I, S>(mut self, paths: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        for path in paths {
+            if self.deferred.is_some() {
+                break;
+            }
+            let path = path.as_ref();
+            let Some(descriptor) = self.descriptor.clone() else {
+                self.deferred = Some(Error::Type(
+                    "fields() requires a message descriptor; \
+                     start from Declarations::for_message"
+                        .to_owned(),
+                ));
+                break;
+            };
+            match resolve_path(&descriptor, path) {
+                Ok(Resolved::Scalar(ty)) => self = self.ident(path, ty),
+                Ok(Resolved::Enum(enum_descriptor)) => {
+                    self = self.enum_ident(path, enum_descriptor)
+                }
+                Err(error) => self.deferred = Some(error),
+            }
+        }
+        self
+    }
+
     /// Declare a function with the given resolvable `overloads`. Declaring the
     /// same name again appends overloads to the existing declaration.
     pub fn function(mut self, name: &str, overloads: Vec<Overload>) -> Self {
@@ -299,13 +393,134 @@ impl DeclarationsBuilder {
         self
     }
 
-    /// Finalize the declarations.
+    /// Finalize the declarations, surfacing the first error a derivation
+    /// ([`fields`](Self::fields)) deferred.
     pub fn build(self) -> Result<Declarations, Error> {
+        if let Some(error) = self.deferred {
+            return Err(error);
+        }
         Ok(Declarations {
             idents: self.idents,
             functions: self.functions,
         })
     }
+}
+
+/// The outcome of resolving a [`fields`](DeclarationsBuilder::fields) path: a
+/// directly-declarable [`Type`], or an enum that needs the full
+/// [`enum_ident`](DeclarationsBuilder::enum_ident) treatment.
+enum Resolved {
+    Scalar(Type),
+    Enum(EnumDescriptor),
+}
+
+/// Resolves a `.`-separated `path` against `descriptor`, descending through
+/// singular message fields, and derives the leaf field's [`Resolved`] type.
+fn resolve_path(descriptor: &MessageDescriptor, path: &str) -> Result<Resolved, Error> {
+    let unknown = || Error::UnknownField {
+        path: path.to_owned(),
+        message: descriptor.full_name().to_owned(),
+    };
+    let mut current = descriptor.clone();
+    let mut segments = path.split('.').peekable();
+    while let Some(segment) = segments.next() {
+        let Some(field) = current.get_field_by_name(segment) else {
+            return Err(unknown());
+        };
+        if segments.peek().is_none() {
+            return resolve_leaf(descriptor, path, &field);
+        }
+        // A non-leaf segment must name a singular message to descend into; a
+        // scalar, enum, map, or repeated field has no subfields to address.
+        match descend(&field) {
+            Some(message) => current = message,
+            None => return Err(unknown()),
+        }
+    }
+    Err(unknown()) // an empty path resolves to nothing
+}
+
+/// The message to descend into through a non-leaf `field`: its own message type,
+/// but only when it is singular. `None` for a scalar/enum leaf or a map/repeated
+/// field (whose elements have no addressable subfield path here).
+fn descend(field: &FieldDescriptor) -> Option<MessageDescriptor> {
+    if field.is_list() || field.is_map() {
+        return None;
+    }
+    match field.kind() {
+        Kind::Message(message) => Some(message),
+        _ => None,
+    }
+}
+
+/// Derives the [`Resolved`] type of a leaf `field`: a `map<k,v>` / `list<e>` for
+/// a map / repeated field, the full enum treatment for a singular enum, otherwise
+/// the scalar [`Type`] for the field kind.
+fn resolve_leaf(
+    descriptor: &MessageDescriptor,
+    path: &str,
+    field: &FieldDescriptor,
+) -> Result<Resolved, Error> {
+    let unfilterable = |detail: String| Error::UnfilterableField {
+        path: path.to_owned(),
+        message: descriptor.full_name().to_owned(),
+        detail,
+    };
+    if field.is_map() {
+        let Kind::Message(entry) = field.kind() else {
+            return Err(unfilterable("map entry is not a message".to_owned()));
+        };
+        let key = kind_to_type(&entry.map_entry_key_field().kind()).map_err(&unfilterable)?;
+        let value = kind_to_type(&entry.map_entry_value_field().kind()).map_err(&unfilterable)?;
+        return Ok(Resolved::Scalar(Type::map(key, value)));
+    }
+    if field.is_list() {
+        let element = kind_to_type(&field.kind()).map_err(&unfilterable)?;
+        return Ok(Resolved::Scalar(Type::list(element)));
+    }
+    // A singular enum gets the full `enum_ident` treatment, not a bare type.
+    if let Kind::Enum(enum_descriptor) = field.kind() {
+        return Ok(Resolved::Enum(enum_descriptor));
+    }
+    Ok(Resolved::Scalar(
+        kind_to_type(&field.kind()).map_err(&unfilterable)?,
+    ))
+}
+
+/// Maps a scalar proto field [`Kind`] to a filter [`Type`], for a map key/value
+/// or a list element. The unfilterable kinds — bytes, any
+/// non-`google.protobuf.Timestamp` message, and an enum (which is filterable
+/// only as a *singular* field, where it gets the full
+/// [`enum_ident`](DeclarationsBuilder::enum_ident) treatment via
+/// [`Resolved::Enum`] before this is reached) — return the kind's descriptive
+/// name in `Err` for the caller's [`Error`].
+fn kind_to_type(kind: &Kind) -> Result<Type, String> {
+    Ok(match kind {
+        Kind::Double | Kind::Float => Type::Double,
+        Kind::Int32
+        | Kind::Int64
+        | Kind::Sint32
+        | Kind::Sint64
+        | Kind::Sfixed32
+        | Kind::Sfixed64 => Type::Int,
+        Kind::Uint32 | Kind::Uint64 | Kind::Fixed32 | Kind::Fixed64 => Type::Uint,
+        Kind::Bool => Type::Bool,
+        Kind::String => Type::String,
+        Kind::Message(message) if message.full_name() == "google.protobuf.Timestamp" => {
+            Type::Timestamp
+        }
+        Kind::Message(message) => return Err(format!("message {}", message.full_name())),
+        Kind::Bytes => return Err("bytes".to_owned()),
+        // A list/map *of* enum can't carry the per-enum `=`/`!=` overloads that
+        // make a bare value name (`state = ACTIVE`) type-check, so it is not
+        // filterable; a singular enum is intercepted before this in `resolve_leaf`.
+        Kind::Enum(enum_descriptor) => {
+            return Err(format!(
+                "enum {} (filterable only as a singular field)",
+                enum_descriptor.full_name()
+            ))
+        }
+    })
 }
 
 /// Parses a filter string into an AST without type-checking.
@@ -365,10 +580,212 @@ impl From<Error> for tonic::Status {
                 "FILTER_UNDECLARED_IDENTIFIER",
                 HashMap::from([("identifier".to_owned(), ident.clone())]),
             ),
+            // The descriptor-derivation errors are raised while *building*
+            // declarations (server construction), so they do not normally reach
+            // a request; mapped defensively for the exhaustive match.
+            Error::UnknownField { path, message } => (
+                "FILTER_UNKNOWN_FIELD",
+                HashMap::from([
+                    ("path".to_owned(), path.clone()),
+                    ("message".to_owned(), message.clone()),
+                ]),
+            ),
+            Error::UnfilterableField {
+                path,
+                message,
+                detail,
+            } => (
+                "FILTER_UNFILTERABLE_FIELD",
+                HashMap::from([
+                    ("path".to_owned(), path.clone()),
+                    ("message".to_owned(), message.clone()),
+                    ("detail".to_owned(), detail.clone()),
+                ]),
+            ),
         };
         let mut details = ErrorDetails::new();
         details.set_error_info(reason, ERROR_DOMAIN, metadata);
         tonic::Status::with_error_details(tonic::Code::InvalidArgument, message, details)
+    }
+}
+
+/// Tests for the descriptor-driven [`fields`](DeclarationsBuilder::fields) path.
+///
+/// These exercise the public `fields` → `build` flow against fixture descriptors
+/// from the shared pool. They construct the builder with the descriptor set
+/// directly (the in-crate equivalent of [`Declarations::for_message`], which is
+/// just `M::default().descriptor()` but needs a generated typed message the
+/// fixture pool does not provide).
+#[cfg(test)]
+mod derive_tests {
+    use super::*;
+
+    /// The syntax fixture message carrying one field of every proto kind.
+    fn syntax_message() -> MessageDescriptor {
+        test_fixtures::message_descriptor("einride.example.syntax.v1.Message")
+            .expect("the syntax Message is in the fixture pool")
+    }
+
+    /// The freight Site fixture — its `create_time` (Timestamp), `lat_lng`
+    /// (nested message), `state` (enum), `annotations` (map), and `tags` (list)
+    /// cover the shapes the syntax message's flat scalars do not.
+    fn site_message() -> MessageDescriptor {
+        test_fixtures::message_descriptor("einride.example.freight.v1.Site")
+            .expect("the freight Site is in the fixture pool")
+    }
+
+    /// Build declarations deriving `paths` from `descriptor`.
+    fn derive(descriptor: MessageDescriptor, paths: &[&str]) -> Result<Declarations, Error> {
+        DeclarationsBuilder {
+            descriptor: Some(descriptor),
+            ..DeclarationsBuilder::default()
+        }
+        .fields(paths.iter().copied())
+        .build()
+    }
+
+    #[test]
+    fn map_and_list_constructors_box() {
+        assert_eq!(
+            Type::map(Type::String, Type::Int),
+            Type::Map(Box::new(Type::String), Box::new(Type::Int)),
+        );
+        assert_eq!(Type::list(Type::String), Type::List(Box::new(Type::String)),);
+    }
+
+    #[test]
+    fn derives_scalar_kinds_from_the_descriptor() {
+        let decls = derive(
+            syntax_message(),
+            &[
+                "double", "float", "int32", "int64", "sint32", "sfixed64", "uint32", "fixed64",
+                "bool", "string",
+            ],
+        )
+        .expect("scalar fields derive");
+        let ty = |name| decls.ident_type(name).expect("declared");
+        assert_eq!(ty("double"), &Type::Double);
+        assert_eq!(ty("float"), &Type::Double);
+        assert_eq!(ty("int32"), &Type::Int);
+        assert_eq!(ty("int64"), &Type::Int);
+        assert_eq!(ty("sint32"), &Type::Int);
+        assert_eq!(ty("sfixed64"), &Type::Int);
+        assert_eq!(ty("uint32"), &Type::Uint);
+        assert_eq!(ty("fixed64"), &Type::Uint);
+        assert_eq!(ty("bool"), &Type::Bool);
+        assert_eq!(ty("string"), &Type::String);
+    }
+
+    #[test]
+    fn derives_timestamp_and_nested_paths_from_the_site() {
+        // The fixture Site's `create_time` (Timestamp) and the nested
+        // `lat_lng.latitude` (descend a singular message to a double).
+        let decls = derive(site_message(), &["create_time", "lat_lng.latitude"])
+            .expect("site fields derive");
+        assert_eq!(decls.ident_type("create_time"), Some(&Type::Timestamp));
+        assert_eq!(decls.ident_type("lat_lng.latitude"), Some(&Type::Double));
+    }
+
+    #[test]
+    fn derives_map_and_list_element_types() {
+        let decls = derive(
+            syntax_message(),
+            &["map_string_string", "repeated_int64", "repeated_string"],
+        )
+        .expect("map and repeated fields derive");
+        assert_eq!(
+            decls.ident_type("map_string_string"),
+            Some(&Type::map(Type::String, Type::String)),
+        );
+        assert_eq!(
+            decls.ident_type("repeated_int64"),
+            Some(&Type::list(Type::Int)),
+        );
+        assert_eq!(
+            decls.ident_type("repeated_string"),
+            Some(&Type::list(Type::String)),
+        );
+    }
+
+    #[test]
+    fn enum_field_gets_full_enum_treatment() {
+        let decls = derive(syntax_message(), &["enum"]).expect("the enum field derives");
+        // The field and every value name resolve to the same enum type...
+        let enum_ty = Type::Enum("einride.example.syntax.v1.Enum".to_owned());
+        assert_eq!(decls.ident_type("enum"), Some(&enum_ty));
+        assert_eq!(decls.ident_type("ENUM_ONE"), Some(&enum_ty));
+        assert_eq!(decls.ident_type("ENUM_TWO"), Some(&enum_ty));
+        // ...and the `=` overload comparing two of them is declared, so a bare
+        // value name type-checks against the field with no caller-side extraction.
+        let decls = DeclarationsBuilder {
+            descriptor: Some(syntax_message()),
+            ..DeclarationsBuilder::default()
+        }
+        .standard_functions()
+        .fields(["enum"])
+        .build()
+        .expect("declarations build");
+        check("enum = ENUM_ONE", &decls).expect("the derived enum overload type-checks");
+    }
+
+    #[test]
+    fn unknown_path_fails_build_naming_the_path() {
+        let err = derive(syntax_message(), &["not_a_field"]).expect_err("an unknown path fails");
+        match err {
+            Error::UnknownField { path, message } => {
+                assert_eq!(path, "not_a_field");
+                assert_eq!(message, "einride.example.syntax.v1.Message");
+            }
+            other => panic!("expected UnknownField, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn descending_through_a_scalar_is_an_unknown_path() {
+        // `string` is a scalar leaf, so `string.foo` cannot resolve.
+        let err = derive(syntax_message(), &["string.foo"]).expect_err("cannot descend a scalar");
+        assert!(matches!(err, Error::UnknownField { .. }));
+    }
+
+    #[test]
+    fn unfilterable_kinds_fail_build() {
+        // `repeated_enum` / `map_string_message` confirm an enum or message
+        // *inside* a list / map is rejected — only a singular enum is filterable.
+        for path in [
+            "bytes",
+            "repeated_bytes",
+            "repeated_enum",
+            "message",
+            "map_string_message",
+        ] {
+            let err =
+                derive(syntax_message(), &[path]).expect_err("an unfilterable kind fails build");
+            match err {
+                Error::UnfilterableField {
+                    path: errored_path, ..
+                } => assert_eq!(errored_path, path),
+                other => panic!("expected UnfilterableField for {path:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn first_failure_wins_and_short_circuits() {
+        // Two bad paths: build reports the first, not the second.
+        let err = derive(syntax_message(), &["ghost", "bytes"]).expect_err("first failure wins");
+        match err {
+            Error::UnknownField { path, .. } => assert_eq!(path, "ghost"),
+            other => panic!("expected the first failure (UnknownField ghost), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fields_without_a_descriptor_is_a_build_error() {
+        let err = Declarations::builder()
+            .fields(["anything"])
+            .build()
+            .expect_err("fields() needs a descriptor");
+        assert!(matches!(err, Error::Type(_)));
     }
 }
 
