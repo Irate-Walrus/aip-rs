@@ -216,8 +216,9 @@ pub fn validate_required_dynamic(msg: &DynamicMessage) -> Result<(), Error> {
     into_required_result(paths)
 }
 
-/// Returns [`Error::RequiredField`] if any `REQUIRED` field in `msg` is unset.
-/// The headline **Typed facade** over [`validate_required_dynamic`] (ADR-0009).
+/// Returns [`Error::RequiredFields`] listing every `REQUIRED` field in `msg`
+/// that is unset. The headline **Typed facade** over
+/// [`validate_required_dynamic`] (ADR-0009).
 pub fn validate_required<M: ReflectMessage>(msg: &M) -> Result<(), Error> {
     let descriptor = msg.descriptor();
     let dynamic = DynamicMessage::decode(descriptor, msg.encode_to_vec().as_slice())

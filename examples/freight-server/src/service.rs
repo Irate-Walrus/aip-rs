@@ -499,9 +499,12 @@ impl FreightService for FreightServer {
         // this replaces the hand-rolled `display_name` presence check.
         aip::fieldbehavior::validate_required(&req)
             .map_err(|e| e.into_status_with_domain(SERVICE_DOMAIN))?;
+        // `site` is REQUIRED, so `validate_required` already rejected a missing
+        // one above; keep the explicit guard rather than unwrapping, so this
+        // never panics on a malformed request even if that annotation changes.
         let mut site = req
             .site
-            .expect("site presence is validated reflectively above");
+            .ok_or_else(|| Status::invalid_argument("site is required"))?;
 
         // The validated `parent` binds the `{shipper}` of the canonical site
         // pattern; mint a system-assigned `{site}` id (a UUIDv4, per AIP-148) and
@@ -619,9 +622,12 @@ impl FreightService for FreightServer {
         // service domain (ADR-0007 #118).
         aip::fieldbehavior::validate_required(&req)
             .map_err(|e| e.into_status_with_domain(SERVICE_DOMAIN))?;
+        // `shipment` is REQUIRED, so `validate_required` already rejected a
+        // missing one above; keep the explicit guard rather than unwrapping, so
+        // this never panics on a malformed request even if that annotation changes.
         let mut shipment = req
             .shipment
-            .expect("shipment presence is validated reflectively above");
+            .ok_or_else(|| Status::invalid_argument("shipment is required"))?;
 
         // The validated `parent` binds the `{shipper}` of the canonical shipment
         // pattern; mint a system-assigned `{shipment}` id (a UUIDv4, per AIP-148)
