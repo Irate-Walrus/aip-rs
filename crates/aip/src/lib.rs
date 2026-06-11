@@ -37,9 +37,9 @@ pub use aip_filtering as filtering;
 pub use aip_fieldbehavior as fieldbehavior;
 
 /// AIP-154 content etags (issue #93) — default-on via the `etag` feature:
-/// [`compute_etag`](aip_etag::compute_etag) digests a resource's content
+/// [`compute`](aip_etag::compute) digests a resource's content
 /// (excluding the etag field and OUTPUT_ONLY noise) into an optimistic-concurrency
-/// token, and [`check_etag`](aip_etag::check_etag) verifies a client's etag before
+/// token, and [`check`](aip_etag::check) verifies a client's etag before
 /// a write. Generalizes the IAM Policy etag to any resource.
 #[cfg(feature = "etag")]
 pub use aip_etag as etag;

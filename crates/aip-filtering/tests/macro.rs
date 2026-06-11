@@ -13,9 +13,7 @@ use aip_filtering::{
 };
 
 fn decls(build: impl FnOnce(DeclarationsBuilder) -> DeclarationsBuilder) -> Declarations {
-    build(Declarations::builder().standard_functions())
-        .build()
-        .expect("declarations build")
+    build(Declarations::builder().standard_functions()).build()
 }
 
 fn ident(name: &str) -> Expr {

@@ -159,7 +159,7 @@ pub trait OrderByRequest {
 }
 
 /// Parses the `order_by` from a request.
-pub fn parse_order_by(request: &impl OrderByRequest) -> Result<OrderBy, Error> {
+pub fn parse(request: &impl OrderByRequest) -> Result<OrderBy, Error> {
     request.order_by().parse()
 }
 

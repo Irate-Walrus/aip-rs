@@ -393,9 +393,20 @@ impl DeclarationsBuilder {
         self
     }
 
-    /// Finalize the declarations, surfacing the first error a derivation
+    /// Finalize the declarations, panicking if a derivation
+    /// ([`fields`](Self::fields)) produced an error. A bad declaration set is a
+    /// programmer bug (misconfigured field paths) — like `Regex::new` with a
+    /// known-good pattern, callers use this on static config where panicking on
+    /// misconfiguration is correct. Use [`try_build`](Self::try_build) when the
+    /// paths are dynamic and the caller must handle the error.
+    #[track_caller]
+    pub fn build(self) -> Declarations {
+        self.try_build().expect("filter declarations are valid")
+    }
+
+    /// Finalize the declarations, returning the first error a derivation
     /// ([`fields`](Self::fields)) deferred.
-    pub fn build(self) -> Result<Declarations, Error> {
+    pub fn try_build(self) -> Result<Declarations, Error> {
         if let Some(error) = self.deferred {
             return Err(error);
         }
@@ -641,7 +652,7 @@ mod derive_tests {
             ..DeclarationsBuilder::default()
         }
         .fields(paths.iter().copied())
-        .build()
+        .try_build()
     }
 
     #[test]
@@ -723,8 +734,7 @@ mod derive_tests {
         }
         .standard_functions()
         .fields(["enum"])
-        .build()
-        .expect("declarations build");
+        .build();
         check("enum = ENUM_ONE", &decls).expect("the derived enum overload type-checks");
     }
 
@@ -783,7 +793,7 @@ mod derive_tests {
     fn fields_without_a_descriptor_is_a_build_error() {
         let err = Declarations::builder()
             .fields(["anything"])
-            .build()
+            .try_build()
             .expect_err("fields() needs a descriptor");
         assert!(matches!(err, Error::Type(_)));
     }
