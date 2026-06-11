@@ -7,7 +7,7 @@
 //! `Unimplemented` until they follow the same pattern.
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use aip::fieldbehavior::FieldBehavior;
 use aip::iam::{Member, Permission};
@@ -62,6 +62,10 @@ const SORTABLE_SITE_PATHS: &[&str] = &[
 /// [`IamServer`](crate::iam::IamServer): the handlers read it to make the AIP-211
 /// authorization decision they gate on, so a Policy set via `SetIamPolicy` governs
 /// who may read a resource (AIP-211).
+///
+/// Use [`Default::default()`] for a stand-alone server with its own empty policy
+/// store. Use [`with_policies`](Self::with_policies) when the IAM policy store must
+/// be shared with [`IamServer`](crate::iam::IamServer).
 #[derive(Default)]
 pub struct FreightServer {
     storage: Storage,
@@ -69,17 +73,6 @@ pub struct FreightServer {
 }
 
 impl FreightServer {
-    /// A server backed by an empty store and its own empty policy store. The
-    /// binary always shares a store via [`with_policies`](Self::with_policies), so
-    /// this stand-alone constructor is only used by the handler tests.
-    #[cfg(test)]
-    pub fn new() -> Self {
-        Self {
-            storage: Storage::new(),
-            policies: Arc::new(PolicyStore::new()),
-        }
-    }
-
     /// A server backed by an empty store and an existing, shared [`PolicyStore`] —
     /// the one [`IamServer`](crate::iam::IamServer) mutates, so IAM Policies govern
     /// freight authorization.
@@ -946,13 +939,7 @@ fn unimplemented(method: &str) -> Status {
 /// Current wall-clock time as a protobuf `Timestamp`, for the server-set
 /// OUTPUT_ONLY `create_time`/`update_time` fields.
 fn now() -> prost_types::Timestamp {
-    let d = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    prost_types::Timestamp {
-        seconds: d.as_secs() as i64,
-        nanos: d.subsec_nanos() as i32,
-    }
+    prost_types::Timestamp::from(SystemTime::now())
 }
 
 #[cfg(test)]
@@ -1058,7 +1045,7 @@ mod tests {
 
     #[tokio::test]
     async fn orders_by_display_name_ascending_and_descending() {
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         for name in ["Bravo", "Alpha", "Charlie"] {
             seed_site(&server, name, 0.0).await;
         }
@@ -1074,7 +1061,7 @@ mod tests {
 
     #[tokio::test]
     async fn orders_by_nested_subfield_path() {
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         seed_site(&server, "north", 60.0).await;
         seed_site(&server, "south", -30.0).await;
         seed_site(&server, "equator", 0.0).await;
@@ -1094,7 +1081,7 @@ mod tests {
         // A multi-field `order_by` sorts by the first field, then the second
         // within each tie: latitude ascending groups the two `lat 0` sites, and
         // `display_name` orders them within that group.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         seed_site(&server, "Bravo", 0.0).await;
         seed_site(&server, "Alpha", 0.0).await;
         seed_site(&server, "Crest", 1.0).await;
@@ -1112,7 +1099,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_invalid_order_by_with_invalid_argument() {
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         // `foo/bar` is bad syntax, `display_name bogus` has a non-direction word,
         // and `unknown_field` is well-formed but not in the sortable allow-list.
         for bad in ["foo/bar", "display_name bogus", "unknown_field"] {
@@ -1134,7 +1121,7 @@ mod tests {
 
     #[tokio::test]
     async fn paginates_stably_and_guards_order_by_change() {
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         for name in ["d", "b", "e", "a", "c"] {
             seed_site(&server, name, 0.0).await;
         }
@@ -1204,7 +1191,7 @@ mod tests {
         // `aip-pagination` AIP-193 `From<Error> for Status`, so the response
         // carries the `PAGE_SIZE_NEGATIVE` `ErrorInfo` and — since `page_size` is
         // a named request field — a `BadRequest` violation pointing at it.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         let status = server
             .list_sites(Request::new(ListSitesRequest {
                 parent: PARENT.to_owned(),
@@ -1231,7 +1218,7 @@ mod tests {
     async fn list_shippers_rejects_negative_page_size() {
         // The shared `Page::parse` preamble rejects a negative `page_size` for
         // `ListShippers` too — independent of whether any shippers exist.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         let status = server
             .list_shippers(Request::new(ListShippersRequest {
                 page_size: -1,
@@ -1318,7 +1305,7 @@ mod tests {
     async fn create_shipper_replays_on_same_request_id() {
         // AIP-155: a retry carrying the same `request_id` returns the
         // original shipper instead of minting a second one — a safe retry.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         let request = CreateShipperRequest {
             shipper: Some(Shipper {
                 display_name: "Acme".to_owned(),
@@ -1351,7 +1338,7 @@ mod tests {
         // AIP-155: the same `request_id` replayed with a *different* body is
         // a reuse conflict — rejected with ALREADY_EXISTS + AIP-193 details, and
         // the conflicting shipper is never created.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         server
             .create_shipper(Request::new(CreateShipperRequest {
                 shipper: Some(Shipper {
@@ -1396,7 +1383,7 @@ mod tests {
 
         // AIP-155 / AIP-193: a `request_id` that is not a UUID is INVALID_ARGUMENT,
         // carrying the `REQUEST_ID_INVALID` reason; nothing is created.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         let status = server
             .create_shipper(Request::new(CreateShipperRequest {
                 shipper: Some(Shipper {
@@ -1425,7 +1412,7 @@ mod tests {
         // non-deterministic across encodes, so a byte comparison could reject a
         // legitimate retry as a conflict. With several keys, a safe retry must
         // still replay (same site, no second create).
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         let request = CreateSiteRequest {
             parent: PARENT.to_owned(),
             site: Some(Site {
@@ -1463,7 +1450,7 @@ mod tests {
     async fn create_shipper_without_request_id_is_not_idempotent() {
         // An absent `request_id` keeps the AIP-148 default: each call mints a new
         // system-assigned name, so two creates are two distinct shippers.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         let a = create_shipper(&server, "Acme").await;
         let b = create_shipper(&server, "Acme").await;
         assert_ne!(a.name, b.name);
@@ -1488,7 +1475,7 @@ mod tests {
     async fn update_shipper_applies_update_mask_via_typed_facade() {
         // Exercises the typed `update` facade end-to-end through the handler:
         // a masked field changes and an unmasked field is left untouched.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         let created = create_shipper(&server, "Acme").await;
         let name = created.name.clone();
 
@@ -1530,7 +1517,7 @@ mod tests {
         // carries no value would blank a REQUIRED field. The `fieldbehavior`
         // primitive rejects it with INVALID_ARGUMENT + AIP-193 details, and the
         // stored resource is left untouched.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         let created = create_shipper(&server, "Acme").await;
         let name = created.name.clone();
 
@@ -1577,7 +1564,7 @@ mod tests {
         // AIP-154: a Create stamps a content etag, an Update piggybacks it back
         // for the freshness check, and a stale token is rejected so a concurrent
         // writer can no longer silently clobber.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         let created = create_shipper(&server, "Acme").await;
         assert!(!created.etag.is_empty(), "create stamps a content etag");
 
@@ -1646,7 +1633,7 @@ mod tests {
 
         // A token that could not have come from a prior read is INVALID_ARGUMENT,
         // not a concurrency conflict — distinct from the stale-etag ABORTED above.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         let created = create_shipper(&server, "Acme").await;
         let status = server
             .update_shipper(Request::new(UpdateShipperRequest {
@@ -1672,7 +1659,7 @@ mod tests {
     async fn delete_shipper_honours_the_etag() {
         // Delete carries the etag on the request (it can't piggyback on the
         // resource). A stale token blocks the delete; the fresh one permits it.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         let created = create_shipper(&server, "Acme").await;
         let updated = server
             .update_shipper(Request::new(UpdateShipperRequest {
@@ -1735,7 +1722,7 @@ mod tests {
     async fn soft_delete_hides_then_show_deleted_reveals_then_undelete_restores() {
         // The full AIP-164 lifecycle the README demonstrates: delete → invisible →
         // show_deleted visible → undelete → visible again.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         let created = create_shipper(&server, "Acme").await;
         let name = created.name.clone();
 
@@ -1795,7 +1782,7 @@ mod tests {
     async fn undelete_of_a_live_shipper_is_already_exists() {
         // AIP-164: undelete operates only on a soft-deleted resource; a live one has
         // nothing to recover, so it is ALREADY_EXISTS (the `aip::softdelete` mapping).
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         let created = create_shipper(&server, "Acme").await;
         let status = server
             .undelete_shipper(Request::new(UndeleteShipperRequest { name: created.name }))
@@ -1808,7 +1795,7 @@ mod tests {
     async fn undelete_of_a_missing_shipper_is_not_found() {
         // A name that was never created has nothing to undelete: NOT_FOUND takes
         // precedence over the deleted-state precondition.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         let status = server
             .undelete_shipper(Request::new(UndeleteShipperRequest {
                 name: "shippers/nope".to_owned(),
@@ -1822,7 +1809,7 @@ mod tests {
     async fn delete_of_an_already_soft_deleted_shipper_is_not_found() {
         // Without allow_missing, a second delete targets a resource that is already
         // hidden, so it is NOT_FOUND (AIP-164) rather than a no-op re-stamp.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         let created = create_shipper(&server, "Acme").await;
         soft_delete_shipper(&server, &created.name).await;
         let status = server
@@ -1839,7 +1826,7 @@ mod tests {
     async fn list_shippers_honours_show_deleted() {
         // AIP-164: ListShippers omits soft-deleted shippers by default and includes
         // them under show_deleted.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         let live = create_shipper(&server, "Live").await;
         let doomed = create_shipper(&server, "Doomed").await;
         soft_delete_shipper(&server, &doomed.name).await;
@@ -1879,7 +1866,7 @@ mod tests {
         // The fieldbehavior primitive validates REQUIRED fields and emits AIP-193
         // details: a `BadRequest` naming the field path and an `ErrorInfo` with
         // domain `"aip-rs"` (the primitive's own domain, not the service domain).
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         let status = server
             .create_shipper(Request::new(CreateShipperRequest {
                 shipper: Some(Shipper::default()),
@@ -1909,7 +1896,7 @@ mod tests {
         // An unknown ordering field flows through the `ordering` crate's AIP-193
         // `From<Error> for Status`: the `BadRequest` names the field path
         // and the `ErrorInfo` carries the machine-readable reason + domain.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         let status = server
             .list_sites(Request::new(ListSitesRequest {
                 parent: PARENT.to_owned(),
@@ -1940,7 +1927,7 @@ mod tests {
         // handlers; the BadRequest must point at the field the value came from.
         // `shippers/acme/sites/x` is a valid resource name but does not match the
         // `shippers/{shipper}` pattern, so it trips the server's policy check.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         let status = server
             .list_sites(Request::new(ListSitesRequest {
                 parent: "shippers/acme/sites/x".to_owned(),
@@ -1964,7 +1951,7 @@ mod tests {
         // `aip::errordomain` boundary layer, so it pins the pre-boundary `aip-rs`
         // sentinel; the layer rewrites it to the service domain on the wire
         // (ADR-0007, proven by the through-stack test in `integration_tests`).
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         let status = server
             .create_site(Request::new(CreateSiteRequest {
                 parent: PARENT.to_owned(),
@@ -1997,7 +1984,7 @@ mod tests {
         // violation in a single `BadRequest` — request-rooted paths under
         // `shipment.*`. This direct call sees the pre-boundary `aip-rs` sentinel;
         // the boundary layer rewrites it to the service domain (ADR-0007).
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         let status = server
             .create_shipment(Request::new(CreateShipmentRequest {
                 parent: PARENT.to_owned(),
@@ -2040,7 +2027,7 @@ mod tests {
         // AIP-163: `validate_only` runs the full pipeline and returns the would-be
         // shipper — a system-assigned name and a stamped etag — but stores nothing,
         // so a later real create still mints a fresh shipper.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         let preview = server
             .create_shipper(Request::new(CreateShipperRequest {
                 shipper: Some(Shipper {
@@ -2081,7 +2068,7 @@ mod tests {
         // AIP-163: a request that would fail fails *identically* with or without
         // the flag — same code, message, and AIP-193 detail bytes — because
         // validation runs unconditionally before the commit gate.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         let invalid = |validate_only| CreateShipmentRequest {
             parent: PARENT.to_owned(),
             shipment: Some(Shipment::default()),
@@ -2125,7 +2112,7 @@ mod tests {
     async fn filter_returns_only_matching_site_from_sqlite() {
         // `display_name = "Alpha"` is type-checked, transpiled to a parameterized
         // Predicate, and run inside SQLite, which returns just the matching row.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         for name in ["Alpha", "Bravo", "Charlie"] {
             seed_site(&server, name, 0.0).await;
         }
@@ -2139,7 +2126,7 @@ mod tests {
     async fn filter_conjunction_binds_both_literals() {
         // `AND` over two `=` leaves binds two parameters; contradictory equalities
         // match nothing, proving both binds reach SQLite.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         for name in ["Alpha", "Bravo"] {
             seed_site(&server, name, 0.0).await;
         }
@@ -2154,7 +2141,7 @@ mod tests {
     #[tokio::test]
     async fn filter_disjunction_matches_either_branch() {
         // `OR` lowers to SQL: a disjunction returns the union of its branches.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         for name in ["Alpha", "Bravo", "Charlie"] {
             seed_site(&server, name, 0.0).await;
         }
@@ -2173,7 +2160,7 @@ mod tests {
         // A numeric comparison over the nested `lat_lng.latitude` path: `> 0`
         // keeps only the northern sites. The `Double > Int` overload lets the
         // bare `0` literal compare against the double column.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         seed_site(&server, "north", 60.0).await;
         seed_site(&server, "south", -30.0).await;
         seed_site(&server, "equator", 0.0).await;
@@ -2188,7 +2175,7 @@ mod tests {
         // `create_time` is server-set to `now()` and stored as RFC3339 text, so a
         // far-past bound matches every site and a far-future bound matches none —
         // proving the bound timestamp literal runs inside SQLite.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         for name in ["Alpha", "Bravo"] {
             seed_site(&server, name, 0.0).await;
         }
@@ -2207,7 +2194,7 @@ mod tests {
     async fn filter_by_enum_state() {
         // A reflective enum filter: `state = STATE_ACTIVE` binds the value name
         // and returns only the active sites.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         seed_site_with_state(&server, "Alpha", site::State::Active).await;
         seed_site_with_state(&server, "Bravo", site::State::Inactive).await;
         seed_site_with_state(&server, "Charlie", site::State::Active).await;
@@ -2222,7 +2209,7 @@ mod tests {
         // `:` on the `annotations` map tests key presence via SQLite's
         // `json_each`: `annotations:owner` keeps only the sites carrying
         // that key, whatever its value.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         seed_site_with_metadata(&server, "Alpha", &[("owner", "ops")], &[]).await;
         seed_site_with_metadata(&server, "Bravo", &[("region", "west")], &[]).await;
         seed_site_with_metadata(&server, "Charlie", &[("owner", "sales")], &[]).await;
@@ -2236,7 +2223,7 @@ mod tests {
     async fn filter_by_list_tag_membership() {
         // `:` on the `tags` list tests element presence via `json_each`:
         // `tags:refrigerated` keeps only the sites carrying that tag.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         seed_site_with_metadata(&server, "Alpha", &[], &["refrigerated", "hazmat"]).await;
         seed_site_with_metadata(&server, "Bravo", &[], &["bulk"]).await;
         seed_site_with_metadata(&server, "Charlie", &[], &["refrigerated"]).await;
@@ -2250,7 +2237,7 @@ mod tests {
     async fn filter_by_string_substring() {
         // `:` on a string column is a substring match: `display_name:lph`
         // keeps only the sites whose display name contains "lph".
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         for name in ["Alpha", "Bravo", "Charlie"] {
             seed_site(&server, name, 0.0).await;
         }
@@ -2367,7 +2354,7 @@ mod tests {
         // has a database or not. For each filter we compare the display names
         // SQLite returns (`ListSites`, whose parent scope and soft-delete drop
         // nothing here) against the ones the matcher keeps over the same corpus.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         let corpus = seed_filter_corpus(&server).await;
         let declarations = site_declarations();
 
@@ -2401,7 +2388,7 @@ mod tests {
         // one whose name is a string prefix of the parent (`shippers/acme2`) — are
         // excluded, proving the bound `LIKE 'shippers/acme/%'` respects the segment
         // boundary.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         seed_site(&server, "Mine", 0.0).await; // under PARENT (`shippers/acme`)
         for other_parent in ["shippers/other", "shippers/acme2"] {
             server
@@ -2424,7 +2411,7 @@ mod tests {
         // The soft-delete predicate `delete_time IS NULL` runs in SQL: a site
         // carrying a `delete_time` is dropped from the listing. `DeleteSite` is not
         // yet wired, so the soft-deleted row is seeded straight into the store.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         seed_site(&server, "Live", 0.0).await;
         server.storage.put_site(Site {
             name: format!("{PARENT}/sites/deleted-1"),
@@ -2499,7 +2486,7 @@ mod tests {
         // With no filter it lists every in-scope shipment; one created under a
         // different shipper is excluded by the parent scope.
         let site = "shippers/acme/sites/x";
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         create_shipment(&server, site, site, &[]).await;
         create_shipment(&server, site, site, &[]).await;
         server
@@ -2527,7 +2514,7 @@ mod tests {
         // `origin_site = X` returns only the matching shipment.
         let a = "shippers/acme/sites/a";
         let b = "shippers/acme/sites/b";
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         create_shipment(&server, a, b, &[]).await;
         create_shipment(&server, b, a, &[]).await;
         assert_eq!(
@@ -2541,7 +2528,7 @@ mod tests {
         // The has operator on the `annotations` map (`json_each`) composes through
         // the same path: only the shipment carrying the key is returned.
         let site = "shippers/acme/sites/x";
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         create_shipment(&server, site, site, &[("priority", "high")]).await;
         create_shipment(&server, site, site, &[("region", "west")]).await;
         assert_eq!(
@@ -2554,7 +2541,7 @@ mod tests {
     async fn list_shipments_rejects_invalid_filter() {
         // An unfilterable identifier is rejected with `INVALID_ARGUMENT`, the same
         // gate `ListSites` applies — the filter never reaches SQL.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         let status = server
             .list_shipments(Request::new(ListShipmentsRequest {
                 parent: PARENT.to_owned(),
@@ -2613,7 +2600,7 @@ mod tests {
     async fn get_shipper_is_public_until_a_policy_is_attached() {
         // A shipper with no Policy attached is public in the demo (mirroring the
         // open ListShippers), so an anonymous caller reads it.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         let created = create_shipper(&server, "Acme").await;
         let got = get_as(&server, &created.name, None)
             .await
@@ -2627,7 +2614,7 @@ mod tests {
 
         // Lock the shipper down to alice. She reads it; bob (and an anonymous
         // caller) get the canonical non-leaking PERMISSION_DENIED (AIP-211).
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         let created = create_shipper(&server, "Acme").await;
         lock_resource(&server, &created.name, &["user:alice@example.com"]);
 
@@ -2667,7 +2654,7 @@ mod tests {
         // shipper exists or not — so a missing resource is indistinguishable from a
         // forbidden one. `shippers/ghost` was never created; both it and the parent
         // collection are locked against bob.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         let existing = create_shipper(&server, "Acme").await;
         lock_resource(&server, &existing.name, &["user:alice@example.com"]);
         lock_resource(&server, "shippers/ghost", &["user:alice@example.com"]);
@@ -2700,7 +2687,7 @@ mod tests {
         // authorized to read the parent collection's children is allowed to learn
         // it does not exist — NOT_FOUND, not PERMISSION_DENIED. `shippers/ghost` is
         // locked to alice; the parent collection grants bob.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         lock_resource(&server, "shippers/ghost", &["user:alice@example.com"]);
         lock_resource(&server, SHIPPERS_COLLECTION, &["user:bob@example.com"]);
 
@@ -2724,7 +2711,7 @@ mod tests {
         // learns the hidden shipper is *absent* (NOT_FOUND) rather than that it exists
         // (PERMISSION_DENIED). Soft-delete the shipper, lock it to alice, grant bob
         // the parent.
-        let server = FreightServer::new();
+        let server = FreightServer::default();
         let created = create_shipper(&server, "Acme").await;
         soft_delete_shipper(&server, &created.name).await;
         lock_resource(&server, &created.name, &["user:alice@example.com"]);
