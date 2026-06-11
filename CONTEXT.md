@@ -90,12 +90,23 @@ _Avoid_: policy (that's the IAM term), page config, bounds.
 The resolved AIP-158 pagination state for one list page: the verified **Offset
 page token** paired with the effective **Page size** after the **Size limits**
 default/cap is applied. Folds the request-consistency check, **Page token**
-verification, and size resolution into one value the list handler reads.
+verification, and size resolution into one value the list handler reads. Exposes
+that state through unsigned `offset()` / `size()` accessors (the signed token
+fields stay internal) and **owns applying itself to the results** — slicing an
+in-memory collection or splitting a store-backed **Overfetch probe** — minting the
+next **Page token** in the same step.
 _Avoid_: page state, cursor, result set.
 
 **Skip**:
 A count of leading results to discard before the page begins (AIP-158 skip),
 applied on top of a **Page token**'s position.
+
+**Overfetch probe**:
+Fetching one row past the **Page size** so the extra row's *presence* tells a list
+handler another page remains. The probe row is truncated off before the response,
+and its presence mints the next **Page token**. The store-backed partner to
+applying a **Page** to a collection already in memory.
+_Avoid_: peek, lookahead, sentinel row.
 
 ### Field masks
 
