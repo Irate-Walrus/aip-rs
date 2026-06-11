@@ -36,6 +36,14 @@ pub use aip_filtering as filtering;
 #[cfg(feature = "fieldbehavior")]
 pub use aip_fieldbehavior as fieldbehavior;
 
+/// AIP-193 error-domain boundary layer (issue #145) — pulled in by the `tonic`
+/// feature: [`Layer`](aip_errordomain::Layer) rewrites the library `aip-rs`
+/// sentinel domain in `grpc-status-details-bin` to the deploying service's own
+/// domain, set once on the server builder so the service presents one
+/// `ErrorInfo.domain` to its clients (ADR-0007).
+#[cfg(feature = "errordomain")]
+pub use aip_errordomain as errordomain;
+
 /// AIP-154 content etags (issue #93) — default-on via the `etag` feature:
 /// [`compute`](aip_etag::compute) digests a resource's content
 /// (excluding the etag field and OUTPUT_ONLY noise) into an optimistic-concurrency

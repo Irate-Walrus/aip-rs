@@ -1,0 +1,49 @@
+# aip-errordomain — the AIP-193 error-domain boundary layer.
+#
+# A tonic/tower `Layer` that rewrites the `aip-rs` sentinel domain in
+# `grpc-status-details-bin` to a deploying service's own domain, so a service
+# presents exactly one `ErrorInfo.domain` to its clients (ADR-0007). Set once at
+# the serving boundary instead of re-stamping at every call site.
+#
+# Deliberately carries no aip-rs `Error` type — it is a transport-level rewrite
+# over `google.rpc.Status` bytes, not the shared error crate ADR-0001 rejected.
+# Its only protobuf knowledge is `google.rpc.Status` / `google.rpc.ErrorInfo`,
+# borrowed from `tonic-types` so it stays a generic tower layer.
+[package]
+name = "aip-errordomain"
+description = "Tonic boundary layer that stamps one AIP-193 ErrorInfo.domain per service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Trait surface: the `Layer`/`Service` the tonic server stack is built from. No
+# combinators needed, so default features stay off.
+tower = { workspace = true }
+# `grpc-status-details-bin` lives in an `http::HeaderMap`; the wrapped response
+# body re-publishes trailers through `http_body`. `bytes::Bytes` is the body
+# data type tonic's server stack carries.
+http = { workspace = true }
+http-body = { workspace = true }
+bytes = { workspace = true }
+# The status header carries a base64-encoded `google.rpc.Status`. tonic decodes
+# it with the standard alphabet (padding-indifferent) and encodes without
+# padding; this crate matches that on both ends so the rewritten value is
+# byte-compatible with what a tonic client expects.
+base64 = { workspace = true }
+# `google.rpc.Status` (the wire envelope) and `google.rpc.ErrorInfo` (the detail
+# whose `domain` is rewritten), reached through `tonic_types::pb` (which also
+# re-exports the `prost_types::Any` the details are packed in), plus the `prost`
+# runtime to decode/re-encode them.
+tonic-types = { workspace = true }
+prost = { workspace = true }
+# Pin projection for the response future and the trailer-rewriting body wrapper.
+pin-project-lite = { workspace = true }
+
+[dev-dependencies]
+# The unit tests build a real `tonic::Status` with AIP-193 details and serialize
+# it to a header map to feed the rewrite rule, proving the layer's contract
+# against the exact bytes tonic emits.
+tonic = { workspace = true, features = ["server"] }

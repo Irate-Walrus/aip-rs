@@ -57,7 +57,8 @@ RID=$(uuidgen)
 gc -d '{"shipper":{"display_name":"Acme"},"requestId":"'$RID'"}' 127.0.0.1:50051 $SVC/CreateShipper
 gc -d '{"shipper":{"display_name":"Acme"},"requestId":"'$RID'"}' 127.0.0.1:50051 $SVC/CreateShipper  # same name back
 # Reusing that id with a DIFFERENT body is rejected with AlreadyExists +
-# AIP-193 details (reason REQUEST_ID_CONFLICT / domain aip-rs).
+# AIP-193 details (reason REQUEST_ID_CONFLICT / domain freight.example.com —
+# the one service domain every error carries; see "Error domain" below).
 gc -d '{"shipper":{"display_name":"Other"},"requestId":"'$RID'"}' 127.0.0.1:50051 $SVC/CreateShipper
 # A malformed (non-UUID) id is InvalidArgument (reason REQUEST_ID_INVALID).
 gc -d '{"shipper":{"display_name":"Acme"},"requestId":"not-a-uuid"}' 127.0.0.1:50051 $SVC/CreateShipper
@@ -126,8 +127,8 @@ gc -d '{"parent":"shippers/$ID","orderBy":"display_name","pageSize":1,"pageToken
 
 # Bad syntax or an unknown ordering field is rejected with InvalidArgument —
 # and the status carries AIP-193 details: an ErrorInfo with a
-# machine-readable reason (ORDER_BY_UNKNOWN_FIELD / domain aip-rs) plus a
-# BadRequest naming the offending field. grpcurl prints the details block.
+# machine-readable reason (ORDER_BY_UNKNOWN_FIELD / domain freight.example.com)
+# plus a BadRequest naming the offending field. grpcurl prints the details block.
 gc -d '{"parent":"shippers/$ID","orderBy":"bogus_field"}'         127.0.0.1:50051 $SVC/ListSites
 
 # AIP-160 filtering: the filter is type-checked, transpiled to parameterized
@@ -216,7 +217,7 @@ ic -d '{"resource":"shippers/acme","policy":{"version":1,"etag":"'"$ETAG"'","bin
                                      127.0.0.1:50051 $IAMSVC/SetIamPolicy
 
 # A malformed Member is rejected with InvalidArgument carrying an IAM_* ErrorInfo
-# (reason IAM_MEMBER_UNKNOWN_TYPE / domain aip-rs) — the AIP-193 mapping.
+# (reason IAM_MEMBER_UNKNOWN_TYPE / domain freight.example.com) — the AIP-193 mapping.
 ic -d '{"resource":"shippers/acme","policy":{"bindings":[{"role":"roles/viewer","members":["robot:r2d2"]}]}}' \
                                      127.0.0.1:50051 $IAMSVC/SetIamPolicy
 
@@ -288,7 +289,7 @@ ic -d '{"resource":"shippers/$ID","policy":{"version":1,"bindings":[{"role":"rol
 
 # alice reads it; bob gets the canonical *non-leaking* PERMISSION_DENIED — message
 # "Permission 'freight.shippers.get' denied on resource 'shippers/$ID' (or it might
-# not exist)." with an IAM_PERMISSION_DENIED ErrorInfo (domain aip-rs).
+# not exist)." with an IAM_PERMISSION_DENIED ErrorInfo (domain freight.example.com).
 gc -H 'x-freight-caller: user:alice@example.com' -d '{"name":"shippers/$ID"}' 127.0.0.1:50051 $SVC/GetShipper
 gc -H 'x-freight-caller: user:bob@example.com'   -d '{"name":"shippers/$ID"}' 127.0.0.1:50051 $SVC/GetShipper
 
@@ -307,6 +308,31 @@ ic -d '{"resource":"shippers","policy":{"version":1,"bindings":[{"role":"roles/v
 gc -H 'x-freight-caller: user:bob@example.com' -d '{"name":"shippers/ghost"}' 127.0.0.1:50051 $SVC/GetShipper
 ```
 
+## Error domain
+
+Every error a client sees carries one AIP-193 `ErrorInfo.domain`:
+`freight.example.com`. That is the contract AIP-193 wants — a service presents a
+single domain across its whole error surface — and the demo gets it for free,
+set once, not re-stamped at every call site (aip #145, ADR-0007).
+
+The aip-rs primitives can't know the deploying service, so each maps its errors
+under the library sentinel domain `aip-rs`, meaning "replace me at the boundary".
+`main.rs` installs the `aip::errordomain` layer on the server builder:
+
+```rust
+Server::builder()
+    .layer(aip::errordomain::Layer::new(SERVICE_DOMAIN)) // SERVICE_DOMAIN = "freight.example.com"
+    .add_service(FreightServiceServer::new(server))
+```
+
+On the way out, the layer rewrites the `aip-rs` sentinel in
+`grpc-status-details-bin` to `freight.example.com` — in both the headers
+(trailers-only unary errors) and the trailers (streaming errors). A domain the
+service raised itself (the `Validator` checks behind the shipper-name pattern,
+which already use `freight.example.com`) is left untouched, since it is not the
+sentinel. So the handlers convert library errors with a bare `?` and never carry
+the domain themselves.
+
 ## What it exercises (and where it's headed)
 
 The freight methods map onto the aip-rs primitives. Shipper is the worked
@@ -321,9 +347,9 @@ wired up.
 | `UpdateShipper`   | `fieldmask` (typed `update` over `update_mask`), `fieldbehavior` (copy OUTPUT_ONLY from existing, validate REQUIRED in mask), `etag` (AIP-154 freshness check + re-stamp), `preview` (AIP-163 `validate_only` gate) | wired |
 | `DeleteShipper`   | `resourcename` (validate) + generated `ShipperResourceName` (pattern match), `etag` (AIP-154 freshness check), `softdelete` (AIP-164 soft delete — stamp `delete_time`, keep the record) | wired |
 | `UndeleteShipper` | `resourcename` (validate) + generated `ShipperResourceName` (pattern match), `softdelete` (AIP-164 undelete — clear `delete_time` after confirming the shipper is soft-deleted, else `ALREADY_EXISTS`) | wired |
-| `CreateSite`      | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `SiteResourceName` (validated `new` + infallible `Display`), `fieldbehavior` (reflective REQUIRED validation re-stamped to the service domain → AIP-193), `requestid` (AIP-155 idempotent replay), `preview` (AIP-163 `validate_only` gate) | wired |
+| `CreateSite`      | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `SiteResourceName` (validated `new` + infallible `Display`), `fieldbehavior` (reflective REQUIRED validation → AIP-193, the `aip-rs` sentinel rewritten to the service domain by the boundary layer), `requestid` (AIP-155 idempotent replay), `preview` (AIP-163 `validate_only` gate) | wired |
 | `ListSites`       | `ordering` (parse/validate, read through the generated `OrderByRequest` impl) + `pagination` (`Page::parse` preamble: checksum guard + offset token + `SizeLimits` size policy, `next_token` follow-on; read through the generated `PageRequest` impl) + `filtering`/`aip-sql` (filter declarations derived from the `Site` descriptor + server-composed scope/soft-delete + `ORDER BY`/`LIMIT`/`OFFSET` → in-memory SQLite), with the in-memory `filtering` matcher pinned against SQLite | wired |
-| `CreateShipment`  | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `ShipmentResourceName` (validated `new` + infallible `Display`), `fieldbehavior` (reflective REQUIRED validation of all six fields — endpoints + four pickup/delivery timestamps — re-stamped to the service domain → one AIP-193 response), `requestid` (AIP-155 idempotent replay), `preview` (AIP-163 `validate_only` gate) | wired |
+| `CreateShipment`  | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `ShipmentResourceName` (validated `new` + infallible `Display`), `fieldbehavior` (reflective REQUIRED validation of all six fields — endpoints + four pickup/delivery timestamps — into one AIP-193 response, the `aip-rs` sentinel rewritten to the service domain by the boundary layer), `requestid` (AIP-155 idempotent replay), `preview` (AIP-163 `validate_only` gate) | wired |
 | `ListShipments`   | `pagination` (`Page::parse` preamble: checksum guard + offset token + `SizeLimits` size policy, `next_token` follow-on; read through the generated `PageRequest` impl) + `filtering`/`aip-sql` (filter declarations derived from the `Shipment` descriptor + server-composed scope/soft-delete → in-memory SQLite) | wired |
 | `IAMPolicy.GetIamPolicy` / `SetIamPolicy` | `iam` (Member validation + structural read-modify-write: dedupe/normalise, `etag` optimistic concurrency, conditions⟹version-3) over a decomposed SQLite policy store (iam-go's `iam_policy_bindings` schema) | wired |
 | `IAMPolicy.TestIamPermissions` | `iam` + the opt-in cel-backed `eval` adapter (`aip::iam::eval`): role→permission expansion via an example-owned catalogue, Member matching, Condition evaluation | wired |

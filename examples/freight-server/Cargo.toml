@@ -35,7 +35,11 @@ publish = false
 # helpers it calls (aip #65) instead of a structurally-identical duplicate. The
 # `eval` feature exposes `aip::iam::eval` — the CEL-backed Condition evaluation
 # adapter (aip #66) — which `TestIamPermissions` will decide *through* (aip #68);
-# enabling it here keeps the demo compile-tracking the library feature.
+# enabling it here keeps the demo compile-tracking the library feature. The
+# `tonic` feature also pulls in `aip::errordomain` (aip #145): the boundary
+# `Layer` `main.rs` installs once so every library error reaches clients under
+# the one service domain (`freight.example.com`) instead of the `aip-rs`
+# sentinel (ADR-0007).
 aip = { workspace = true, features = ["tonic", "sql", "iam", "iam-proto", "eval"] }
 
 # The shared `google.*` types the generated code references by `extern_path`
@@ -74,3 +78,13 @@ rusqlite = { workspace = true }
 # The `annotations` map / `tags` list are stored as JSON text so the has operator
 # can query them with SQLite's `json_each` (#41).
 serde_json = { workspace = true }
+
+[dev-dependencies]
+# The error-domain smoke test (aip #145) drives the layered service stack
+# directly: `tower`'s `Layer`/`ServiceExt` install the `aip::errordomain` layer
+# over `FreightServiceServer` and call it with a framed gRPC request built from
+# `http` types, then `http-body-util` collects the response body to read the
+# rewritten `grpc-status-details-bin` off its trailers.
+tower = { workspace = true, features = ["util"] }
+http = { workspace = true }
+http-body-util = { workspace = true }

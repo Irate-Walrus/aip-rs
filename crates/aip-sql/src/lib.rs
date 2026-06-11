@@ -72,36 +72,37 @@ pub enum Error {
     InvalidDuration(String),
 }
 
-/// The default AIP-193 `ErrorInfo.domain` for the user-fault errors this crate
-/// maps. A deploying service overrides it per call via
-/// [`Error::into_status_with_domain`] so library-caught violations carry the
-/// service's own domain (ADR-0007).
+/// The library-internal AIP-193 `ErrorInfo.domain` the user-fault errors this
+/// crate maps are stamped with. It is a sentinel meaning "replace at the serving
+/// boundary": a deploying service installs the `aip-errordomain` layer, which
+/// rewrites it to the service's own domain so clients see one domain (ADR-0007).
 #[cfg(feature = "tonic")]
 const ERROR_DOMAIN: &str = "aip-rs";
 
 #[cfg(feature = "tonic")]
-impl Error {
+impl From<Error> for tonic::Status {
     /// Maps to a [`tonic::Status`], encoding user-vs-server fault by variant
     /// (ADR-0007 / ADR-0008) so the call site needs no hand-rolled `format!`:
     ///
     /// - [`Unsupported`](Error::Unsupported) and
     ///   [`InvalidDuration`](Error::InvalidDuration) are bad client input — an
     ///   unlowerable filter construct or a malformed `duration(...)` literal — so
-    ///   they map to `INVALID_ARGUMENT` with an AIP-193 `ErrorInfo` stamping
-    ///   `domain` over the default [`ERROR_DOMAIN`] (`aip-rs`). A filter
-    ///   expression / duration literal is an opaque value the library validates
-    ///   without knowing which request field carried it, so it gets an
-    ///   `ErrorInfo` only — no `BadRequest` (ADR-0007).
+    ///   they map to `INVALID_ARGUMENT` with an AIP-193 `ErrorInfo` under the
+    ///   library sentinel [`ERROR_DOMAIN`] (`aip-rs`), which a deploying service
+    ///   rewrites to its own domain at the serving boundary with the
+    ///   `aip-errordomain` layer. A filter expression / duration literal is an
+    ///   opaque value the library validates without knowing which request field
+    ///   carried it, so it gets an `ErrorInfo` only — no `BadRequest` (ADR-0007).
     /// - [`UnknownIdentifier`](Error::UnknownIdentifier) means an identifier
     ///   passed the checker / `order_by` allow-list but has no column in the
     ///   [`Schema`] — a server-side Schema/allow-list drift, never client input
-    ///   (ADR-0008) — so it maps to `INTERNAL` (the `domain` is irrelevant).
-    pub fn into_status_with_domain(self, domain: impl Into<String>) -> tonic::Status {
+    ///   (ADR-0008) — so it maps to `INTERNAL` (no domain, nothing to rewrite).
+    fn from(err: Error) -> Self {
         use std::collections::HashMap;
         use tonic_types::{ErrorDetails, StatusExt};
 
-        let message = self.to_string();
-        let (reason, metadata): (&str, HashMap<String, String>) = match &self {
+        let message = err.to_string();
+        let (reason, metadata): (&str, HashMap<String, String>) = match &err {
             Error::Unsupported(detail) => (
                 "FILTER_UNSUPPORTED",
                 HashMap::from([("detail".to_owned(), detail.clone())]),
@@ -115,19 +116,8 @@ impl Error {
             Error::UnknownIdentifier(_) => return tonic::Status::internal(message),
         };
         let mut details = ErrorDetails::new();
-        details.set_error_info(reason, domain, metadata);
+        details.set_error_info(reason, ERROR_DOMAIN, metadata);
         tonic::Status::with_error_details(tonic::Code::InvalidArgument, message, details)
-    }
-}
-
-#[cfg(feature = "tonic")]
-impl From<Error> for tonic::Status {
-    /// Delegates to [`Error::into_status_with_domain`] at the default
-    /// [`ERROR_DOMAIN`] (`aip-rs`). A service that wants its own domain on the
-    /// user-fault filter errors calls `into_status_with_domain` instead. See
-    /// `docs/adr/0007-aip193-error-details.md`.
-    fn from(err: Error) -> Self {
-        err.into_status_with_domain(ERROR_DOMAIN)
     }
 }
 
@@ -178,14 +168,5 @@ mod tonic_tests {
         assert_eq!(status.code(), tonic::Code::Internal);
         // No AIP-193 details leak on an internal error.
         assert!(status.get_details_error_info().is_none());
-    }
-
-    #[test]
-    fn into_status_with_domain_overrides_the_default_on_user_faults() {
-        let status =
-            Error::Unsupported("x".to_owned()).into_status_with_domain("freight.example.com");
-        let info = status.get_details_error_info().expect("ErrorInfo");
-        assert_eq!(info.reason, "FILTER_UNSUPPORTED");
-        assert_eq!(info.domain, "freight.example.com");
     }
 }
