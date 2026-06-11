@@ -15,6 +15,10 @@ aip-filtering.workspace = true
 # The parsed AIP-132 Order by is the second transpile input (ADR-0008):
 # `transpile_order_by` maps its fields onto SQL `ORDER BY` columns.
 aip-ordering.workspace = true
+# `format_timestamp` converts a prost Timestamp to the RFC3339 text the
+# transpiler binds, so stored columns compare lexicographically with filter
+# literals by construction.
+prost-types.workspace = true
 tonic = { workspace = true, optional = true }
 tonic-types = { workspace = true, optional = true }
 

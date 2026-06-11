@@ -130,9 +130,9 @@ impl Storage {
     /// so the server's soft-delete predicate `delete_time IS NULL` runs in SQL
     /// (#43).
     pub fn put_site(&self, site: Site) {
-        let create_time = site.create_time.as_ref().map(rfc3339);
-        let update_time = site.update_time.as_ref().map(rfc3339);
-        let delete_time = site.delete_time.as_ref().map(rfc3339);
+        let create_time = site.create_time.as_ref().map(aip::sql::format_timestamp);
+        let update_time = site.update_time.as_ref().map(aip::sql::format_timestamp);
+        let delete_time = site.delete_time.as_ref().map(aip::sql::format_timestamp);
         let latitude = site.lat_lng.as_ref().map(|ll| ll.latitude);
         let longitude = site.lat_lng.as_ref().map(|ll| ll.longitude);
         let state = State::try_from(site.state)
@@ -195,8 +195,8 @@ impl Storage {
     /// `json_each`, and `delete_time` (NULL when live) for the soft-delete
     /// predicate (#43).
     pub fn put_shipment(&self, shipment: Shipment) {
-        let create_time = shipment.create_time.as_ref().map(rfc3339);
-        let delete_time = shipment.delete_time.as_ref().map(rfc3339);
+        let create_time = shipment.create_time.as_ref().map(aip::sql::format_timestamp);
+        let delete_time = shipment.delete_time.as_ref().map(aip::sql::format_timestamp);
         let annotations =
             serde_json::to_string(&shipment.annotations).expect("serialize annotations");
         self.shipments
@@ -323,31 +323,6 @@ fn new_shipments_db() -> rusqlite::Connection {
     )
     .expect("create shipments table");
     conn
-}
-
-/// Format a protobuf `Timestamp` as a canonical RFC 3339 UTC string at second
-/// precision, so the stored `create_time` column sorts and compares
-/// lexicographically the same way the RFC3339 literal a filter binds does (the
-/// transpiler binds timestamps as text, #40). Only the non-negative range the
-/// demo produces (`now()`) is handled; the civil date comes from Howard
-/// Hinnant's `civil_from_days` algorithm.
-fn rfc3339(ts: &prost_types::Timestamp) -> String {
-    let secs = ts.seconds.max(0);
-    let days = secs.div_euclid(86_400);
-    let tod = secs.rem_euclid(86_400);
-    let (hour, minute, second) = (tod / 3600, (tod % 3600) / 60, tod % 60);
-
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097; // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let day = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
-    let month = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
-    let year = yoe + era * 400 + i64::from(month <= 2);
-
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
 /// Process-lifetime store of `google.iam.v1.Policy`, backing the demo's
