@@ -2,7 +2,7 @@
 //!
 //! The Shipper standard methods (Get/List/Create/Update/Delete) are wired up as
 //! the worked reference; every place an aip-rs primitive belongs is marked with
-//! a `TODO(aip #N)` tied to its tracking issue, so the handlers tighten up as the
+//! a `TODO(aip #N)` so the handlers tighten up as the
 //! per-feature crates land. Site, Shipment, and the batch method return
 //! `Unimplemented` until they follow the same pattern.
 
@@ -62,7 +62,7 @@ const SORTABLE_SITE_PATHS: &[&str] = &[
 /// `policies` is the resource-name-keyed IAM [`PolicyStore`] shared with
 /// [`IamServer`](crate::iam::IamServer): the handlers read it to make the AIP-211
 /// authorization decision they gate on, so a Policy set via `SetIamPolicy` governs
-/// who may read a resource (aip #67).
+/// who may read a resource (AIP-211).
 #[derive(Default)]
 pub struct FreightServer {
     storage: Storage,
@@ -101,9 +101,8 @@ impl FreightServer {
     /// This is deliberately a coarse *membership* check, not the full
     /// role→permission expansion and **Condition** evaluation that is the
     /// authorization **decision** — that lands behind the opt-in cel-backed `eval`
-    /// adapter (#66/#68, ADR-0010). Issue #67 contributes the AIP-211 error
-    /// *shape* this gate returns on a denial ([`aip::iam::authz`]), not the
-    /// decision.
+    /// adapter (ADR-0010). The gate contributes the AIP-211 error
+    /// *shape* ([`aip::iam::authz`]) on a denial, not the decision.
     fn authorized(&self, caller: Option<&Member>, resource: &str) -> bool {
         match self.policies.get(resource) {
             // Unprotected ⇒ public (a demo simplification, not production policy).
@@ -152,7 +151,7 @@ impl FreightService for FreightServer {
             return Ok(Response::new(shipper));
         }
 
-        // Unauthorized: shape the AIP-211 error without leaking existence (#67).
+        // Unauthorized: shape the AIP-211 error without leaking existence.
         // A shipper the authorized caller *could* see ⇒ the canonical non-leaking
         // `PERMISSION_DENIED`; one that is absent — or hidden by soft delete — ⇒ the
         // `NOT_FOUND`-via-parent fallback, which reveals the gap only to a caller
@@ -160,7 +159,7 @@ impl FreightService for FreightServer {
         // same `PERMISSION_DENIED`. Gating on the same `show_deleted` visibility the
         // authorized branch applies keeps a soft-deleted shipper no more
         // discoverable to an unauthorized caller than to an authorized one
-        // (AIP-164 + #67): both branches treat a hidden shipper as absent.
+        // (AIP-164, AIP-211): both branches treat a hidden shipper as absent.
         let permission = shipper_get_permission();
         let visible = self.storage.get_shipper(&name).is_some_and(|shipper| {
             aip::softdelete::is_visible(
@@ -265,7 +264,7 @@ impl FreightService for FreightServer {
         shipper.update_time = Some(ts);
         shipper.delete_time = None;
         // Stamp the AIP-154 content etag the client will echo back on a later
-        // update/delete (#93). `compute_etag` digests the content — it ignores the
+        // update/delete. `compute_etag` digests the content — it ignores the
         // OUTPUT_ONLY timestamps just stamped and the etag field itself — so the
         // token tracks name/display_name, not server churn.
         shipper.etag = aip::etag::compute_etag(&shipper);
@@ -293,7 +292,7 @@ impl FreightService for FreightServer {
             .get_shipper(&incoming.name)
             .ok_or_else(|| Status::not_found(format!("shipper `{}` not found", incoming.name)))?;
 
-        // AIP-154 freshness check (#93): an Update piggybacks the etag on the
+        // AIP-154 freshness check: an Update piggybacks the etag on the
         // resource, so the client's `shipper.etag` is the token it read. Verify it
         // against the stored shipper *before* doing any work — a stale etag means a
         // concurrent writer intervened (`ABORTED`, re-read and retry), a malformed
@@ -309,7 +308,7 @@ impl FreightService for FreightServer {
         // from the request clears that field.
         let mask = req.update_mask.unwrap_or_default();
         // An invalid mask path converts via the crate's AIP-193 `From<Error> for
-        // Status` (#16): the client gets `INVALID_ARGUMENT` with an `ErrorInfo`
+        // Status`: the client gets `INVALID_ARGUMENT` with an `ErrorInfo`
         // and, for a bad path, a `BadRequest` naming it.
         aip::fieldmask::validate(&mask, &Shipper::default().descriptor())?;
         // The typed `update` facade applies the mask straight on concrete
@@ -330,7 +329,7 @@ impl FreightService for FreightServer {
         aip::fieldbehavior::copy_fields(&mut shipper, &existing, &[FieldBehavior::OutputOnly]);
         // Stamp the server-controlled update_time regardless of what was copied.
         shipper.update_time = Some(now());
-        // Recompute the AIP-154 etag over the updated content (#93). `compute_etag`
+        // Recompute the AIP-154 etag over the updated content. `compute_etag`
         // ignores the etag field, so whatever the mask copied into it is replaced
         // by the fresh token; the response carries the value the next read-modify-
         // write must echo.
@@ -363,7 +362,7 @@ impl FreightService for FreightServer {
             false,
             &req.name,
         )?;
-        // AIP-154 freshness check (#93): a Delete can't piggyback the etag on the
+        // AIP-154 freshness check: a Delete can't piggyback the etag on the
         // resource, so it rides on the request. A stale token is `ABORTED`, a
         // malformed one `INVALID_ARGUMENT` (AIP-193); an empty etag makes the delete
         // unconditional.
@@ -423,11 +422,9 @@ impl FreightService for FreightServer {
         validate_shipper_name("parent", &req.parent)?;
 
         // Parse and validate the AIP-132 `order_by` against the allow-list of
-        // sortable Site paths (#9's `validate_for_paths`, not the descriptor-based
-        // `validate_for_message` of #10). Bad syntax or an unknown ordering field
-        // converts via the crate's AIP-193 `From<Error> for Status` (#16) to
-        // `INVALID_ARGUMENT` with an `ErrorInfo`, plus a `BadRequest` naming the
-        // offending field path.
+        // sortable Site paths. Bad syntax or an unknown ordering field converts
+        // via the crate's AIP-193 `From<Error> for Status` to `INVALID_ARGUMENT`
+        // with an `ErrorInfo`, plus a `BadRequest` naming the offending field path.
         let order_by = aip::ordering::parse_order_by(&req)?;
         order_by.validate_for_paths(SORTABLE_SITE_PATHS)?;
 
@@ -442,28 +439,27 @@ impl FreightService for FreightServer {
         // parent scope and the soft-delete `delete_time IS NULL` — through
         // `Predicate`, which owns precedence and one coherent placeholder
         // numbering across every composed fragment, so a user `a OR b` can't
-        // silently re-associate against the server's `AND`s (#43). The SQLite
+        // silently re-associate against the server's `AND`s. The SQLite
         // store renders the whole thing to one parameterized `WHERE`.
         let user_filter = parse_filter(&req.filter, &site_declarations(), &site_schema())?;
         let predicate = scoped_predicate(&req.parent, user_filter);
 
-        // Sort and page in SQL (#42). The validated `order_by` transpiles to SQL
+        // Sort and page in SQL. The validated `order_by` transpiles to SQL
         // `ORDER BY` items, mapped through the same column `Schema` the filter
         // uses; the resource name is appended as a tie-break so the order is total
         // and stable across pages — equal `order_by` keys fall back to a fixed
         // name order. Every sortable path is in the allow-list and the schema maps
         // it, so transpilation can only fail on an allow-list/schema drift, an
         // internal inconsistency rather than bad input — which `aip-sql`'s
-        // `From<Error>` maps to `INTERNAL`, so a bare `?` carries the right fault
-        // without a hand-rolled `format!` (#128).
+        // `From<Error>` maps to `INTERNAL`, so a bare `?` carries the right fault.
         let mut order = aip::sql::transpile_order_by(&order_by, &site_schema())?;
         order.push(aip::sql::Order::asc("name"));
 
         // Fetch one row past the page so an extra row signals a further page (the
-        // AIP-158 `next_page_token`). The parent scope now lives in the SQL
-        // `WHERE` (#43), so the `LIMIT`/`OFFSET` page boundaries are computed over
-        // exactly the in-scope rows — no in-memory post-filter that could
-        // under-fill a page. A forged token's offset is clamped non-negative.
+        // AIP-158 `next_page_token`). The parent scope lives in the SQL `WHERE`,
+        // so the `LIMIT`/`OFFSET` page boundaries are computed over exactly the
+        // in-scope rows — no in-memory post-filter that could under-fill a page.
+        // A forged token's offset is clamped non-negative.
         let offset = page.token.offset.max(0) as u64;
         let mut sites =
             self.storage
@@ -499,7 +495,7 @@ impl FreightService for FreightServer {
         // request, so the `BadRequest` paths are request-rooted
         // (`site.display_name`) and every missing field comes back in one
         // response. The library error is re-stamped to the service domain so the
-        // service presents a single AIP-193 domain to clients (ADR-0007 #118) —
+        // service presents a single AIP-193 domain to clients (ADR-0007) —
         // this replaces the hand-rolled `display_name` presence check.
         aip::fieldbehavior::validate_required(&req)
             .map_err(|e| e.into_status_with_domain(SERVICE_DOMAIN))?;
@@ -571,7 +567,7 @@ impl FreightService for FreightServer {
         // mid-pagination flips the checksum and the stale token is rejected.
         let page = parse_page(&req)?;
 
-        // The same server-side composition as `ListSites` (#43): the user's
+        // The same server-side composition as `ListSites`: the user's
         // AIP-160 `filter` (parsed + type-checked + transpiled) folded with the
         // parent scope and the soft-delete `delete_time IS NULL` through one
         // `Predicate` that owns precedence and placeholder numbering. The
@@ -605,8 +601,8 @@ impl FreightService for FreightServer {
         request: Request<CreateShipmentRequest>,
     ) -> Result<Response<Shipment>, Status> {
         // Mirrors `create_site`: the only shipment write the demo needs, so
-        // `ListShipments` (#43) has something to filter and page. The other
-        // shipment standard methods stay `Unimplemented` until their issues land.
+        // `ListShipments` has something to filter and page. The other
+        // shipment standard methods stay `Unimplemented` until their methods land.
         let req = request.into_inner();
         // AIP-155 idempotency, as in `create_shipper`: a `request_id` replay
         // returns the original shipment rather than minting a second one.
@@ -622,7 +618,7 @@ impl FreightService for FreightServer {
         // (`origin_site`, `destination_site`, and the four pickup/delivery
         // timestamps) — not just the two endpoints the hand-rolled check covered.
         // Every missing field comes back in one response, re-stamped to the
-        // service domain (ADR-0007 #118).
+        // service domain (ADR-0007).
         aip::fieldbehavior::validate_required(&req)
             .map_err(|e| e.into_status_with_domain(SERVICE_DOMAIN))?;
         // `shipment` is REQUIRED, so `validate_required` already rejected a
@@ -681,21 +677,16 @@ impl FreightService for FreightServer {
 // request with `order_by` (`ListSitesRequest` alone) — behind `buf.gen.yaml`'s
 // `pagination=true` / `ordering=true`.
 
-// The AIP-132 sort and AIP-158 page are pushed to SQLite (#42): `list_sites`
-// transpiles `order_by` to SQL `ORDER BY` items and the store renders `ORDER BY`
-// / `LIMIT` / `OFFSET`, so the in-memory `sort_sites` the earlier slices used is
-// gone.
-
 /// The AIP-160 declarations a `ListSites` filter is checked against: the full
-/// standard operator set (#40, #41) over one identifier of each filterable
+/// standard operator set over one identifier of each filterable
 /// shape — the string `display_name` / `name`, the timestamp `create_time`, the
 /// nested numeric `lat_lng.latitude`, the reflective enum `state`, the
 /// `annotations` map, and the `tags` list. The map / list / string / timestamp
-/// identifiers carry the has operator `:` overloads (#41).
+/// identifiers carry the has operator `:` overloads.
 fn site_declarations() -> aip::filtering::Declarations {
     use aip::filtering::Declarations;
 
-    // Each identifier's `Type` is derived from the `Site` descriptor (#127): the
+    // Each identifier's `Type` is derived from the `Site` descriptor: the
     // Typed message carries its own descriptor (ADR-0009), so `for_message`
     // resolves these paths and reads off the string / timestamp / nested-double /
     // map / list types — and gives `state` the full enum treatment (the field,
@@ -716,7 +707,7 @@ fn site_declarations() -> aip::filtering::Declarations {
 }
 
 /// Maps the Site identifiers a filter or `order_by` can address onto their SQLite
-/// columns (#39, #40, #41, #42). The nested `lat_lng.latitude` / `lat_lng.longitude`
+/// columns. The nested `lat_lng.latitude` / `lat_lng.longitude`
 /// paths flatten to the `latitude` / `longitude` columns; `annotations` / `tags`
 /// are the JSON map / list columns the has operator queries with `json_each`; the
 /// rest map to identically-named columns in the `sites` table.
@@ -743,12 +734,12 @@ fn site_schema() -> aip::sql::Schema {
 /// resource-name references `origin_site` / `destination_site` (strings, so they
 /// also carry the substring has operator `:`), the timestamp `create_time`, and
 /// the `annotations` map (carrying the key-presence has operator). A small, focused
-/// allowlist — `ListShipments` exists here to prove the *composition* (#43), not to
-/// re-enumerate every filterable shape `ListSites` already covers.
+/// allowlist — `ListShipments` exists here to prove the server-side composition,
+/// not to re-enumerate every filterable shape `ListSites` already covers.
 fn shipment_declarations() -> aip::filtering::Declarations {
     use aip::filtering::Declarations;
 
-    // Derived from the `Shipment` descriptor (#127): `name` / `origin_site` /
+    // Derived from the `Shipment` descriptor: `name` / `origin_site` /
     // `destination_site` read off as strings, `create_time` as a timestamp, and
     // `annotations` as a map — same allowlist, no hand-spelled `Type`s.
     Declarations::for_message::<Shipment>()
@@ -765,7 +756,7 @@ fn shipment_declarations() -> aip::filtering::Declarations {
 }
 
 /// Maps the Shipment identifiers a filter can address onto their SQLite columns
-/// (#43) in the `shipments` table; `annotations` is the JSON map column the has
+/// in the `shipments` table; `annotations` is the JSON map column the has
 /// operator queries with `json_each`. This is the column allowlist for
 /// [`aip::sql::transpile_filter`], paired with [`shipment_declarations`].
 fn shipment_schema() -> aip::sql::Schema {
@@ -780,10 +771,10 @@ fn shipment_schema() -> aip::sql::Schema {
 
 /// Parse + type-check an AIP-160 `filter` and transpile it to a parameterized
 /// [`Predicate`](aip::sql::Predicate), or `Ok(None)` for an empty filter (which
-/// lists every in-scope row). Shared by `ListSites` and `ListShipments` (#43).
+/// lists every in-scope row). Shared by `ListSites` and `ListShipments`.
 ///
 /// An invalid filter converts to `INVALID_ARGUMENT` with AIP-193 details through
-/// each crate's `From<Error>` (#128): `check` via `aip-filtering` (#16), and an
+/// each crate's `From<Error>`: `check` via `aip-filtering`, and an
 /// unlowerable construct (e.g. a comparison between two columns) or a malformed
 /// `duration(...)` literal via `aip-sql` — so a bare `?` carries the fault without
 /// a hand-rolled `format!`. The same `declarations` drive the check and the
@@ -803,7 +794,7 @@ fn parse_filter(
 }
 
 /// Compose the server's own predicates with an optional user `filter` into one
-/// [`Predicate`](aip::sql::Predicate) (#43): an AIP parent scope on the `name`
+/// [`Predicate`](aip::sql::Predicate): an AIP parent scope on the `name`
 /// column (`name LIKE 'parent/%'`, the parent escaped + bound) and the soft-delete
 /// `delete_time IS NULL`, conjoined with the user filter when present. `Predicate`
 /// owns precedence and one coherent placeholder numbering across the fragments, so
@@ -841,16 +832,16 @@ struct Page {
 /// against that checksum, and resolve the page size. Both list handlers open
 /// their pagination logic with `parse_page(&req)?`.
 fn parse_page<M: PageRequest + ReflectMessage>(request: &M) -> Result<Page, Status> {
-    // Compute the request checksum directly off the concrete request. Since #46
-    // the generated types are Typed messages (`ReflectMessage`), so the descriptor
+    // Compute the request checksum directly off the concrete request. The generated
+    // types are Typed messages (`ReflectMessage`, ADR-0009), so the descriptor
     // travels with the value and `request_checksum` takes it without the
-    // `DynamicMessage` bridge or a hand-derived message name (ADR-0009). A
-    // checksum failure would mean the type and its descriptor disagree — a build
-    // bug, not bad input — so it surfaces as `internal`.
+    // `DynamicMessage` bridge or a hand-derived message name. A checksum failure
+    // would mean the type and its descriptor disagree — a build bug, not bad input
+    // — so it surfaces as `internal`.
     let checksum = aip::pagination::request_checksum(request)
         .map_err(|e| Status::internal(format!("compute request checksum: {e}")))?;
     // A malformed token, version mismatch, or checksum mismatch converts via the
-    // crate's AIP-193 `From<Error> for Status` (#16) to an `INVALID_ARGUMENT`
+    // crate's AIP-193 `From<Error> for Status` to an `INVALID_ARGUMENT`
     // carrying an `ErrorInfo` (e.g. `PAGE_TOKEN_CHECKSUM_MISMATCH`).
     let token = PageToken::parse(request, checksum)?;
     let size = effective_page_size(request.page_size())?;
@@ -876,7 +867,7 @@ fn effective_page_size(requested: i32) -> Result<usize, Status> {
 /// (`name` or `parent`), so the AIP-193 `BadRequest` points at the right one.
 fn validate_shipper_name(field: &str, value: &str) -> Result<(), Status> {
     // A malformed name converts via the crate's AIP-193 `From<Error> for Status`
-    // (#16) to an `INVALID_ARGUMENT` carrying an `ErrorInfo`. The pattern-match
+    // to an `INVALID_ARGUMENT` carrying an `ErrorInfo`. The pattern-match
     // check below is the server's own policy, so it builds its own AIP-193 details.
     aip::resourcename::validate(value)?;
     if ShipperResourceName::parse(value).is_err() {
@@ -892,25 +883,23 @@ fn validate_shipper_name(field: &str, value: &str) -> Result<(), Status> {
 
 /// The AIP-193 `ErrorInfo.domain` the service presents to its clients. Passed to
 /// every [`Validator`] the handlers build for the policy checks no aip-rs
-/// primitive covers (e.g. the shipper-name pattern), and — since ADR-0007 #118 —
+/// primitive covers (e.g. the shipper-name pattern), and — per ADR-0007 —
 /// also to `Error::into_status_with_domain` so the reflective REQUIRED-field
 /// validation in `create_site` / `create_shipment` re-stamps its library error
-/// to this one service domain instead of leaking `aip-rs` to clients. Handlers
-/// that still pass library errors through `From<Error>` (e.g. the `order_by` and
-/// IAM checks) keep the `aip-rs` default (#16).
+/// to this one service domain instead of leaking `aip-rs` to clients.
 const SERVICE_DOMAIN: &str = "freight.example.com";
 
 /// The request-metadata key the demo reads the caller's IAM **Member** identity
 /// from. A real server derives the principal from authenticated transport (mTLS, a
 /// verified JWT); the demo takes it verbatim so `grpcurl -H 'x-freight-caller: …'`
-/// can play any identity against the AIP-211 gate (and `TestIamPermissions`, #68).
+/// can play any identity against the AIP-211 gate (and `TestIamPermissions`).
 pub(crate) const CALLER_METADATA_KEY: &str = "x-freight-caller";
 
 /// Read the caller's IAM **Member** from request metadata, or `None` when it is
 /// absent or unparseable (an anonymous caller). The credential only *identifies*
 /// the caller for the authorization gate — it is not a request field — so a bad
 /// value degrades to anonymous rather than `INVALID_ARGUMENT`. Shared with the
-/// `IAMPolicy` service's `TestIamPermissions` (#68), which reads the same caller.
+/// `IAMPolicy` service's `TestIamPermissions`.
 pub(crate) fn caller_member(metadata: &MetadataMap) -> Option<Member> {
     metadata
         .get(CALLER_METADATA_KEY)
@@ -923,7 +912,7 @@ pub(crate) fn caller_member(metadata: &MetadataMap) -> Option<Member> {
 /// present caller; a typed member admits the exact same **Member**. The grant is
 /// compared against the caller's canonical [`Member`] rendering, so only a
 /// well-formed grant matches (a malformed one was rejected at `SetIamPolicy`).
-/// Shared with `TestIamPermissions` (#68), which matches the caller the same way.
+/// Shared with `TestIamPermissions`, which matches the caller the same way.
 pub(crate) fn member_matches(granted: &str, caller: Option<&Member>) -> bool {
     match granted {
         "allUsers" => true,
@@ -940,7 +929,7 @@ fn shipper_get_permission() -> Permission {
         .expect("a static freight.shippers.get permission is well-formed")
 }
 
-/// AIP-155 idempotency pre-check for a create handler (issue #94).
+/// AIP-155 idempotency pre-check for a create handler.
 ///
 /// Validates `request_id` (a malformed id is an AIP-193 `INVALID_ARGUMENT`) and
 /// resolves it against the server's cache of seen ids:
@@ -990,8 +979,8 @@ where
 }
 
 /// Record a create's request + response under its `request_id`, so a later retry
-/// replays through [`idempotent_lookup`] (AIP-155, issue #94). A no-op for an
-/// empty id (no idempotency was requested).
+/// replays through [`idempotent_lookup`] (AIP-155). A no-op for an empty id (no
+/// idempotency was requested).
 fn idempotent_record(
     storage: &Storage,
     request_id: &str,
@@ -1233,7 +1222,7 @@ mod tests {
 
         // A token minted under one `order_by` is rejected when replayed under a
         // different one: `order_by` is a non-pagination field, so the request
-        // checksum (#7) changes and the stale token is refused.
+        // checksum changes and the stale token is refused.
         let first = server
             .list_sites(Request::new(ListSitesRequest {
                 parent: PARENT.to_owned(),
@@ -1317,10 +1306,10 @@ mod tests {
     #[test]
     fn sortable_site_paths_resolve_on_the_site_descriptor() {
         // `ListSites` gates `order_by` with the curated `validate_for_paths`
-        // allow-list (#9). `validate_for_message` (#10) guards the allow-list
-        // itself: every sortable path must be a real `Site` field, so the
-        // allow-list can't silently drift from the proto. The `Site` descriptor
-        // comes straight off the Typed message (ADR-0009), no by-name pool lookup.
+        // allow-list. `validate_for_message` guards the allow-list itself: every
+        // sortable path must be a real `Site` field, so the allow-list can't
+        // silently drift from the proto. The `Site` descriptor comes straight off
+        // the Typed message (ADR-0009), no by-name pool lookup.
         let site = Site::default().descriptor();
         let order_by: OrderBy = SORTABLE_SITE_PATHS
             .join(",")
@@ -1333,12 +1322,11 @@ mod tests {
 
     #[test]
     fn sortable_site_paths_map_to_columns_in_the_schema() {
-        // Sorting now happens in SQL (#42): `transpile_order_by` maps each
-        // `order_by` path to a column through `site_schema`. So the schema must
-        // cover every sortable path — otherwise an in-allow-list `order_by` would
-        // surface as an `internal` error. This guards the allow-list against
-        // drifting from the column schema the same way the test above guards it
-        // against the proto.
+        // `transpile_order_by` maps each `order_by` path to a column through
+        // `site_schema`. The schema must cover every sortable path — otherwise an
+        // in-allow-list `order_by` would surface as an `internal` error. This
+        // guards the allow-list against drifting from the column schema the same
+        // way the test above guards it against the proto.
         let order_by: OrderBy = SORTABLE_SITE_PATHS
             .join(",")
             .parse()
@@ -1389,7 +1377,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_shipper_replays_on_same_request_id() {
-        // AIP-155 (#94): a retry carrying the same `request_id` returns the
+        // AIP-155: a retry carrying the same `request_id` returns the
         // original shipper instead of minting a second one — a safe retry.
         let server = FreightServer::new();
         let request = CreateShipperRequest {
@@ -1421,7 +1409,7 @@ mod tests {
     async fn create_shipper_rejects_conflicting_request_id() {
         use tonic_types::StatusExt as _;
 
-        // AIP-155 (#94): the same `request_id` replayed with a *different* body is
+        // AIP-155: the same `request_id` replayed with a *different* body is
         // a reuse conflict — rejected with ALREADY_EXISTS + AIP-193 details, and
         // the conflicting shipper is never created.
         let server = FreightServer::new();
@@ -1559,7 +1547,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_shipper_applies_update_mask_via_typed_facade() {
-        // Exercises the typed `update` facade (#48) end-to-end through the handler:
+        // Exercises the typed `update` facade end-to-end through the handler:
         // a masked field changes and an unmasked field is left untouched.
         let server = FreightServer::new();
         let created = create_shipper(&server, "Acme").await;
@@ -1647,9 +1635,9 @@ mod tests {
     async fn update_shipper_runs_the_aip154_read_modify_write_cycle() {
         use tonic_types::StatusExt as _;
 
-        // #93 / AIP-154: a Create stamps a content etag, an Update piggybacks it
-        // back for the freshness check, and a stale token is rejected so a
-        // concurrent writer can no longer silently clobber.
+        // AIP-154: a Create stamps a content etag, an Update piggybacks it back
+        // for the freshness check, and a stale token is rejected so a concurrent
+        // writer can no longer silently clobber.
         let server = FreightServer::new();
         let created = create_shipper(&server, "Acme").await;
         assert!(!created.etag.is_empty(), "create stamps a content etag");
@@ -1807,7 +1795,7 @@ mod tests {
     #[tokio::test]
     async fn soft_delete_hides_then_show_deleted_reveals_then_undelete_restores() {
         // The full AIP-164 lifecycle the README demonstrates: delete → invisible →
-        // show_deleted visible → undelete → visible again (#96).
+        // show_deleted visible → undelete → visible again.
         let server = FreightServer::new();
         let created = create_shipper(&server, "Acme").await;
         let name = created.name.clone();
@@ -1894,7 +1882,7 @@ mod tests {
     #[tokio::test]
     async fn delete_of_an_already_soft_deleted_shipper_is_not_found() {
         // Without allow_missing, a second delete targets a resource that is already
-        // hidden, so it is NOT_FOUND (#96) rather than a no-op re-stamp.
+        // hidden, so it is NOT_FOUND (AIP-164) rather than a no-op re-stamp.
         let server = FreightServer::new();
         let created = create_shipper(&server, "Acme").await;
         soft_delete_shipper(&server, &created.name).await;
@@ -1911,7 +1899,7 @@ mod tests {
     #[tokio::test]
     async fn list_shippers_honours_show_deleted() {
         // AIP-164: ListShippers omits soft-deleted shippers by default and includes
-        // them under show_deleted (#96).
+        // them under show_deleted.
         let server = FreightServer::new();
         let live = create_shipper(&server, "Live").await;
         let doomed = create_shipper(&server, "Doomed").await;
@@ -1980,7 +1968,7 @@ mod tests {
         use tonic_types::StatusExt as _;
 
         // An unknown ordering field flows through the `ordering` crate's AIP-193
-        // `From<Error> for Status` (#16): the `BadRequest` names the field path
+        // `From<Error> for Status`: the `BadRequest` names the field path
         // and the `ErrorInfo` carries the machine-readable reason + domain.
         let server = FreightServer::new();
         let status = server
@@ -2034,7 +2022,7 @@ mod tests {
         // `create_site` validates the required `display_name` reflectively
         // (dropping the old hand-rolled check). The request-rooted path is
         // `site.display_name`, and the library error is re-stamped to the
-        // service domain (ADR-0007 #118).
+        // service domain (ADR-0007).
         let server = FreightServer::new();
         let status = server
             .create_site(Request::new(CreateSiteRequest {
@@ -2066,7 +2054,7 @@ mod tests {
         // A bare shipment is missing all six REQUIRED fields (AIP-203). The
         // reflective validator accumulates them, so the client gets *every*
         // violation in a single `BadRequest` — request-rooted paths under
-        // `shipment.*` — carrying the service's own domain (ADR-0007 #118).
+        // `shipment.*` — carrying the service's own domain (ADR-0007).
         let server = FreightServer::new();
         let status = server
             .create_shipment(Request::new(CreateShipmentRequest {
@@ -2193,9 +2181,8 @@ mod tests {
 
     #[tokio::test]
     async fn filter_returns_only_matching_site_from_sqlite() {
-        // The headline tracer-bullet path (#39): `display_name = "Alpha"` is
-        // type-checked, transpiled to a parameterized Predicate, and run inside
-        // SQLite, which returns just the matching row.
+        // `display_name = "Alpha"` is type-checked, transpiled to a parameterized
+        // Predicate, and run inside SQLite, which returns just the matching row.
         let server = FreightServer::new();
         for name in ["Alpha", "Bravo", "Charlie"] {
             seed_site(&server, name, 0.0).await;
@@ -2224,8 +2211,7 @@ mod tests {
 
     #[tokio::test]
     async fn filter_disjunction_matches_either_branch() {
-        // `OR` now lowers to SQL (#40): a disjunction returns the union of its
-        // branches.
+        // `OR` lowers to SQL: a disjunction returns the union of its branches.
         let server = FreightServer::new();
         for name in ["Alpha", "Bravo", "Charlie"] {
             seed_site(&server, name, 0.0).await;
@@ -2292,7 +2278,7 @@ mod tests {
     #[tokio::test]
     async fn filter_by_map_annotation_key_presence() {
         // `:` on the `annotations` map tests key presence via SQLite's
-        // `json_each` (#41): `annotations:owner` keeps only the sites carrying
+        // `json_each`: `annotations:owner` keeps only the sites carrying
         // that key, whatever its value.
         let server = FreightServer::new();
         seed_site_with_metadata(&server, "Alpha", &[("owner", "ops")], &[]).await;
@@ -2306,7 +2292,7 @@ mod tests {
 
     #[tokio::test]
     async fn filter_by_list_tag_membership() {
-        // `:` on the `tags` list tests element presence via `json_each` (#41):
+        // `:` on the `tags` list tests element presence via `json_each`:
         // `tags:refrigerated` keeps only the sites carrying that tag.
         let server = FreightServer::new();
         seed_site_with_metadata(&server, "Alpha", &[], &["refrigerated", "hazmat"]).await;
@@ -2320,7 +2306,7 @@ mod tests {
 
     #[tokio::test]
     async fn filter_by_string_substring() {
-        // `:` on a string column is a substring match (#41): `display_name:lph`
+        // `:` on a string column is a substring match: `display_name:lph`
         // keeps only the sites whose display name contains "lph".
         let server = FreightServer::new();
         for name in ["Alpha", "Bravo", "Charlie"] {
@@ -2433,7 +2419,7 @@ mod tests {
 
     #[tokio::test]
     async fn in_memory_matcher_agrees_with_sqlite_over_the_filter_corpus() {
-        // Issue #92: the in-memory reflective matcher (`aip::filtering::matches`)
+        // The in-memory reflective matcher (`aip::filtering::matches`)
         // and the `aip-sql` + SQLite path must select the *same* Sites for every
         // advertised filter — so an AIP-160 Filter means one thing whether a caller
         // has a database or not. For each filter we compare the display names
@@ -2468,7 +2454,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_sites_scopes_to_parent_in_sql() {
-        // The parent scope now runs in the SQL `WHERE` (#43, `scope_to_parent`),
+        // The parent scope runs in the SQL `WHERE` (via `scope_to_parent`),
         // not an in-memory post-filter: sites under a different shipper — including
         // one whose name is a string prefix of the parent (`shippers/acme2`) — are
         // excluded, proving the bound `LIKE 'shippers/acme/%'` respects the segment
@@ -2493,7 +2479,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_sites_excludes_soft_deleted_in_sql() {
-        // The soft-delete predicate `delete_time IS NULL` runs in SQL (#43): a site
+        // The soft-delete predicate `delete_time IS NULL` runs in SQL: a site
         // carrying a `delete_time` is dropped from the listing. `DeleteSite` is not
         // yet wired, so the soft-deleted row is seeded straight into the store.
         let server = FreightServer::new();
@@ -2567,7 +2553,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_shipments_scopes_to_parent_with_no_filter() {
-        // `ListShipments` is SQLite-backed and composes scope + soft-delete (#43).
+        // `ListShipments` is SQLite-backed and composes scope + soft-delete.
         // With no filter it lists every in-scope shipment; one created under a
         // different shipper is excluded by the parent scope.
         let site = "shippers/acme/sites/x";
@@ -2638,7 +2624,7 @@ mod tests {
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
     }
 
-    // ----- GetShipper authorization (AIP-211, #67) -----
+    // ----- GetShipper authorization (AIP-211) -----
 
     use aip::iam::proto::{Binding, Policy};
 
@@ -2698,7 +2684,7 @@ mod tests {
         use tonic_types::StatusExt as _;
 
         // Lock the shipper down to alice. She reads it; bob (and an anonymous
-        // caller) get the canonical non-leaking PERMISSION_DENIED (#67).
+        // caller) get the canonical non-leaking PERMISSION_DENIED (AIP-211).
         let server = FreightServer::new();
         let created = create_shipper(&server, "Acme").await;
         lock_resource(&server, &created.name, &["user:alice@example.com"]);
@@ -2790,7 +2776,7 @@ mod tests {
     async fn soft_deleted_shipper_does_not_leak_existence_to_a_parent_reader() {
         use tonic_types::StatusExt as _;
 
-        // #96 × #67: a soft-deleted shipper is hidden, so the unauthorized
+        // AIP-164 × AIP-211: a soft-deleted shipper is hidden, so the unauthorized
         // existence-leak branch must treat it the same way the authorized read does.
         // A caller unauthorized on the shipper but able to read the parent collection
         // learns the hidden shipper is *absent* (NOT_FOUND) rather than that it exists
