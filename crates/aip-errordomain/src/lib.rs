@@ -29,9 +29,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{ready, Context, Poll};
 
-use base64::alphabet;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
-use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
 use base64::Engine as _;
 use bytes::Bytes;
 use http::header::HeaderName;
@@ -55,15 +53,6 @@ const GRPC_STATUS_DETAILS_BIN: HeaderName = HeaderName::from_static("grpc-status
 /// `google.rpc.Status` packs its details as `Any`s keyed by a `type.googleapis.com/…`
 /// URL; only the `ErrorInfo` detail carries a domain.
 const ERROR_INFO_TYPE: &str = "google.rpc.ErrorInfo";
-
-/// Decode `grpc-status-details-bin` with the standard base64 alphabet, accepting
-/// padded or unpadded input. tonic encodes the header without padding but its
-/// own decoder is padding-indifferent; matching that keeps the layer robust to
-/// either spelling.
-const DECODE: GeneralPurpose = GeneralPurpose::new(
-    &alphabet::STANDARD,
-    GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
-);
 
 /// A tonic/tower [`Layer`](tower::Layer) that rewrites the [`SENTINEL_DOMAIN`] in
 /// outgoing AIP-193 error details to the deploying service's own domain, so the
@@ -231,7 +220,10 @@ fn rewrite_details(headers: &mut HeaderMap, domain: &str) {
 /// place otherwise. Any decode failure yields `None` — an unparseable status is
 /// passed through verbatim rather than dropped.
 fn rewrite_status_bytes(b64: &[u8], domain: &str) -> Option<Bytes> {
-    let raw = DECODE.decode(b64).ok()?;
+    // tonic spells the header with the standard alphabet and no padding (see its
+    // `Status::add_header`), and this layer only ever decodes a header its own
+    // server just produced, so the unpadded engine round-trips it exactly.
+    let raw = STANDARD_NO_PAD.decode(b64).ok()?;
     let mut status = pb::Status::decode(raw.as_slice()).ok()?;
 
     let mut rewrote = false;

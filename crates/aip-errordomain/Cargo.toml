@@ -34,11 +34,11 @@ bytes = { workspace = true }
 # byte-compatible with what a tonic client expects.
 base64 = { workspace = true }
 # `google.rpc.Status` (the wire envelope) and `google.rpc.ErrorInfo` (the detail
-# whose `domain` is rewritten), plus the `prost` runtime to decode/re-encode
-# them. `prost-types` supplies the `Any` the details are packed in.
+# whose `domain` is rewritten), reached through `tonic_types::pb` (which also
+# re-exports the `prost_types::Any` the details are packed in), plus the `prost`
+# runtime to decode/re-encode them.
 tonic-types = { workspace = true }
 prost = { workspace = true }
-prost-types = { workspace = true }
 # Pin projection for the response future and the trailer-rewriting body wrapper.
 pin-project-lite = { workspace = true }
 

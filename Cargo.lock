@@ -54,7 +54,6 @@ dependencies = [
  "http-body",
  "pin-project-lite",
  "prost",
- "prost-types",
  "tonic",
  "tonic-types",
  "tower",
