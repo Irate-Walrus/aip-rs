@@ -264,10 +264,10 @@ impl FreightService for FreightServer {
         shipper.update_time = Some(ts);
         shipper.delete_time = None;
         // Stamp the AIP-154 content etag the client will echo back on a later
-        // update/delete. `compute_etag` digests the content — it ignores the
+        // update/delete. `aip::etag::compute` digests the content — it ignores the
         // OUTPUT_ONLY timestamps just stamped and the etag field itself — so the
         // token tracks name/display_name, not server churn.
-        shipper.etag = aip::etag::compute_etag(&shipper);
+        shipper.etag = aip::etag::compute(&shipper);
         // AIP-163: a `validate_only` request previews the would-be shipper —
         // system-assigned id and etag minted — without persisting it or recording
         // an idempotency entry, so a later real create still mints a new shipper.
@@ -298,7 +298,7 @@ impl FreightService for FreightServer {
         // concurrent writer intervened (`ABORTED`, re-read and retry), a malformed
         // one is `INVALID_ARGUMENT`; both convert via the crate's AIP-193
         // `From<Error> for Status`. An empty etag opts out (an unconditional write).
-        aip::etag::check_etag(&incoming.etag, &existing)?;
+        aip::etag::check(&incoming.etag, &existing)?;
 
         // Apply the AIP-134 update mask via the field-mask primitive. The mask is
         // validated against the `Shipper` descriptor — sourced from the type
@@ -329,11 +329,11 @@ impl FreightService for FreightServer {
         aip::fieldbehavior::copy_fields(&mut shipper, &existing, &[FieldBehavior::OutputOnly]);
         // Stamp the server-controlled update_time regardless of what was copied.
         shipper.update_time = Some(now());
-        // Recompute the AIP-154 etag over the updated content. `compute_etag`
+        // Recompute the AIP-154 etag over the updated content. `aip::etag::compute`
         // ignores the etag field, so whatever the mask copied into it is replaced
         // by the fresh token; the response carries the value the next read-modify-
         // write must echo.
-        shipper.etag = aip::etag::compute_etag(&shipper);
+        shipper.etag = aip::etag::compute(&shipper);
         // AIP-163: a `validate_only` request previews the merged shipper without
         // persisting it, so the stored shipper is left untouched.
         preview::commit_unless(req.validate_only, || {
@@ -366,7 +366,7 @@ impl FreightService for FreightServer {
         // resource, so it rides on the request. A stale token is `ABORTED`, a
         // malformed one `INVALID_ARGUMENT` (AIP-193); an empty etag makes the delete
         // unconditional.
-        aip::etag::check_etag(&req.etag, &existing)?;
+        aip::etag::check(&req.etag, &existing)?;
         // AIP-164 soft delete: stamp `delete_time` and keep the record (so it can be
         // undeleted) rather than removing it. `delete_time` / `update_time` are
         // OUTPUT_ONLY, so the content etag (`aip::etag`) is unchanged — the same
@@ -425,7 +425,7 @@ impl FreightService for FreightServer {
         // sortable Site paths. Bad syntax or an unknown ordering field converts
         // via the crate's AIP-193 `From<Error> for Status` to `INVALID_ARGUMENT`
         // with an `ErrorInfo`, plus a `BadRequest` naming the offending field path.
-        let order_by = aip::ordering::parse_order_by(&req)?;
+        let order_by = aip::ordering::parse(&req)?;
         order_by.validate_for_paths(SORTABLE_SITE_PATHS)?;
 
         // Offset pagination (AIP-158). `order_by` is a non-pagination field, so
@@ -703,7 +703,6 @@ fn site_declarations() -> aip::filtering::Declarations {
             "state",
         ])
         .build()
-        .expect("site filter declarations are valid")
 }
 
 /// Maps the Site identifiers a filter or `order_by` can address onto their SQLite
@@ -752,7 +751,6 @@ fn shipment_declarations() -> aip::filtering::Declarations {
             "annotations",
         ])
         .build()
-        .expect("shipment filter declarations are valid")
 }
 
 /// Maps the Shipment identifiers a filter can address onto their SQLite columns

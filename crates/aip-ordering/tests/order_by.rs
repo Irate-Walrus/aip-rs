@@ -1,7 +1,7 @@
 //! Ported from `go.einride.tech/aip/ordering`'s `orderby_test.go` and
 //! `request_test.go`.
 
-use aip_ordering::{parse_order_by, Error, OrderBy, OrderByField, OrderByRequest};
+use aip_ordering::{parse, Error, OrderBy, OrderByField, OrderByRequest};
 
 fn field(path: &str, desc: bool) -> OrderByField {
     OrderByField {
@@ -241,7 +241,7 @@ fn sub_fields_multi_segment() {
     assert_eq!(got, vec!["foo", "bar"]);
 }
 
-// ---- parse_order_by ----
+// ---- parse ----
 
 struct MockRequest {
     order_by: String,
@@ -254,11 +254,11 @@ impl OrderByRequest for MockRequest {
 }
 
 #[test]
-fn parse_order_by_success() {
+fn parse_success() {
     let req = MockRequest {
         order_by: "foo asc,bar desc".to_owned(),
     };
-    let got = parse_order_by(&req).unwrap();
+    let got = parse(&req).unwrap();
     assert_eq!(
         got,
         OrderBy {
@@ -268,11 +268,11 @@ fn parse_order_by_success() {
 }
 
 #[test]
-fn parse_order_by_invalid_character() {
+fn parse_invalid_character() {
     let req = MockRequest {
         order_by: "/foo".to_owned(),
     };
-    let err = parse_order_by(&req).unwrap_err();
+    let err = parse(&req).unwrap_err();
     match &err {
         Error::Syntax(msg) => assert!(msg.contains('/'), "expected '/' in message, got: {msg}"),
         other => panic!("expected Syntax error, got {other:?}"),

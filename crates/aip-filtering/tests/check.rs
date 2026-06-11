@@ -11,9 +11,7 @@ use aip_filtering::{check, Declarations, DeclarationsBuilder, Error, Overload};
 
 /// Build declarations on top of the standard function set via `build`.
 fn decls(build: impl FnOnce(DeclarationsBuilder) -> DeclarationsBuilder) -> Declarations {
-    build(Declarations::builder().standard_functions())
-        .build()
-        .expect("declarations build")
+    build(Declarations::builder().standard_functions()).build()
 }
 
 fn map(key: Type, value: Type) -> Type {
@@ -242,8 +240,7 @@ fn function_builder_appends_overloads() {
         .ident("s", String)
         .function("f", vec![Overload::new(Bool, vec![Int])])
         .function("f", vec![Overload::new(Bool, vec![String])])
-        .build()
-        .expect("declarations build");
+        .build();
     check("f(x)", &declarations).expect("int overload resolves");
     check("f(s)", &declarations).expect("string overload resolves");
 }

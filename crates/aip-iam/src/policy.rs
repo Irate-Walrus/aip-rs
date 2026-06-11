@@ -5,7 +5,7 @@
 //! [`remove_member`]), fold a **Policy** into a canonical form so two equal
 //! policies compare equal ([`normalize`]), enforce the *conditions ⟹ version 3*
 //! invariant ([`validate`]), and run the `etag` optimistic-concurrency check that
-//! makes the read-modify-write cycle safe ([`compute_etag`] / [`check_etag`]).
+//! makes the read-modify-write cycle safe ([`compute`] / [`check`]).
 //!
 //! These are *structural* ops — they rearrange a **Policy**'s **Bindings**; they
 //! never make an authorization **decision** (role→permission expansion, condition
@@ -82,7 +82,7 @@ pub fn remove_member(policy: &mut Policy, role: &Role, member: &Member) {
 /// - **Bindings** are sorted by `(role, condition)`.
 ///
 /// The `version` and `etag` are left untouched — they are policy metadata, not
-/// part of the binding set's identity (and [`compute_etag`] derives the `etag`
+/// part of the binding set's identity (and [`compute`] derives the `etag`
 /// from the normalised content anyway).
 pub fn normalize(policy: &mut Policy) {
     let mut merged: Vec<Binding> = Vec::new();
@@ -153,7 +153,7 @@ pub fn validate(policy: &Policy) -> Result<(), Error> {
 /// first if you want the `etag` to be invariant under binding reordering; a server
 /// that stores the normalised form gets that for free.
 ///
-/// The token is opaque: callers compare it for equality (see [`check_etag`]) and
+/// The token is opaque: callers compare it for equality (see [`check`]) and
 /// never parse it. The digest is a CRC32 over the encoded policy rendered as
 /// lowercase hex — the same content-digest idiom `aip-pagination`'s request
 /// checksum uses (a clone to clear the excluded field, then `crc32fast::hash`).
@@ -164,7 +164,7 @@ pub fn validate(policy: &Policy) -> Result<(), Error> {
 /// two produce identical tokens for a Policy. This path stays a direct,
 /// reflection-free implementation over the concrete [`Policy`] type (no
 /// `prost-reflect`/`aip-etag` dependency on `aip-iam`; ADR-0001).
-pub fn compute_etag(policy: &Policy) -> Vec<u8> {
+pub fn compute(policy: &Policy) -> Vec<u8> {
     let mut policy = policy.clone();
     policy.etag = Vec::new();
     let digest = crc32fast::hash(&policy.encode_to_vec());
@@ -177,7 +177,7 @@ pub fn compute_etag(policy: &Policy) -> Vec<u8> {
 ///
 /// An empty `supplied` is an unconditional write — the caller opted out of the
 /// concurrency check, so it always proceeds. Otherwise `supplied` must equal the
-/// [`compute_etag`] of `current` (or of the empty [`Policy`] when nothing is
+/// [`compute`] of `current` (or of the empty [`Policy`] when nothing is
 /// stored); a mismatch means another writer intervened.
 ///
 /// # Errors
@@ -185,13 +185,13 @@ pub fn compute_etag(policy: &Policy) -> Vec<u8> {
 /// [`Error::PolicyEtagMismatch`] when a non-empty `supplied` does not match the
 /// current policy — the AIP / IAM contract maps this to `ABORTED`, telling the
 /// caller to re-read and retry (ADR-0010).
-pub fn check_etag(supplied: &[u8], current: Option<&Policy>) -> Result<(), Error> {
+pub fn check(supplied: &[u8], current: Option<&Policy>) -> Result<(), Error> {
     if supplied.is_empty() {
         return Ok(());
     }
     let current_etag = match current {
-        Some(policy) => compute_etag(policy),
-        None => compute_etag(&Policy::default()),
+        Some(policy) => compute(policy),
+        None => compute(&Policy::default()),
     };
     if supplied == current_etag.as_slice() {
         Ok(())
@@ -425,58 +425,58 @@ mod tests {
             bindings: vec![binding("roles/viewer", &["user:alice@example.com"])],
             ..Policy::default()
         };
-        let etag = compute_etag(&policy);
+        let etag = compute(&policy);
 
         // The same content carrying a different etag yields the same token.
         let stamped = Policy {
             etag: b"stale".to_vec(),
             ..policy.clone()
         };
-        assert_eq!(compute_etag(&stamped), etag);
+        assert_eq!(compute(&stamped), etag);
 
         // Different content yields a different token.
         let other = Policy {
             bindings: vec![binding("roles/editor", &["user:bob@example.com"])],
             ..Policy::default()
         };
-        assert_ne!(compute_etag(&other), etag);
+        assert_ne!(compute(&other), etag);
     }
 
     #[test]
-    fn check_etag_allows_an_empty_supplied_etag() {
+    fn check_allows_an_empty_supplied_etag() {
         let current = Policy {
             bindings: vec![binding("roles/viewer", &["user:alice@example.com"])],
             ..Policy::default()
         };
         // An unconditional write opts out of the concurrency check.
-        assert_eq!(check_etag(b"", Some(&current)), Ok(()));
+        assert_eq!(check(b"", Some(&current)), Ok(()));
     }
 
     #[test]
-    fn check_etag_matches_the_current_policy_and_rejects_a_stale_one() {
+    fn check_matches_the_current_policy_and_rejects_a_stale_one() {
         let current = Policy {
             bindings: vec![binding("roles/viewer", &["user:alice@example.com"])],
             ..Policy::default()
         };
-        let fresh = compute_etag(&current);
-        assert_eq!(check_etag(&fresh, Some(&current)), Ok(()));
+        let fresh = compute(&current);
+        assert_eq!(check(&fresh, Some(&current)), Ok(()));
 
         // A token computed before a concurrent write no longer matches.
-        let stale = compute_etag(&Policy::default());
+        let stale = compute(&Policy::default());
         assert_eq!(
-            check_etag(&stale, Some(&current)),
+            check(&stale, Some(&current)),
             Err(Error::PolicyEtagMismatch)
         );
     }
 
     #[test]
-    fn check_etag_rejects_a_supplied_etag_when_nothing_is_stored() {
+    fn check_rejects_a_supplied_etag_when_nothing_is_stored() {
         // Supplying an etag for an unset policy means the caller expected a version
         // that does not exist — a conflict.
-        let stale = compute_etag(&Policy {
+        let stale = compute(&Policy {
             bindings: vec![binding("roles/viewer", &["user:alice@example.com"])],
             ..Policy::default()
         });
-        assert_eq!(check_etag(&stale, None), Err(Error::PolicyEtagMismatch));
+        assert_eq!(check(&stale, None), Err(Error::PolicyEtagMismatch));
     }
 }

@@ -9,7 +9,7 @@
 //! 2. the *conditions ⟹ version 3* invariant is enforced
 //!    ([`aip::iam::policy::validate`]);
 //! 3. the supplied `etag` is checked against the stored policy — a stale token is
-//!    rejected with `ABORTED` ([`aip::iam::policy::check_etag`]) — then the policy
+//!    rejected with `ABORTED` ([`aip::iam::policy::check`]) — then the policy
 //!    is normalised, re-stamped with a fresh `etag`, and stored atomically
 //!    ([`PolicyStore::set_checked`]).
 //!

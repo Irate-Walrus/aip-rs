@@ -2,10 +2,10 @@
 //! concurrency, over any resource.
 //!
 //! This generalizes the `etag` cycle `aip-iam` built for the IAM **Policy**
-//! ([`compute_etag`](aip_iam::policy::compute_etag) /
-//! [`check_etag`](aip_iam::policy::check_etag)) into a primitive any resource can
-//! use. [`compute_etag`] derives a deterministic content digest of a resource
-//! that a server returns to clients; [`check_etag`] verifies the etag a client
+//! ([`aip_iam::policy::compute`](aip_iam::policy::compute) /
+//! [`aip_iam::policy::check`](aip_iam::policy::check)) into a primitive any resource can
+//! use. [`compute`] derives a deterministic content digest of a resource
+//! that a server returns to clients; [`check`] verifies the etag a client
 //! sends back on update/delete before acting, so a concurrent writer can no
 //! longer silently clobber.
 //!
@@ -69,7 +69,7 @@ pub enum Error {
     /// to `ABORTED`.
     #[error("etag mismatch: the resource was modified concurrently; re-read and retry")]
     Mismatch,
-    /// The supplied etag could not have been minted by [`compute_etag`] — it is
+    /// The supplied etag could not have been minted by [`compute`] — it is
     /// not eight lowercase hex digits. A malformed *request value*, distinct from
     /// a stale one, so it maps to `INVALID_ARGUMENT` rather than `ABORTED`.
     #[error("malformed etag {etag:?}: expected the opaque token a prior read returned")]
@@ -87,7 +87,7 @@ pub enum Error {
 /// over a stored resource reproduces the token a prior read returned. The result
 /// is eight lowercase hex digits; see the [crate docs](self) for the full digest
 /// scheme and its determinism caveat.
-pub fn compute_etag<M: ReflectMessage>(resource: &M) -> String {
+pub fn compute<M: ReflectMessage>(resource: &M) -> String {
     // Transcode through wire bytes into a dynamic message so the etag and
     // OUTPUT_ONLY fields can be cleared by reflection. The round-trip can only
     // fail if a message and its descriptor disagree — a build/config bug, not
@@ -111,9 +111,9 @@ pub fn compute_etag<M: ReflectMessage>(resource: &M) -> String {
 ///
 /// - An **empty** `supplied` is an unconditional write — the client opted out of
 ///   the freshness check, so it always proceeds (AIP-154).
-/// - A `supplied` that is not the eight-lowercase-hex form [`compute_etag`] mints
+/// - A `supplied` that is not the eight-lowercase-hex form [`compute`] mints
 ///   could never have come from a prior read, so it is [`Error::Malformed`].
-/// - Otherwise `supplied` must equal [`compute_etag`] of `current`; a mismatch
+/// - Otherwise `supplied` must equal [`compute`] of `current`; a mismatch
 ///   means another writer intervened ([`Error::Mismatch`]).
 ///
 /// The caller resolves a missing resource (`NOT_FOUND`) before reaching this
@@ -125,7 +125,7 @@ pub fn compute_etag<M: ReflectMessage>(resource: &M) -> String {
 /// [`Error::Mismatch`] for a stale etag (AIP-154 maps it to `ABORTED`);
 /// [`Error::Malformed`] for one that is not a well-formed token (mapped to
 /// `INVALID_ARGUMENT`).
-pub fn check_etag<M: ReflectMessage>(supplied: &str, current: &M) -> Result<(), Error> {
+pub fn check<M: ReflectMessage>(supplied: &str, current: &M) -> Result<(), Error> {
     if supplied.is_empty() {
         return Ok(());
     }
@@ -134,14 +134,14 @@ pub fn check_etag<M: ReflectMessage>(supplied: &str, current: &M) -> Result<(), 
             etag: supplied.to_owned(),
         });
     }
-    if supplied == compute_etag(current) {
+    if supplied == compute(current) {
         Ok(())
     } else {
         Err(Error::Mismatch)
     }
 }
 
-/// Whether `etag` has the exact shape [`compute_etag`] mints: eight lowercase
+/// Whether `etag` has the exact shape [`compute`] mints: eight lowercase
 /// hex digits. Anything else could not be a token this crate issued.
 fn is_well_formed(etag: &str) -> bool {
     etag.len() == 8 && etag.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
@@ -197,21 +197,21 @@ mod tests {
 
     #[test]
     fn etag_is_stable_and_ignores_the_etag_field() {
-        let etag = compute_etag(&shipper(r#"{"name":"shippers/acme","displayName":"Acme"}"#));
+        let etag = compute(&shipper(r#"{"name":"shippers/acme","displayName":"Acme"}"#));
 
         // Recomputing over equal content reproduces the token.
         assert_eq!(
-            compute_etag(&shipper(r#"{"name":"shippers/acme","displayName":"Acme"}"#)),
+            compute(&shipper(r#"{"name":"shippers/acme","displayName":"Acme"}"#)),
             etag,
         );
         // The same content carrying a different etag yields the same token.
         let stamped = shipper(r#"{"name":"shippers/acme","displayName":"Acme","etag":"deadbeef"}"#);
-        assert_eq!(compute_etag(&stamped), etag);
+        assert_eq!(compute(&stamped), etag);
     }
 
     #[test]
     fn etag_ignores_output_only_fields() {
-        let etag = compute_etag(&shipper(r#"{"name":"shippers/acme","displayName":"Acme"}"#));
+        let etag = compute(&shipper(r#"{"name":"shippers/acme","displayName":"Acme"}"#));
 
         // create_time / update_time are OUTPUT_ONLY: server-stamped churn must not
         // move the content etag.
@@ -219,19 +219,19 @@ mod tests {
             r#"{"name":"shippers/acme","displayName":"Acme",
                 "createTime":"2024-01-01T00:00:00Z","updateTime":"2024-02-02T00:00:00Z"}"#,
         );
-        assert_eq!(compute_etag(&stamped), etag);
+        assert_eq!(compute(&stamped), etag);
     }
 
     #[test]
     fn etag_changes_when_content_changes() {
-        let a = compute_etag(&shipper(r#"{"name":"shippers/acme","displayName":"Acme"}"#));
-        let b = compute_etag(&shipper(r#"{"name":"shippers/acme","displayName":"Beta"}"#));
+        let a = compute(&shipper(r#"{"name":"shippers/acme","displayName":"Acme"}"#));
+        let b = compute(&shipper(r#"{"name":"shippers/acme","displayName":"Beta"}"#));
         assert_ne!(a, b, "a content change must flip the token");
     }
 
     #[test]
     fn etag_is_eight_lowercase_hex() {
-        let etag = compute_etag(&shipper(r#"{"name":"shippers/acme","displayName":"Acme"}"#));
+        let etag = compute(&shipper(r#"{"name":"shippers/acme","displayName":"Acme"}"#));
         assert!(is_well_formed(&etag), "minted etag {etag:?} is well-formed");
     }
 
@@ -239,19 +239,19 @@ mod tests {
     fn check_allows_an_empty_supplied_etag() {
         let current = shipper(r#"{"name":"shippers/acme","displayName":"Acme"}"#);
         // An unconditional write opts out of the freshness check (AIP-154).
-        assert_eq!(check_etag("", &current), Ok(()));
+        assert_eq!(check("", &current), Ok(()));
     }
 
     #[test]
     fn check_accepts_a_matching_etag_and_rejects_a_stale_one() {
         let current = shipper(r#"{"name":"shippers/acme","displayName":"Acme"}"#);
-        let fresh = compute_etag(&current);
-        assert_eq!(check_etag(&fresh, &current), Ok(()));
+        let fresh = compute(&current);
+        assert_eq!(check(&fresh, &current), Ok(()));
 
         // A token minted before a concurrent edit no longer matches the current
         // content — a stale read, ABORTED on the wire.
-        let stale = compute_etag(&shipper(r#"{"name":"shippers/acme","displayName":"Old"}"#));
-        assert_eq!(check_etag(&stale, &current), Err(Error::Mismatch));
+        let stale = compute(&shipper(r#"{"name":"shippers/acme","displayName":"Old"}"#));
+        assert_eq!(check(&stale, &current), Err(Error::Mismatch));
     }
 
     #[test]
@@ -261,7 +261,7 @@ mod tests {
         // check before any comparison — a value no prior read could have issued.
         for bad in ["abc", "not-hex!", "deadbeef0", "DEADBEEF"] {
             assert_eq!(
-                check_etag(bad, &current),
+                check(bad, &current),
                 Err(Error::Malformed {
                     etag: bad.to_owned()
                 }),

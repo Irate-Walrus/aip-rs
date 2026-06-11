@@ -32,7 +32,6 @@ fn message_decls() -> Declarations {
         .ident("repeated_string", List(Box::new(String)))
         .enum_ident("enum", example_enum())
         .build()
-        .expect("message declarations are valid")
 }
 
 /// Check `filter` against `declarations`, then evaluate it against the
@@ -157,7 +156,6 @@ fn site_decls() -> Declarations {
         .ident("delete_time", Timestamp)
         .ident("lat_lng.latitude", Double)
         .build()
-        .expect("site declarations are valid")
 }
 
 /// Check `filter` against the site declarations, then evaluate it against the

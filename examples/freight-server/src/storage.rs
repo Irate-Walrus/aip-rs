@@ -365,7 +365,7 @@ impl PolicyStore {
     /// The policy attached to `resource`, or `None` when none is set — the caller
     /// turns that into the empty `Policy` `GetIamPolicy` returns (AIP / IAM: an
     /// unset policy is not an error). The reconstructed policy carries the content
-    /// `etag` ([`compute_etag`](aip::iam::policy::compute_etag)), so a client can
+    /// `etag` ([`aip::iam::policy::compute`](aip::iam::policy::compute)), so a client can
     /// round-trip it back as its read-modify-write token.
     pub fn get(&self, resource: &str) -> Option<Policy> {
         let conn = self.bindings.lock().unwrap();
@@ -378,7 +378,7 @@ impl PolicyStore {
     ///
     /// The supplied `policy.etag` is the client's optimistic-concurrency token: it
     /// is checked against the canonical stored policy via
-    /// [`aip::iam::policy::check_etag`] and a stale token is rejected with
+    /// [`aip::iam::policy::check`] and a stale token is rejected with
     /// [`PolicyEtagMismatch`](aip::iam::Error::PolicyEtagMismatch) (`ABORTED`)
     /// rather than blind-overwriting. The accepted policy is folded into canonical
     /// form ([`normalize`](aip::iam::policy::normalize)) and its `(resource,
@@ -401,7 +401,7 @@ impl PolicyStore {
         // `get` uses, so the etag matches what a prior read handed the client.
         let current = reconstruct(&conn, &resource);
         let current = (!current.bindings.is_empty()).then_some(current);
-        aip::iam::policy::check_etag(&supplied, current.as_ref())?;
+        aip::iam::policy::check(&supplied, current.as_ref())?;
 
         // Canonicalise, then replace the resource's rows atomically. Each row
         // carries the binding's **Condition** expression (NULL when unconditional)
@@ -471,7 +471,7 @@ fn reconstruct(conn: &rusqlite::Connection, resource: &str) -> Policy {
         bindings,
         ..Policy::default()
     };
-    policy.etag = aip::iam::policy::compute_etag(&policy);
+    policy.etag = aip::iam::policy::compute(&policy);
     policy
 }
 

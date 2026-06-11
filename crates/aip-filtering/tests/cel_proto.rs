@@ -118,8 +118,7 @@ fn round_trips_a_checked_filter() {
             ),
         )
         .ident("size", aip_filtering::Type::Int)
-        .build()
-        .expect("declarations build");
+        .build();
 
     let filter =
         check("package = com.google AND size > 10", &declarations).expect("filter type-checks");

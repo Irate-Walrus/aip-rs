@@ -12,9 +12,7 @@ use prost_reflect::EnumDescriptor;
 
 /// Build declarations on top of the standard function set.
 fn decls(build: impl FnOnce(DeclarationsBuilder) -> DeclarationsBuilder) -> Declarations {
-    build(Declarations::builder().standard_functions())
-        .build()
-        .expect("declarations build")
+    build(Declarations::builder().standard_functions()).build()
 }
 
 /// The vendored example enum, declared as the filterable identifier `category`.
@@ -28,7 +26,6 @@ fn enum_decls() -> Declarations {
         .standard_functions()
         .enum_ident("category", example_enum())
         .build()
-        .expect("declarations build")
 }
 
 #[test]

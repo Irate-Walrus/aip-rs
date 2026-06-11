@@ -50,7 +50,6 @@ fn declarations() -> Declarations {
             vec![Overload::new(Type::Bool, vec![enum_type(), enum_type()])],
         )
         .build()
-        .expect("declarations build")
 }
 
 /// Maps each filterable identifier onto its SQL column. The nested
