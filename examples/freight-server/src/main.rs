@@ -67,7 +67,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_service(reflection_v1)
         .add_service(reflection_v1alpha)
         .serve_with_shutdown(addr, async {
-            tokio::signal::ctrl_c().await.ok();
+            tokio::signal::ctrl_c()
+                .await
+                .expect("failed to install ctrl-c handler");
         })
         .await?;
 

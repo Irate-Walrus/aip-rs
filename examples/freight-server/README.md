@@ -127,7 +127,7 @@ gc -d '{"parent":"'"$ID"'","orderBy":"display_name desc"}' 127.0.0.1:50051 $SVC/
 # stay stable because the resource name breaks ties. (Changing `orderBy` or
 # `filter` mid-pagination flips the request checksum and rejects the token.)
 TOKEN=$(gc -d '{"parent":"'"$ID"'","orderBy":"display_name","pageSize":1}' \
-                                           127.0.0.1:50051 $SVC/ListSites | jq -r .nextPageToken)
+                                           127.0.0.1:50051 $SVC/ListSites | jq -r '.nextPageToken // empty')
 gc -d '{"parent":"'"$ID"'","orderBy":"display_name","pageSize":1,"pageToken":"'"$TOKEN"'"}' \
                                            127.0.0.1:50051 $SVC/ListSites
 
