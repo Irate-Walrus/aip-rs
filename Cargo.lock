@@ -202,6 +202,8 @@ dependencies = [
  "aip-filtering",
  "aip-ordering",
  "thiserror 2.0.18",
+ "tonic",
+ "tonic-types",
 ]
 
 [[package]]

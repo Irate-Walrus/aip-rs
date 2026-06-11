@@ -69,3 +69,121 @@ pub enum Error {
     #[error("invalid duration literal `{0}`: expected a number of seconds like `3600s`")]
     InvalidDuration(String),
 }
+
+/// The default AIP-193 `ErrorInfo.domain` for the user-fault errors this crate
+/// maps. A deploying service overrides it per call via
+/// [`Error::into_status_with_domain`] so library-caught violations carry the
+/// service's own domain (ADR-0007).
+#[cfg(feature = "tonic")]
+const ERROR_DOMAIN: &str = "aip-rs";
+
+#[cfg(feature = "tonic")]
+impl Error {
+    /// Maps to a [`tonic::Status`], encoding user-vs-server fault by variant
+    /// (ADR-0007 / ADR-0008) so the call site needs no hand-rolled `format!`:
+    ///
+    /// - [`Unsupported`](Error::Unsupported) and
+    ///   [`InvalidDuration`](Error::InvalidDuration) are bad client input — an
+    ///   unlowerable filter construct or a malformed `duration(...)` literal — so
+    ///   they map to `INVALID_ARGUMENT` with an AIP-193 `ErrorInfo` stamping
+    ///   `domain` over the default [`ERROR_DOMAIN`] (`aip-rs`). A filter
+    ///   expression / duration literal is an opaque value the library validates
+    ///   without knowing which request field carried it, so it gets an
+    ///   `ErrorInfo` only — no `BadRequest` (ADR-0007).
+    /// - [`UnknownIdentifier`](Error::UnknownIdentifier) means an identifier
+    ///   passed the checker / `order_by` allow-list but has no column in the
+    ///   [`Schema`] — a server-side Schema/allow-list drift, never client input
+    ///   (ADR-0008) — so it maps to `INTERNAL` (the `domain` is irrelevant).
+    pub fn into_status_with_domain(self, domain: impl Into<String>) -> tonic::Status {
+        use std::collections::HashMap;
+        use tonic_types::{ErrorDetails, StatusExt};
+
+        let message = self.to_string();
+        let (reason, metadata): (&str, HashMap<String, String>) = match &self {
+            Error::Unsupported(detail) => (
+                "FILTER_UNSUPPORTED",
+                HashMap::from([("detail".to_owned(), detail.clone())]),
+            ),
+            Error::InvalidDuration(literal) => (
+                "FILTER_INVALID_DURATION",
+                HashMap::from([("literal".to_owned(), literal.clone())]),
+            ),
+            // Schema/allow-list drift is a server bug, not bad input (ADR-0008):
+            // an `INTERNAL` carrying no machine-readable details.
+            Error::UnknownIdentifier(_) => return tonic::Status::internal(message),
+        };
+        let mut details = ErrorDetails::new();
+        details.set_error_info(reason, domain, metadata);
+        tonic::Status::with_error_details(tonic::Code::InvalidArgument, message, details)
+    }
+}
+
+#[cfg(feature = "tonic")]
+impl From<Error> for tonic::Status {
+    /// Delegates to [`Error::into_status_with_domain`] at the default
+    /// [`ERROR_DOMAIN`] (`aip-rs`). A service that wants its own domain on the
+    /// user-fault filter errors calls `into_status_with_domain` instead. See
+    /// `docs/adr/0007-aip193-error-details.md`.
+    fn from(err: Error) -> Self {
+        err.into_status_with_domain(ERROR_DOMAIN)
+    }
+}
+
+#[cfg(all(test, feature = "tonic"))]
+mod tonic_tests {
+    use super::*;
+    use tonic_types::StatusExt as _;
+
+    #[test]
+    fn unsupported_maps_to_invalid_argument_with_error_info() {
+        let status: tonic::Status = Error::Unsupported("operator `foo`".to_owned()).into();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+        let info = status
+            .get_details_error_info()
+            .expect("ErrorInfo always attached (AIP-193)");
+        assert_eq!(info.reason, "FILTER_UNSUPPORTED");
+        assert_eq!(info.domain, ERROR_DOMAIN);
+        assert_eq!(
+            info.metadata.get("detail").map(String::as_str),
+            Some("operator `foo`")
+        );
+        // A filter expression is opaque — ErrorInfo only, no BadRequest (ADR-0007).
+        assert!(status.get_details_bad_request().is_none());
+    }
+
+    #[test]
+    fn invalid_duration_maps_to_invalid_argument_with_error_info() {
+        let status: tonic::Status = Error::InvalidDuration("10m".to_owned()).into();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+        let info = status
+            .get_details_error_info()
+            .expect("ErrorInfo always attached (AIP-193)");
+        assert_eq!(info.reason, "FILTER_INVALID_DURATION");
+        assert_eq!(info.domain, ERROR_DOMAIN);
+        assert_eq!(
+            info.metadata.get("literal").map(String::as_str),
+            Some("10m")
+        );
+        assert!(status.get_details_bad_request().is_none());
+    }
+
+    #[test]
+    fn unknown_identifier_maps_to_internal() {
+        // Schema/allow-list drift is a server bug, not client input (ADR-0008).
+        let status: tonic::Status = Error::UnknownIdentifier("display_name".to_owned()).into();
+        assert_eq!(status.code(), tonic::Code::Internal);
+        // No AIP-193 details leak on an internal error.
+        assert!(status.get_details_error_info().is_none());
+    }
+
+    #[test]
+    fn into_status_with_domain_overrides_the_default_on_user_faults() {
+        let status =
+            Error::Unsupported("x".to_owned()).into_status_with_domain("freight.example.com");
+        let info = status.get_details_error_info().expect("ErrorInfo");
+        assert_eq!(info.reason, "FILTER_UNSUPPORTED");
+        assert_eq!(info.domain, "freight.example.com");
+    }
+}
