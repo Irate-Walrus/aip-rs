@@ -2,10 +2,21 @@
 //! and emit typed resource-name wrappers layered on the runtime
 //! [`aip_resourcename::Pattern`] API (ADR-0011).
 //!
-//! Each resource yields a `<Type>ResourceName` struct — one `String` field per
-//! pattern variable — whose `parse` / `format` round-trip through
-//! `Pattern::parse(PATTERN).match_name(..)` and `.format(..)`. The generator
-//! does **not** reimplement that runtime; the emitted code calls into it.
+//! Each resource yields a `<Type>ResourceName` struct — one **private** `String`
+//! field per pattern variable — built through a validated `new(...) ->
+//! Result<Self, Error>` constructor (each variable checked with
+//! [`aip_resourcename::validate_variable`]). Because construction validates every
+//! variable, the wrapper formats infallibly: it implements [`Display`], plus
+//! [`FromStr`] (delegating to `parse`) and `From<Self> for String`. The compiled
+//! [`Pattern`] is built once per wrapper in a `LazyLock`, shared by `parse` and
+//! `Display`. The generator does **not** reimplement the runtime; the emitted
+//! code calls into it.
+//!
+//! A multi-segment wrapper also gets a [`parent`] accessor returning the parent
+//! pattern's typed wrapper when that parent pattern is generated in the same
+//! invocation. The parent is referenced as `super::<ParentResourceName>`, which
+//! assumes the convention each `*.aip.rs` is mounted in its own module with the
+//! wrappers re-exported flat one level up (as `examples/freight-server` does).
 //!
 //! A multi-pattern resource is emitted as the single-pattern wrapper of its
 //! first pattern (aip-go's `SinglePatternStructName`); the multi-pattern
@@ -16,7 +27,12 @@
 //! ids in scope (`{shipper}`, `{site}`). Escaping a variable that is a Rust
 //! keyword or `lowerCamelCase` is deferred with the rest of the codegen (#62 /
 //! #82); no such resource exists in the example yet.
+//!
+//! [`Display`]: std::fmt::Display
+//! [`FromStr`]: std::str::FromStr
+//! [`parent`]: https://google.aip.dev/122
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use aip_reflect::{ResourceDescriptor, ResourceType};
@@ -54,9 +70,14 @@ pub struct GenInput {
 /// A resource with no patterns contributes nothing; a file whose resources all
 /// lack patterns produces no file at all (matching aip-go).
 pub fn generate(inputs: &[GenInput]) -> Result<Vec<GenFile>, Error> {
+    // A `pattern -> <Type>ResourceName` index over every resource in the whole
+    // invocation, so a multi-segment wrapper can resolve its parent pattern to
+    // the parent's typed wrapper even when that parent lives in another file.
+    let wrappers_by_pattern = index_wrappers(inputs)?;
+
     let mut files = Vec::new();
     for input in inputs {
-        if let Some(content) = generate_file(&input.resources)? {
+        if let Some(content) = generate_file(&input.resources, &wrappers_by_pattern)? {
             files.push(GenFile {
                 path: output_path(&input.proto_file),
                 content,
@@ -64,6 +85,20 @@ pub fn generate(inputs: &[GenInput]) -> Result<Vec<GenFile>, Error> {
         }
     }
     Ok(files)
+}
+
+/// Build the `pattern -> struct name` index of every patterned resource across
+/// all inputs (each resource's first pattern, matching what is generated).
+fn index_wrappers(inputs: &[GenInput]) -> Result<BTreeMap<String, String>, Error> {
+    let mut by_pattern = BTreeMap::new();
+    for input in inputs {
+        for resource in &input.resources {
+            if let Some(pattern) = resource.patterns.first() {
+                by_pattern.insert(pattern.clone(), struct_name(&resource.resource_type)?);
+            }
+        }
+    }
+    Ok(by_pattern)
 }
 
 /// The output path for a generated file: the proto path with a trailing
@@ -75,11 +110,22 @@ fn output_path(proto_file: &str) -> String {
 
 /// Generate the body of one file's resource-name wrappers, or `None` if none of
 /// the resources are patterned.
-fn generate_file(resources: &[ResourceDescriptor]) -> Result<Option<String>, Error> {
+///
+/// `wrappers_by_pattern` is the whole-invocation `pattern -> struct name` index
+/// used to resolve a multi-segment wrapper's [`parent`](https://google.aip.dev/122).
+fn generate_file(
+    resources: &[ResourceDescriptor],
+    wrappers_by_pattern: &BTreeMap<String, String>,
+) -> Result<Option<String>, Error> {
     let mut body = String::new();
     for resource in resources {
         if let Some(pattern) = resource.patterns.first() {
-            write_resource_name(&mut body, &resource.resource_type, pattern)?;
+            write_resource_name(
+                &mut body,
+                &resource.resource_type,
+                pattern,
+                wrappers_by_pattern,
+            )?;
         }
     }
     if body.is_empty() {
@@ -87,13 +133,15 @@ fn generate_file(resources: &[ResourceDescriptor]) -> Result<Option<String>, Err
     }
     let mut out = String::new();
     out.push_str("// @generated by protoc-gen-prost-aip (aip-codegen). DO NOT EDIT.\n\n");
+    out.push_str("use std::sync::LazyLock;\n\n");
     out.push_str("use aip_resourcename::{Error, Pattern};\n");
     out.push_str(&body);
     Ok(Some(out))
 }
 
-/// Append one `<Type>ResourceName` wrapper for `resource_type` over `pattern`.
-fn write_resource_name(out: &mut String, resource_type: &str, pattern: &str) -> Result<(), Error> {
+/// The `<Type>ResourceName` struct name for `resource_type`, or an error if the
+/// type has no `service/Type` form to take the type name from.
+fn struct_name(resource_type: &str) -> Result<String, Error> {
     let resource = ResourceType::new(resource_type);
     let type_name = resource.type_name();
     if type_name.is_empty() {
@@ -102,8 +150,31 @@ fn write_resource_name(out: &mut String, resource_type: &str, pattern: &str) -> 
             reason: "resource type has no type name (expected `service/Type`)".to_owned(),
         });
     }
-    let struct_name = format!("{type_name}ResourceName");
+    Ok(format!("{type_name}ResourceName"))
+}
+
+/// Append one `<Type>ResourceName` wrapper for `resource_type` over `pattern`.
+fn write_resource_name(
+    out: &mut String,
+    resource_type: &str,
+    pattern: &str,
+    wrappers_by_pattern: &BTreeMap<String, String>,
+) -> Result<(), Error> {
+    let struct_name = struct_name(resource_type)?;
     let variables = pattern_variables(pattern)?;
+    // The `LazyLock<Pattern>` holding the compiled pattern, named off the struct.
+    let pattern_const = format!("{}_PATTERN", screaming_snake(&struct_name));
+
+    // The parent wrapper, if this pattern's parent pattern is itself generated in
+    // this invocation: its `(pattern, struct name, variables)`. The variables are
+    // the leading subset of `variables` the parent's `new` consumes.
+    let parent = match parent_pattern(pattern) {
+        Some(pp) => match wrappers_by_pattern.get(&pp) {
+            Some(name) => Some((pp.clone(), name.clone(), pattern_variables(&pp)?)),
+            None => None,
+        },
+        None => None,
+    };
 
     // Each `writeln!` is one line of generated source; the leading spaces are
     // the indentation of the emitted code, not of this source. `out` is a
@@ -118,12 +189,23 @@ fn write_resource_name(out: &mut String, resource_type: &str, pattern: &str) -> 
     line(&format!(
         "/// Generated from the `google.api.resource` pattern `{pattern}`."
     ));
-    line("#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]");
+    line("#[derive(Clone, Debug, PartialEq, Eq, Hash)]");
     line(&format!("pub struct {struct_name} {{"));
     for var in &variables {
-        line(&format!("    pub {var}: String,"));
+        line(&format!("    {var}: String,"));
     }
     line("}");
+    line("");
+    line(&format!(
+        "/// The compiled `{pattern}` pattern, parsed once."
+    ));
+    line(&format!(
+        "static {pattern_const}: LazyLock<Pattern> = LazyLock::new(|| {{"
+    ));
+    line(&format!(
+        "    Pattern::parse({struct_name}::PATTERN).expect(\"a generated pattern parses\")"
+    ));
+    line("});");
     line("");
     line(&format!("impl {struct_name} {{"));
     line(&format!("    /// The resource type, `{resource_type}`."));
@@ -136,54 +218,195 @@ fn write_resource_name(out: &mut String, resource_type: &str, pattern: &str) -> 
         "    pub const PATTERN: &'static str = \"{pattern}\";"
     ));
     line("");
-    line("    /// Parse a resource name string into its typed variables.");
-    line("    pub fn parse(name: &str) -> Result<Self, Error> {");
-    line("        let pattern = Pattern::parse(Self::PATTERN)?;");
-    line("        let captures = pattern");
-    line("            .match_name(name)");
-    line("            .ok_or_else(|| Error::PatternMismatch {");
-    line("                pattern: Self::PATTERN.to_owned(),");
-    line("            })?;");
-    line("        Ok(Self {");
+
+    // `new` — validated construction over `impl Into<String>` variables. The
+    // signature collapses onto one line when it fits the 100-column limit,
+    // otherwise one parameter per line, matching rustfmt.
+    line("    /// Construct the resource name from its variables, validating each");
+    line("    /// as a single resource-name segment (non-empty, no `/`).");
+    let params: Vec<String> = variables
+        .iter()
+        .map(|var| format!("{var}: impl Into<String>"))
+        .collect();
+    let inline_sig = format!(
+        "    pub fn new({}) -> Result<Self, Error> {{",
+        params.join(", ")
+    );
+    if inline_sig.len() <= RUSTFMT_MAX_WIDTH {
+        line(&inline_sig);
+    } else {
+        line("    pub fn new(");
+        for param in &params {
+            line(&format!("        {param},"));
+        }
+        line("    ) -> Result<Self, Error> {");
+    }
+    for var in &variables {
+        line(&format!("        let {var} = {var}.into();"));
+    }
     for var in &variables {
         line(&format!(
-            "            {var}: captures.get(\"{var}\").unwrap_or_default().to_owned(),"
+            "        aip_resourcename::validate_variable(\"{var}\", &{var})?;"
         ));
+    }
+    line(&format!("        Ok(Self {{ {} }})", variables.join(", ")));
+    line("    }");
+
+    for var in &variables {
+        line("");
+        line(&format!("    /// The `{{{var}}}` variable."));
+        line(&format!("    pub fn {var}(&self) -> &str {{"));
+        line(&format!("        &self.{var}"));
+        line("    }");
+    }
+
+    line("");
+    line("    /// Parse a resource name string into its typed variables.");
+    line("    pub fn parse(name: &str) -> Result<Self, Error> {");
+    line(&format!(
+        "        let Some(captures) = {pattern_const}.match_name(name) else {{"
+    ));
+    line("            return Err(Error::PatternMismatch {");
+    line("                pattern: Self::PATTERN.to_owned(),");
+    line("            });");
+    line("        };");
+    line("        Ok(Self {");
+    for var in &variables {
+        line(&format!("            {var}: captures"));
+        line(&format!("                .get(\"{var}\")"));
+        line("                .ok_or_else(|| Error::MissingVariable {");
+        line(&format!("                    name: \"{var}\".to_owned(),"));
+        line("                })?");
+        line("                .to_owned(),");
     }
     line("        })");
     line("    }");
+
+    if let Some((parent_pattern_str, parent_name, parent_variables)) = &parent {
+        line("");
+        line(&format!(
+            "    /// The parent resource name, `{parent_pattern_str}`."
+        ));
+        line(&format!(
+            "    pub fn parent(&self) -> super::{parent_name} {{"
+        ));
+        line(
+            "        // Each variable was validated at construction, so the parent name is valid.",
+        );
+        let args: Vec<String> = parent_variables
+            .iter()
+            .map(|var| format!("self.{var}.clone()"))
+            .collect();
+        // The `.expect(...)` always overflows one line, so the call breaks. When
+        // the arguments fit on the `::new(...)` line, rustfmt indents `.expect`
+        // one level under the receiver; when they don't, the broken `)` returns
+        // to the method's indent and `.expect` follows at that indent.
+        let new_call = format!("        super::{parent_name}::new({})", args.join(", "));
+        if new_call.len() <= RUSTFMT_MAX_WIDTH {
+            line(&new_call);
+            line("            .expect(\"a validated resource name has a valid parent\")");
+        } else {
+            line(&format!("        super::{parent_name}::new("));
+            for arg in &args {
+                line(&format!("            {arg},"));
+            }
+            line("        )");
+            line("        .expect(\"a validated resource name has a valid parent\")");
+        }
+        line("    }");
+    }
+    line("}");
+
+    // `Display` — infallible, since construction validated every variable. Emits
+    // the `[(var, value), …]` array on one line when it fits, else one per line.
     line("");
-    line("    /// Format the typed variables into a resource name string.");
-    line("    pub fn format(&self) -> Result<String, Error> {");
-    // Emit the `[(var, value), …]` array as rustfmt would: collapsed onto one
-    // line when it fits within the 100-column limit, otherwise one pair per
-    // line. Keeps the golden output rustfmt-idempotent regardless of arity.
+    line(&format!("impl std::fmt::Display for {struct_name} {{"));
+    line("    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {");
+    line("        // Construction validated each variable, so formatting is infallible.");
     let pairs: Vec<String> = variables
         .iter()
         .map(|var| format!("(\"{var}\", self.{var}.as_str())"))
         .collect();
-    let inline = format!(
-        "        Pattern::parse(Self::PATTERN)?.format([{}])",
+    let one_line = format!(
+        "        f.write_str(&{pattern_const}.format([{}]).expect(\"a validated resource name formats\"))",
         pairs.join(", ")
     );
-    if inline.len() <= RUSTFMT_MAX_WIDTH {
-        line(&inline);
+    if one_line.len() <= RUSTFMT_MAX_WIDTH {
+        line(&one_line);
     } else {
-        line("        Pattern::parse(Self::PATTERN)?.format([");
-        for pair in &pairs {
-            line(&format!("            {pair},"));
+        // The chain breaks across lines; the `.format([…])` array stays inline
+        // while its literal fits rustfmt's `array_width`, else one pair per line.
+        line("        f.write_str(");
+        line(&format!("            &{pattern_const}"));
+        let array = format!("[{}]", pairs.join(", "));
+        if array.len() <= RUSTFMT_ARRAY_WIDTH {
+            line(&format!("                .format({array})"));
+        } else {
+            line("                .format([");
+            for pair in &pairs {
+                line(&format!("                    {pair},"));
+            }
+            line("                ])");
         }
-        line("        ])");
+        line("                .expect(\"a validated resource name formats\"),");
+        line("        )");
     }
+    line("    }");
+    line("}");
+
+    line("");
+    line(&format!("impl std::str::FromStr for {struct_name} {{"));
+    line("    type Err = Error;");
+    line("");
+    line("    fn from_str(s: &str) -> Result<Self, Self::Err> {");
+    line("        Self::parse(s)");
+    line("    }");
+    line("}");
+
+    line("");
+    line(&format!("impl From<{struct_name}> for String {{"));
+    line(&format!("    fn from(name: {struct_name}) -> Self {{"));
+    line("        name.to_string()");
     line("    }");
     line("}");
     Ok(())
 }
 
-/// rustfmt's default `max_width`. The generated `format([…])` array collapses to
-/// one line at or under this width and breaks above it, matching rustfmt so the
-/// emitted code is already formatted.
+/// rustfmt's default `max_width`. Generated bracketed lists and signatures
+/// collapse to one line at or under this width and break above it, matching
+/// rustfmt so the emitted code is already formatted.
 const RUSTFMT_MAX_WIDTH: usize = 100;
+
+/// rustfmt's default `array_width` (under `use_small_heuristics = "Default"`): an
+/// array literal wider than this breaks to one element per line even when the
+/// whole line would still fit within [`RUSTFMT_MAX_WIDTH`].
+const RUSTFMT_ARRAY_WIDTH: usize = 60;
+
+/// `PascalCase` -> `SCREAMING_SNAKE_CASE` for the per-wrapper `LazyLock` const
+/// name (`ShipperResourceName` -> `SHIPPER_RESOURCE_NAME`). The struct names are
+/// ASCII `PascalCase`, so this only needs to split before each interior capital.
+fn screaming_snake(pascal: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in pascal.char_indices() {
+        if i > 0 && c.is_ascii_uppercase() {
+            out.push('_');
+        }
+        out.push(c.to_ascii_uppercase());
+    }
+    out
+}
+
+/// The parent pattern of `pattern` — the pattern with its trailing
+/// collection+variable pair dropped (`shippers/{shipper}/sites/{site}` ->
+/// `shippers/{shipper}`) — or `None` if `pattern` has fewer than two such pairs
+/// (a top-level resource has no parent to generate).
+fn parent_pattern(pattern: &str) -> Option<String> {
+    let segments: Vec<&str> = pattern.split('/').collect();
+    if segments.len() < 4 {
+        return None;
+    }
+    Some(segments[..segments.len() - 2].join("/"))
+}
 
 /// The variable names of `pattern`, in order, read out over the runtime's own
 /// [`Scanner`]/`Segment` API. Parsing first validates the pattern (rejecting

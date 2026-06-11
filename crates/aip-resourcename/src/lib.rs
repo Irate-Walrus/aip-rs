@@ -29,6 +29,33 @@ pub enum Error {
     MissingVariable { name: String },
     #[error("variable {name:?} is not declared in the pattern")]
     UnknownVariable { name: String },
+    #[error("variable {name:?} has an invalid value: {reason}")]
+    InvalidVariable { name: String, reason: String },
+}
+
+/// Validates one value bound to a [`Pattern`] variable: it must be a single
+/// resource-name [`Segment`] — non-empty and free of the `/` separator.
+///
+/// This is the per-variable guard the generated `<Type>ResourceName::new`
+/// constructors call. With every variable validated, formatting the name is
+/// infallible (each value is exactly one segment), which is what lets the
+/// generated wrappers expose an infallible [`Display`](std::fmt::Display).
+/// `name` is the variable's name (carried in the error); `value` is the
+/// candidate value.
+pub fn validate_variable(name: &str, value: &str) -> Result<(), Error> {
+    if value.is_empty() {
+        return Err(Error::InvalidVariable {
+            name: name.to_string(),
+            reason: "must not be empty".to_string(),
+        });
+    }
+    if value.contains('/') {
+        return Err(Error::InvalidVariable {
+            name: name.to_string(),
+            reason: "must not contain '/'".to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// The wildcard segment, `-` (matches any single resource ID).
@@ -638,6 +665,13 @@ impl From<Error> for tonic::Status {
                 "RESOURCE_NAME_UNKNOWN_VARIABLE",
                 HashMap::from([("variable".to_owned(), name.clone())]),
             ),
+            Error::InvalidVariable { name, reason } => (
+                "RESOURCE_NAME_INVALID_VARIABLE",
+                HashMap::from([
+                    ("variable".to_owned(), name.clone()),
+                    ("reason".to_owned(), reason.clone()),
+                ]),
+            ),
         };
         let mut details = ErrorDetails::new();
         details.set_error_info(reason, ERROR_DOMAIN, metadata);
@@ -677,6 +711,20 @@ mod tonic_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_variable_accepts_a_single_segment_rejects_empty_or_slash() {
+        assert!(validate_variable("shipper", "acme").is_ok());
+        assert!(validate_variable("shipper", "daf1cb3e-f33b-43f1-81cc-e65fda51efa5").is_ok());
+        assert!(matches!(
+            validate_variable("shipper", ""),
+            Err(Error::InvalidVariable { .. })
+        ));
+        assert!(matches!(
+            validate_variable("shipper", "acme/dock-1"),
+            Err(Error::InvalidVariable { .. })
+        ));
+    }
 
     #[test]
     fn parse_accepts_valid_and_rejects_malformed() {
