@@ -16,7 +16,7 @@ use aip::ordering::OrderByRequest;
 use aip::pagination::{PageRequest, PageToken};
 use aip::validation::Validator;
 use prost::Message as _;
-use prost_reflect::{Kind, ReflectMessage};
+use prost_reflect::ReflectMessage;
 use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status};
 
@@ -727,34 +727,24 @@ impl OrderByRequest for ListSitesRequest {
 /// `annotations` map, and the `tags` list. The map / list / string / timestamp
 /// identifiers carry the has operator `:` overloads (#41).
 fn site_declarations() -> aip::filtering::Declarations {
-    use aip::filtering::{Declarations, Type};
+    use aip::filtering::Declarations;
 
-    // The `Site.state` enum descriptor, taken from the field itself — a Typed
-    // message carries its own descriptor (ADR-0009), so there is no by-name pool
-    // lookup. `enum_ident` declares the field, each value name, and the enum
-    // `=`/`!=` overloads.
-    let state_enum = match Site::default()
-        .descriptor()
-        .get_field_by_name("state")
-        .expect("Site has a `state` field")
-        .kind()
-    {
-        Kind::Enum(descriptor) => descriptor,
-        other => unreachable!("the `state` field is an enum, found {other:?}"),
-    };
-
-    Declarations::builder()
+    // Each identifier's `Type` is derived from the `Site` descriptor (#127): the
+    // Typed message carries its own descriptor (ADR-0009), so `for_message`
+    // resolves these paths and reads off the string / timestamp / nested-double /
+    // map / list types — and gives `state` the full enum treatment (the field,
+    // each value name, and the `=`/`!=` overloads) with no `Kind::Enum` dance.
+    Declarations::for_message::<Site>()
         .standard_functions()
-        .ident("display_name", Type::String)
-        .ident("name", Type::String)
-        .ident("create_time", Type::Timestamp)
-        .ident("lat_lng.latitude", Type::Double)
-        .ident(
+        .fields([
+            "display_name",
+            "name",
+            "create_time",
+            "lat_lng.latitude",
             "annotations",
-            Type::Map(Box::new(Type::String), Box::new(Type::String)),
-        )
-        .ident("tags", Type::List(Box::new(Type::String)))
-        .enum_ident("state", state_enum)
+            "tags",
+            "state",
+        ])
         .build()
         .expect("site filter declarations are valid")
 }
@@ -790,18 +780,20 @@ fn site_schema() -> aip::sql::Schema {
 /// allowlist — `ListShipments` exists here to prove the *composition* (#43), not to
 /// re-enumerate every filterable shape `ListSites` already covers.
 fn shipment_declarations() -> aip::filtering::Declarations {
-    use aip::filtering::{Declarations, Type};
+    use aip::filtering::Declarations;
 
-    Declarations::builder()
+    // Derived from the `Shipment` descriptor (#127): `name` / `origin_site` /
+    // `destination_site` read off as strings, `create_time` as a timestamp, and
+    // `annotations` as a map — same allowlist, no hand-spelled `Type`s.
+    Declarations::for_message::<Shipment>()
         .standard_functions()
-        .ident("name", Type::String)
-        .ident("origin_site", Type::String)
-        .ident("destination_site", Type::String)
-        .ident("create_time", Type::Timestamp)
-        .ident(
+        .fields([
+            "name",
+            "origin_site",
+            "destination_site",
+            "create_time",
             "annotations",
-            Type::Map(Box::new(Type::String), Box::new(Type::String)),
-        )
+        ])
         .build()
         .expect("shipment filter declarations are valid")
 }
