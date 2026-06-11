@@ -92,13 +92,16 @@ plugins:
   - local: ["cargo", "run", "--quiet", "--package", "protoc-gen-prost-aip"]
     out: src/gen
     opt:
-      # Opt in to the field-shape-keyed `aip_pagination::PageRequest` impls
-      # (ADR-0013): every request with `page_token` + `page_size` — the three
-      # freight List requests — gets the impl generated instead of hand-written,
-      # making `aip-pagination` a direct dependency of this crate.
+      # Opt in to the field-shape-keyed `PageRequest` impls (ADR-0013): every
+      # request with `page_token` + `page_size` — the three freight List
+      # requests — gets the impl generated instead of hand-written.
       - pagination=true
-      # Opt in to the `aip_ordering::OrderByRequest` impls (ADR-0013): every
-      # request with `order_by` — `ListSitesRequest` alone — gets the impl
-      # generated instead of hand-written, making `aip-ordering` a direct
-      # dependency of this crate.
+      # Opt in to the `OrderByRequest` impls (ADR-0013): every request with
+      # `order_by` — `ListSitesRequest` alone — gets the impl generated instead
+      # of hand-written.
       - ordering=true
+      # Route all generated crate references through the `aip` umbrella crate
+      # (issue #138): `::aip::pagination::PageRequest` instead of
+      # `::aip_pagination::PageRequest`, etc. Removes the need for direct deps
+      # on `aip-pagination`, `aip-ordering`, `aip-resourcename` in Cargo.toml.
+      - aip_crate=aip

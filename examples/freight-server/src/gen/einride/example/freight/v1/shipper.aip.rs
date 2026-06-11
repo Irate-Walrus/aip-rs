@@ -9,9 +9,9 @@ pub struct ShipperResourceName {
 }
 
 /// The compiled `shippers/{shipper}` pattern, parsed once.
-static SHIPPER_RESOURCE_NAME_PATTERN: ::std::sync::LazyLock<::aip_resourcename::Pattern> =
+static SHIPPER_RESOURCE_NAME_PATTERN: ::std::sync::LazyLock<::aip::resourcename::Pattern> =
     ::std::sync::LazyLock::new(|| {
-        ::aip_resourcename::Pattern::parse(ShipperResourceName::PATTERN)
+        ::aip::resourcename::Pattern::parse(ShipperResourceName::PATTERN)
             .expect("a generated pattern parses")
     });
 
@@ -24,9 +24,9 @@ impl ShipperResourceName {
 
     /// Construct the resource name from its variables, validating each
     /// as a single resource-name segment (non-empty, no `/`).
-    pub fn new(shipper: impl Into<String>) -> Result<Self, ::aip_resourcename::Error> {
+    pub fn new(shipper: impl Into<String>) -> Result<Self, ::aip::resourcename::Error> {
         let shipper = shipper.into();
-        ::aip_resourcename::validate_variable("shipper", &shipper)?;
+        ::aip::resourcename::validate_variable("shipper", &shipper)?;
         Ok(Self { shipper })
     }
 
@@ -36,16 +36,16 @@ impl ShipperResourceName {
     }
 
     /// Parse a resource name string into its typed variables.
-    pub fn parse(name: &str) -> Result<Self, ::aip_resourcename::Error> {
+    pub fn parse(name: &str) -> Result<Self, ::aip::resourcename::Error> {
         let Some(captures) = SHIPPER_RESOURCE_NAME_PATTERN.match_name(name) else {
-            return Err(::aip_resourcename::Error::PatternMismatch {
+            return Err(::aip::resourcename::Error::PatternMismatch {
                 pattern: Self::PATTERN.to_owned(),
             });
         };
         Ok(Self {
             shipper: captures
                 .get("shipper")
-                .ok_or_else(|| ::aip_resourcename::Error::MissingVariable {
+                .ok_or_else(|| ::aip::resourcename::Error::MissingVariable {
                     name: "shipper".to_owned(),
                 })?
                 .to_owned(),
@@ -65,7 +65,7 @@ impl ::std::fmt::Display for ShipperResourceName {
 }
 
 impl ::std::str::FromStr for ShipperResourceName {
-    type Err = ::aip_resourcename::Error;
+    type Err = ::aip::resourcename::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::parse(s)

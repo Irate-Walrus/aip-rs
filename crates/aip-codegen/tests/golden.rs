@@ -11,7 +11,7 @@
 
 use std::path::Path;
 
-use aip_codegen::{generate, GenInput};
+use aip_codegen::{generate, CratePaths, GenInput};
 use aip_reflect::{RequestDescriptor, ResourceDescriptor};
 
 /// A pagination-shaped [`RequestDescriptor`], with or without the `skip` field.
@@ -76,7 +76,8 @@ fn freight_inputs() -> Vec<GenInput> {
 
 #[test]
 fn freight_resources_match_golden() {
-    let files = generate(&freight_inputs()).expect("freight inputs generate");
+    let files =
+        generate(&freight_inputs(), &CratePaths::default()).expect("freight inputs generate");
     assert_eq!(
         files.len(),
         3,
@@ -109,7 +110,7 @@ fn freight_resources_match_golden() {
 
 #[test]
 fn output_path_swaps_proto_for_aip_rs() {
-    let files = generate(&freight_inputs()).unwrap();
+    let files = generate(&freight_inputs(), &CratePaths::default()).unwrap();
     let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
     assert_eq!(
         paths,
@@ -123,14 +124,17 @@ fn output_path_swaps_proto_for_aip_rs() {
 
 #[test]
 fn resource_without_patterns_produces_no_file() {
-    let files = generate(&[GenInput {
-        proto_file: "x/y.proto".to_owned(),
-        resources: vec![ResourceDescriptor {
-            resource_type: "example.com/Thing".to_owned(),
-            patterns: vec![],
+    let files = generate(
+        &[GenInput {
+            proto_file: "x/y.proto".to_owned(),
+            resources: vec![ResourceDescriptor {
+                resource_type: "example.com/Thing".to_owned(),
+                patterns: vec![],
+            }],
+            requests: vec![],
         }],
-        requests: vec![],
-    }])
+        &CratePaths::default(),
+    )
     .unwrap();
     assert!(files.is_empty(), "a patternless resource emits nothing");
 }
@@ -142,40 +146,106 @@ fn resource_without_patterns_produces_no_file() {
 fn request_without_the_pagination_shape_produces_no_file() {
     let mut token_only = page_request("ListThingsRequest", false);
     token_only.has_page_size = false;
-    let files = generate(&[GenInput {
-        proto_file: "x/y.proto".to_owned(),
-        resources: vec![],
-        requests: vec![token_only],
-    }])
+    let files = generate(
+        &[GenInput {
+            proto_file: "x/y.proto".to_owned(),
+            resources: vec![],
+            requests: vec![token_only],
+        }],
+        &CratePaths::default(),
+    )
     .unwrap();
     assert!(files.is_empty(), "half the pagination shape emits nothing");
 }
 
 #[test]
 fn resource_type_without_a_type_name_is_an_error() {
-    let err = generate(&[GenInput {
-        proto_file: "x/y.proto".to_owned(),
-        resources: vec![ResourceDescriptor {
-            resource_type: "no-slash".to_owned(),
-            patterns: vec!["things/{thing}".to_owned()],
+    let err = generate(
+        &[GenInput {
+            proto_file: "x/y.proto".to_owned(),
+            resources: vec![ResourceDescriptor {
+                resource_type: "no-slash".to_owned(),
+                patterns: vec!["things/{thing}".to_owned()],
+            }],
+            requests: vec![],
         }],
-        requests: vec![],
-    }])
+        &CratePaths::default(),
+    )
     .expect_err("a type with no `service/Type` form cannot name a struct");
     assert!(err.to_string().contains("no-slash"), "{err}");
 }
 
 #[test]
 fn wildcard_pattern_is_rejected() {
-    let err = generate(&[GenInput {
-        proto_file: "x/y.proto".to_owned(),
-        resources: vec![ResourceDescriptor {
-            resource_type: "example.com/Thing".to_owned(),
-            patterns: vec!["things/-".to_owned()],
+    let err = generate(
+        &[GenInput {
+            proto_file: "x/y.proto".to_owned(),
+            resources: vec![ResourceDescriptor {
+                resource_type: "example.com/Thing".to_owned(),
+                patterns: vec!["things/-".to_owned()],
+            }],
+            requests: vec![],
         }],
-        requests: vec![],
-    }])
+        &CratePaths::default(),
+    )
     .expect_err("a wildcard is not a valid pattern");
     // Surfaced from the runtime `aip_resourcename::Pattern::parse`.
     assert!(err.to_string().contains("wildcard"), "{err}");
+}
+
+/// With `aip_crate=aip` the generated code routes references through the
+/// umbrella (`::aip::pagination::`, `::aip::resourcename::`, …) instead of
+/// the per-crate defaults (`::aip_pagination::`, `::aip_resourcename::`, …).
+#[test]
+fn aip_crate_option_rewrites_paths() {
+    let paths = CratePaths::from_aip_crate(Some("aip"));
+    let files =
+        generate(&freight_inputs(), &paths).expect("freight inputs generate with aip umbrella");
+
+    // The shipper wrapper should name the pattern static and Error through ::aip::resourcename.
+    let shipper = files
+        .iter()
+        .find(|f| f.path.ends_with("shipper.aip.rs"))
+        .expect("shipper.aip.rs generated");
+    assert!(
+        shipper.content.contains("::aip::resourcename::Pattern"),
+        "resourcename path not rewritten:\n{}",
+        shipper.content
+    );
+    assert!(
+        shipper.content.contains("::aip::resourcename::Error"),
+        "resourcename error path not rewritten:\n{}",
+        shipper.content
+    );
+    assert!(
+        !shipper.content.contains("::aip_resourcename::"),
+        "old per-crate resourcename path still present:\n{}",
+        shipper.content
+    );
+
+    // The freight_service impls should name traits through ::aip::pagination / ::aip::ordering.
+    let svc = files
+        .iter()
+        .find(|f| f.path.ends_with("freight_service.aip.rs"))
+        .expect("freight_service.aip.rs generated");
+    assert!(
+        svc.content.contains("::aip::pagination::PageRequest"),
+        "pagination path not rewritten:\n{}",
+        svc.content
+    );
+    assert!(
+        svc.content.contains("::aip::ordering::OrderByRequest"),
+        "ordering path not rewritten:\n{}",
+        svc.content
+    );
+    assert!(
+        !svc.content.contains("::aip_pagination::"),
+        "old per-crate pagination path still present:\n{}",
+        svc.content
+    );
+    assert!(
+        !svc.content.contains("::aip_ordering::"),
+        "old per-crate ordering path still present:\n{}",
+        svc.content
+    );
 }

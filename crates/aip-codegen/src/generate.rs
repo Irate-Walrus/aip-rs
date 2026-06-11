@@ -57,6 +57,47 @@ use aip_resourcename::{Pattern, Scanner};
 
 use crate::Error;
 
+/// Crate-root paths used in generated code, so the consumer can route
+/// references through the `aip` umbrella (`aip_crate=aip` -> `::aip::pagination::…`)
+/// instead of the per-crate names (`::aip_pagination::…`).
+///
+/// Construct with [`CratePaths::default`] for per-crate paths, or
+/// [`CratePaths::from_aip_crate`] with an umbrella root like `"aip"`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CratePaths {
+    /// Module path to `aip-resourcename`, e.g. `::aip_resourcename` or `::aip::resourcename`.
+    pub resourcename: String,
+    /// Module path to `aip-pagination`, e.g. `::aip_pagination` or `::aip::pagination`.
+    pub pagination: String,
+    /// Module path to `aip-ordering`, e.g. `::aip_ordering` or `::aip::ordering`.
+    pub ordering: String,
+}
+
+impl Default for CratePaths {
+    fn default() -> Self {
+        Self {
+            resourcename: "::aip_resourcename".to_owned(),
+            pagination: "::aip_pagination".to_owned(),
+            ordering: "::aip_ordering".to_owned(),
+        }
+    }
+}
+
+impl CratePaths {
+    /// Build paths rooted at `aip_crate` (e.g. `"aip"` -> `::aip::pagination::…`).
+    /// `None` returns the per-crate default.
+    pub fn from_aip_crate(aip_crate: Option<&str>) -> Self {
+        match aip_crate {
+            None => Self::default(),
+            Some(root) => Self {
+                resourcename: format!("::{root}::resourcename"),
+                pagination: format!("::{root}::pagination"),
+                ordering: format!("::{root}::ordering"),
+            },
+        }
+    }
+}
+
 /// One generated source file: a relative output [`path`](Self::path) and its
 /// Rust [`content`](Self::content).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,7 +133,7 @@ pub struct GenInput {
 /// A resource with no patterns contributes nothing, as does a request without
 /// the pagination field shape; a file contributing neither produces no file at
 /// all (matching aip-go).
-pub fn generate(inputs: &[GenInput]) -> Result<Vec<GenFile>, Error> {
+pub fn generate(inputs: &[GenInput], paths: &CratePaths) -> Result<Vec<GenFile>, Error> {
     // A `pattern -> <Type>ResourceName` index over every resource in the whole
     // invocation, so a multi-segment wrapper can resolve its parent pattern to
     // the parent's typed wrapper even when that parent lives in another file.
@@ -100,9 +141,12 @@ pub fn generate(inputs: &[GenInput]) -> Result<Vec<GenFile>, Error> {
 
     let mut files = Vec::new();
     for input in inputs {
-        if let Some(content) =
-            generate_file(&input.resources, &input.requests, &wrappers_by_pattern)?
-        {
+        if let Some(content) = generate_file(
+            &input.resources,
+            &input.requests,
+            &wrappers_by_pattern,
+            paths,
+        )? {
             files.push(GenFile {
                 path: output_path(&input.proto_file),
                 content,
@@ -142,6 +186,7 @@ fn generate_file(
     resources: &[ResourceDescriptor],
     requests: &[RequestDescriptor],
     wrappers_by_pattern: &BTreeMap<String, String>,
+    paths: &CratePaths,
 ) -> Result<Option<String>, Error> {
     let mut body = String::new();
     for resource in resources {
@@ -151,15 +196,16 @@ fn generate_file(
                 &resource.resource_type,
                 pattern,
                 wrappers_by_pattern,
+                paths,
             )?;
         }
     }
     for request in requests {
         if request.has_page_token && request.has_page_size {
-            write_page_request(&mut body, request);
+            write_page_request(&mut body, request, paths);
         }
         if request.has_order_by {
-            write_order_by_request(&mut body, request);
+            write_order_by_request(&mut body, request, paths);
         }
     }
     if body.is_empty() {
@@ -171,22 +217,23 @@ fn generate_file(
     Ok(Some(out))
 }
 
-/// Append the `aip_pagination::PageRequest` impl for `request`, overriding the
-/// trait's `skip()` default only when the message has a `skip` field. The prost
-/// struct is named by bare path — the impl lands in the module that holds the
-/// generated message structs (ADR-0013's mount rule).
-fn write_page_request(out: &mut String, request: &RequestDescriptor) {
+/// Append the `PageRequest` impl for `request`, overriding the trait's `skip()`
+/// default only when the message has a `skip` field. The prost struct is named
+/// by bare path — the impl lands in the module that holds the generated message
+/// structs (ADR-0013's mount rule).
+fn write_page_request(out: &mut String, request: &RequestDescriptor, paths: &CratePaths) {
     let mut line = |s: &str| {
         let _ = writeln!(out, "{s}");
     };
     let message_name = &request.message_name;
+    let pagination = &paths.pagination;
 
     line("");
     line(&format!(
         "/// AIP-158 pagination accessors, generated from `{message_name}`'s field shape."
     ));
     line(&format!(
-        "impl ::aip_pagination::PageRequest for {message_name} {{"
+        "impl {pagination}::PageRequest for {message_name} {{"
     ));
     line("    fn page_token(&self) -> &str {");
     line("        &self.page_token");
@@ -204,21 +251,22 @@ fn write_page_request(out: &mut String, request: &RequestDescriptor) {
     line("}");
 }
 
-/// Append the `aip_ordering::OrderByRequest` impl for `request`, reading its
-/// plain `string order_by` field. Named by bare path, landing in the module
-/// that holds the generated message structs (ADR-0013's mount rule).
-fn write_order_by_request(out: &mut String, request: &RequestDescriptor) {
+/// Append the `OrderByRequest` impl for `request`, reading its plain `string
+/// order_by` field. Named by bare path, landing in the module that holds the
+/// generated message structs (ADR-0013's mount rule).
+fn write_order_by_request(out: &mut String, request: &RequestDescriptor, paths: &CratePaths) {
     let mut line = |s: &str| {
         let _ = writeln!(out, "{s}");
     };
     let message_name = &request.message_name;
+    let ordering = &paths.ordering;
 
     line("");
     line(&format!(
         "/// AIP-132 ordering accessor, generated from `{message_name}`'s field shape."
     ));
     line(&format!(
-        "impl ::aip_ordering::OrderByRequest for {message_name} {{"
+        "impl {ordering}::OrderByRequest for {message_name} {{"
     ));
     line("    fn order_by(&self) -> &str {");
     line("        &self.order_by");
@@ -246,7 +294,9 @@ fn write_resource_name(
     resource_type: &str,
     pattern: &str,
     wrappers_by_pattern: &BTreeMap<String, String>,
+    paths: &CratePaths,
 ) -> Result<(), Error> {
+    let rn = &paths.resourcename;
     let struct_name = struct_name(resource_type)?;
     let variables = pattern_variables(pattern)?;
     // The `LazyLock<Pattern>` holding the compiled pattern, named off the struct.
@@ -290,11 +340,11 @@ fn write_resource_name(
     // struct name, so the static is emitted pre-broken the way rustfmt breaks
     // it: after the `=`, then the `.expect` under the `parse` call.
     line(&format!(
-        "static {pattern_const}: ::std::sync::LazyLock<::aip_resourcename::Pattern> ="
+        "static {pattern_const}: ::std::sync::LazyLock<{rn}::Pattern> ="
     ));
     line("    ::std::sync::LazyLock::new(|| {");
     line(&format!(
-        "        ::aip_resourcename::Pattern::parse({struct_name}::PATTERN)"
+        "        {rn}::Pattern::parse({struct_name}::PATTERN)"
     ));
     line("            .expect(\"a generated pattern parses\")");
     line("    });");
@@ -321,7 +371,7 @@ fn write_resource_name(
         .map(|var| format!("{var}: impl Into<String>"))
         .collect();
     let inline_sig = format!(
-        "    pub fn new({}) -> Result<Self, ::aip_resourcename::Error> {{",
+        "    pub fn new({}) -> Result<Self, {rn}::Error> {{",
         params.join(", ")
     );
     if inline_sig.len() <= RUSTFMT_MAX_WIDTH {
@@ -331,14 +381,14 @@ fn write_resource_name(
         for param in &params {
             line(&format!("        {param},"));
         }
-        line("    ) -> Result<Self, ::aip_resourcename::Error> {");
+        line(&format!("    ) -> Result<Self, {rn}::Error> {{"));
     }
     for var in &variables {
         line(&format!("        let {var} = {var}.into();"));
     }
     for var in &variables {
         line(&format!(
-            "        ::aip_resourcename::validate_variable(\"{var}\", &{var})?;"
+            "        {rn}::validate_variable(\"{var}\", &{var})?;"
         ));
     }
     line(&format!("        Ok(Self {{ {} }})", variables.join(", ")));
@@ -354,11 +404,15 @@ fn write_resource_name(
 
     line("");
     line("    /// Parse a resource name string into its typed variables.");
-    line("    pub fn parse(name: &str) -> Result<Self, ::aip_resourcename::Error> {");
+    line(&format!(
+        "    pub fn parse(name: &str) -> Result<Self, {rn}::Error> {{"
+    ));
     line(&format!(
         "        let Some(captures) = {pattern_const}.match_name(name) else {{"
     ));
-    line("            return Err(::aip_resourcename::Error::PatternMismatch {");
+    line(&format!(
+        "            return Err({rn}::Error::PatternMismatch {{"
+    ));
     line("                pattern: Self::PATTERN.to_owned(),");
     line("            });");
     line("        };");
@@ -366,7 +420,9 @@ fn write_resource_name(
     for var in &variables {
         line(&format!("            {var}: captures"));
         line(&format!("                .get(\"{var}\")"));
-        line("                .ok_or_else(|| ::aip_resourcename::Error::MissingVariable {");
+        line(&format!(
+            "                .ok_or_else(|| {rn}::Error::MissingVariable {{"
+        ));
         line(&format!("                    name: \"{var}\".to_owned(),"));
         line("                })?");
         line("                .to_owned(),");
@@ -446,7 +502,7 @@ fn write_resource_name(
 
     line("");
     line(&format!("impl ::std::str::FromStr for {struct_name} {{"));
-    line("    type Err = ::aip_resourcename::Error;");
+    line(&format!("    type Err = {rn}::Error;"));
     line("");
     line("    fn from_str(s: &str) -> Result<Self, Self::Err> {");
     line("        Self::parse(s)");
