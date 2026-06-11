@@ -251,12 +251,15 @@ impl FreightService for FreightServer {
         // user-supplied id to validate here; `validate_user_settable` guards
         // that path wherever a request later exposes one.
         let id = aip::resourceid::generate_system();
-        // Format the canonical resource name `shippers/{shipper}` through the
-        // typed wrapper generated from shipper.proto's `google.api.resource`
-        // annotation (AIP-122 / ADR-0011) rather than hand-writing the pattern.
-        shipper.name = ShipperResourceName { shipper: id }
-            .format()
-            .expect("a generated shipper id formats into the pattern");
+        // Mint the canonical resource name `shippers/{shipper}` through the typed
+        // wrapper generated from shipper.proto's `google.api.resource` annotation
+        // (AIP-122 / ADR-0011) rather than hand-writing the pattern. The wrapper
+        // validates the variable at construction, so its `Display` is infallible;
+        // only a server-minted id that is not a single segment could fail `new`,
+        // which a UUID never is.
+        shipper.name = ShipperResourceName::new(id)
+            .expect("a system-minted id is a valid shipper segment")
+            .to_string();
         let ts = now();
         shipper.create_time = Some(ts);
         shipper.update_time = Some(ts);
@@ -508,16 +511,15 @@ impl FreightService for FreightServer {
 
         // The validated `parent` binds the `{shipper}` of the canonical site
         // pattern; mint a system-assigned `{site}` id (a UUIDv4, per AIP-148) and
-        // format the full resource name through the typed wrappers generated from
-        // the `google.api.resource` annotations (AIP-122 / ADR-0011).
+        // build the full resource name through the typed wrappers generated from
+        // the `google.api.resource` annotations (AIP-122 / ADR-0011). Both
+        // variables are known-valid segments (a parsed parent and a UUID), so
+        // construction cannot fail and `Display` is infallible.
         let parent = ShipperResourceName::parse(&req.parent)
             .expect("parent validated to match the shipper pattern");
-        site.name = SiteResourceName {
-            shipper: parent.shipper,
-            site: aip::resourceid::generate_system(),
-        }
-        .format()
-        .expect("a generated site id formats into the pattern");
+        site.name = SiteResourceName::new(parent.shipper(), aip::resourceid::generate_system())
+            .expect("a parsed parent and a system-minted id are valid site segments")
+            .to_string();
 
         let ts = now();
         site.create_time = Some(ts);
@@ -631,16 +633,16 @@ impl FreightService for FreightServer {
 
         // The validated `parent` binds the `{shipper}` of the canonical shipment
         // pattern; mint a system-assigned `{shipment}` id (a UUIDv4, per AIP-148)
-        // and format the full resource name through the typed wrappers generated
-        // from the `google.api.resource` annotations (AIP-122 / ADR-0011).
+        // and build the full resource name through the typed wrappers generated
+        // from the `google.api.resource` annotations (AIP-122 / ADR-0011). Both
+        // variables are known-valid segments (a parsed parent and a UUID), so
+        // construction cannot fail and `Display` is infallible.
         let parent = ShipperResourceName::parse(&req.parent)
             .expect("parent validated to match the shipper pattern");
-        shipment.name = ShipmentResourceName {
-            shipper: parent.shipper,
-            shipment: aip::resourceid::generate_system(),
-        }
-        .format()
-        .expect("a generated shipment id formats into the pattern");
+        shipment.name =
+            ShipmentResourceName::new(parent.shipper(), aip::resourceid::generate_system())
+                .expect("a parsed parent and a system-minted id are valid shipment segments")
+                .to_string();
 
         let ts = now();
         shipment.create_time = Some(ts);

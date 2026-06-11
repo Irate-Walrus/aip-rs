@@ -315,13 +315,13 @@ wired up.
 | ----------------- | -------------------------------------------- | ------------ | ----------- |
 | `GetShipper`      | `resourcename` (validate) + generated `ShipperResourceName` (pattern match), `iam` (AIP-211 authorization → non-leaking `PERMISSION_DENIED` / `NOT_FOUND`-via-parent over the shared Policy store), `softdelete` (AIP-164 `show_deleted` visibility gating) | #4, #67, #82, #96 | wired⁶¹⁰ |
 | `ListShippers`    | `pagination` (offset page-token codec + request-checksum guard) + `softdelete` (AIP-164 `show_deleted` filtering) | #6, #7, #96 | wired²¹⁰ |
-| `CreateShipper`   | `resourceid` (generate), generated `ShipperResourceName` (format), `fieldbehavior` (clear OUTPUT_ONLY/IMMUTABLE, validate REQUIRED), `etag` (stamp the AIP-154 content etag), `requestid` (AIP-155 `request_id` validation + idempotent replay), AIP-163 `validate_only` preview | #5, #3, #59, #82, #93, #94, #95 | wired⁸⁹ |
+| `CreateShipper`   | `resourceid` (generate), generated `ShipperResourceName` (validated `new` + infallible `Display`), `fieldbehavior` (clear OUTPUT_ONLY/IMMUTABLE, validate REQUIRED), `etag` (stamp the AIP-154 content etag), `requestid` (AIP-155 `request_id` validation + idempotent replay), AIP-163 `validate_only` preview | #5, #3, #59, #82, #93, #94, #95, #124 | wired⁸⁹ |
 | `UpdateShipper`   | `fieldmask` (typed `update` over `update_mask`), `fieldbehavior` (copy OUTPUT_ONLY from existing, validate REQUIRED in mask), `etag` (AIP-154 freshness check + re-stamp), AIP-163 `validate_only` preview | #8, #48, #59, #93, #95 | wired⁸⁹ |
 | `DeleteShipper`   | `resourcename` (validate) + generated `ShipperResourceName` (pattern match), `etag` (AIP-154 freshness check), `softdelete` (AIP-164 soft delete — stamp `delete_time`, keep the record) | #4, #82, #93, #96 | wired⁸¹⁰ |
 | `UndeleteShipper` | `resourcename` (validate) + generated `ShipperResourceName` (pattern match), `softdelete` (AIP-164 undelete — clear `delete_time` after confirming the shipper is soft-deleted, else `ALREADY_EXISTS`) | #96 | wired¹⁰ |
-| `CreateSite`      | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `SiteResourceName` (format), `fieldbehavior` (reflective REQUIRED validation re-stamped to the service domain → AIP-193), `requestid` (AIP-155 idempotent replay), AIP-163 `validate_only` preview | #5, #3, #59, #82, #94, #95, #119 | wired⁹ |
+| `CreateSite`      | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `SiteResourceName` (validated `new` + infallible `Display`), `fieldbehavior` (reflective REQUIRED validation re-stamped to the service domain → AIP-193), `requestid` (AIP-155 idempotent replay), AIP-163 `validate_only` preview | #5, #3, #59, #82, #94, #95, #119, #124 | wired⁹ |
 | `ListSites`       | `ordering` (parse/validate) + `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (filter + server-composed scope/soft-delete + `ORDER BY`/`LIMIT`/`OFFSET` → in-memory SQLite), with the in-memory `filtering` matcher pinned against SQLite | #9, #10, #6, #7, #11, #39, #40, #41, #42, #43, #92 | wired³ |
-| `CreateShipment`  | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `ShipmentResourceName` (format), `fieldbehavior` (reflective REQUIRED validation of all six fields — endpoints + four pickup/delivery timestamps — re-stamped to the service domain → one AIP-193 response), `requestid` (AIP-155 idempotent replay), AIP-163 `validate_only` preview | #5, #3, #59, #82, #94, #95, #119 | wired⁴⁹ |
+| `CreateShipment`  | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `ShipmentResourceName` (validated `new` + infallible `Display`), `fieldbehavior` (reflective REQUIRED validation of all six fields — endpoints + four pickup/delivery timestamps — re-stamped to the service domain → one AIP-193 response), `requestid` (AIP-155 idempotent replay), AIP-163 `validate_only` preview | #5, #3, #59, #82, #94, #95, #119, #124 | wired⁴⁹ |
 | `ListShipments`   | `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (filter + server-composed scope/soft-delete → in-memory SQLite) | #6, #7, #43 | wired⁴ |
 | `IAMPolicy.GetIamPolicy` / `SetIamPolicy` | `iam` (Member validation + structural read-modify-write: dedupe/normalise, `etag` optimistic concurrency, conditions⟹version-3) over a decomposed SQLite policy store (iam-go's `iam_policy_bindings` schema) | #64, #65 | wired⁵ |
 | `IAMPolicy.TestIamPermissions` | `iam` + the opt-in cel-backed `eval` adapter (`aip::iam::eval`): role→permission expansion via an example-owned catalogue, Member matching, Condition evaluation | #66, #68 | wired⁷ |
@@ -538,9 +538,9 @@ wrapper** (`ShipperResourceName`, `SiteResourceName`, `ShipmentResourceName`)
 via the workspace's own buf plugin,
 [`protoc-gen-prost-aip`](../../crates/protoc-gen-prost-aip) (the
 protoc-gen-go-aip analog, ADR-0011): the proto annotation is the single source
-of truth for the name pattern, and the handlers parse and format resource names
-through the generated `parse()`/`format()` instead of hand-written
-`format!("shippers/{{shipper}}")` strings.
+of truth for the name pattern, and the handlers parse and build resource names
+through the generated `parse()` and the validated `new(...)` + infallible
+`Display` instead of hand-written `format!("shippers/{{shipper}}")` strings.
 
 The generated freight messages are **Typed messages** (#46): the buf template
 adds `#[derive(prost_reflect::ReflectMessage)]` to each, resolved against the
