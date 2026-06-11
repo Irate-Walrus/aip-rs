@@ -1,8 +1,8 @@
 //! Compile the golden fixtures from `golden.rs` and exercise them — proving the
 //! generated code is real, working code: validated `new`, infallible `Display`,
 //! `FromStr`/`parse` round-tripping over the runtime `aip_resourcename::Pattern`
-//! API, a typed `parent()` accessor, and the `PageRequest` / `OrderByRequest`
-//! impls' accessors.
+//! API, a typed `parent()` accessor, `parse_field` / `mint` / `mint_under`
+//! constructors, and the `PageRequest` / `OrderByRequest` impls' accessors.
 //!
 //! The fixtures are `use`-free and fully path-qualified, mounted **directly in
 //! the module that holds the message structs** (ADR-0013's one mount rule, as
@@ -140,4 +140,52 @@ fn order_by_request_impl_reads_the_order_by_field() {
         ..Default::default()
     };
     assert_eq!(request.order_by(), "display_name desc");
+}
+
+#[test]
+fn parse_field_accepts_a_valid_name() {
+    let name =
+        ShipperResourceName::parse_field("name", "shippers/acme").expect("a valid shipper name");
+    assert_eq!(name.shipper(), "acme");
+}
+
+#[test]
+fn parse_field_rejects_empty_name_with_the_field_path() {
+    let err = ShipperResourceName::parse_field("name", "").expect_err("empty name is rejected");
+    assert_eq!(err.field, "name");
+    // The inner error preserves specificity: Empty, not PatternMismatch.
+    assert!(matches!(err.source, aip_resourcename::Error::Empty));
+}
+
+#[test]
+fn parse_field_rejects_pattern_mismatch_with_the_field_path() {
+    let err = ShipperResourceName::parse_field("parent", "shippers/acme/sites/dock-1")
+        .expect_err("site name is rejected as a shipper name");
+    assert_eq!(err.field, "parent");
+    assert!(matches!(
+        err.source,
+        aip_resourcename::Error::PatternMismatch { .. }
+    ));
+}
+
+#[test]
+fn mint_returns_a_valid_shipper_name() {
+    let a = ShipperResourceName::mint();
+    let b = ShipperResourceName::mint();
+    // Two minted names are distinct (UUIDs) and both parse correctly.
+    assert_ne!(a.to_string(), b.to_string());
+    assert!(ShipperResourceName::parse(&a.to_string()).is_ok());
+}
+
+#[test]
+fn mint_under_copies_parent_variables_and_mints_the_last() {
+    let parent = ShipperResourceName::new("acme").expect("valid shipper");
+    let site = SiteResourceName::mint_under(&parent);
+    assert_eq!(site.shipper(), "acme");
+    // The site variable is a UUID (non-empty, single segment).
+    assert!(!site.site().is_empty());
+    assert!(!site.site().contains('/'));
+    // Two mints produce distinct names.
+    let site2 = SiteResourceName::mint_under(&parent);
+    assert_ne!(site.site(), site2.site());
 }

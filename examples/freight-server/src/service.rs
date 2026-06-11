@@ -13,7 +13,6 @@ use aip::fieldbehavior::FieldBehavior;
 use aip::iam::{Member, Permission};
 use aip::pagination::{Page, SizeLimits};
 use aip::preview;
-use aip::validation::Validator;
 use prost::Message as _;
 use prost_reflect::ReflectMessage;
 use tonic::metadata::MetadataMap;
@@ -126,7 +125,7 @@ impl FreightService for FreightServer {
         if self.authorized(caller.as_ref(), &name) {
             // Authorized: a missing shipper is an honest `NOT_FOUND` (the caller is
             // allowed to know), and a malformed name is the usual `INVALID_ARGUMENT`.
-            validate_shipper_name("name", &name)?;
+            ShipperResourceName::parse_field("name", &name)?;
             let shipper = self
                 .storage
                 .get_shipper(&name)
@@ -238,16 +237,12 @@ impl FreightService for FreightServer {
         // `CreateShipperRequest` has no `shipper_id` field, so there is no
         // user-supplied id to validate here; `validate_user_settable` guards
         // that path wherever a request later exposes one.
-        let id = aip::resourceid::generate_system();
         // Mint the canonical resource name `shippers/{shipper}` through the typed
         // wrapper generated from shipper.proto's `google.api.resource` annotation
-        // (AIP-122 / ADR-0011) rather than hand-writing the pattern. The wrapper
-        // validates the variable at construction, so its `Display` is infallible;
-        // only a server-minted id that is not a single segment could fail `new`,
-        // which a UUID never is.
-        shipper.name = ShipperResourceName::new(id)
-            .expect("a system-minted id is a valid shipper segment")
-            .to_string();
+        // (AIP-122 / ADR-0011). `ShipperResourceName::mint()` combines
+        // `generate_system()` with construction; a UUIDv4 is always a valid
+        // segment, so this is infallible.
+        shipper.name = ShipperResourceName::mint().to_string();
         let ts = now();
         shipper.create_time = Some(ts);
         shipper.update_time = Some(ts);
@@ -336,7 +331,7 @@ impl FreightService for FreightServer {
         request: Request<DeleteShipperRequest>,
     ) -> Result<Response<Shipper>, Status> {
         let req = request.into_inner();
-        validate_shipper_name("name", &req.name)?;
+        ShipperResourceName::parse_field("name", &req.name)?;
         // Look up the shipper; a missing one is `NOT_FOUND`, which takes precedence.
         let existing = self
             .storage
@@ -373,7 +368,7 @@ impl FreightService for FreightServer {
         request: Request<UndeleteShipperRequest>,
     ) -> Result<Response<Shipper>, Status> {
         let req = request.into_inner();
-        validate_shipper_name("name", &req.name)?;
+        ShipperResourceName::parse_field("name", &req.name)?;
         // Undelete operates on the soft-deleted record, so the shipper is fetched
         // regardless of its delete state; a name that was never created is
         // `NOT_FOUND`.
@@ -408,7 +403,7 @@ impl FreightService for FreightServer {
         request: Request<ListSitesRequest>,
     ) -> Result<Response<ListSitesResponse>, Status> {
         let req = request.into_inner();
-        validate_shipper_name("parent", &req.parent)?;
+        ShipperResourceName::parse_field("parent", &req.parent)?;
 
         // Parse and validate the AIP-132 `order_by` against the allow-list of
         // sortable Site paths. Bad syntax or an unknown ordering field converts
@@ -475,7 +470,6 @@ impl FreightService for FreightServer {
         if let Some(existing) = idempotent_lookup::<_, Site>(&self.storage, &request_id, &req)? {
             return Ok(Response::new(existing));
         }
-        validate_shipper_name("parent", &req.parent)?;
         // AIP-203 REQUIRED-field validation runs reflectively over the whole
         // request, so the `BadRequest` paths are request-rooted
         // (`site.display_name`) and every missing field comes back in one
@@ -491,17 +485,13 @@ impl FreightService for FreightServer {
             .site
             .ok_or_else(|| Status::invalid_argument("site is required"))?;
 
-        // The validated `parent` binds the `{shipper}` of the canonical site
-        // pattern; mint a system-assigned `{site}` id (a UUIDv4, per AIP-148) and
-        // build the full resource name through the typed wrappers generated from
-        // the `google.api.resource` annotations (AIP-122 / ADR-0011). Both
-        // variables are known-valid segments (a parsed parent and a UUID), so
-        // construction cannot fail and `Display` is infallible.
-        let parent = ShipperResourceName::parse(&req.parent)
-            .expect("parent validated to match the shipper pattern");
-        site.name = SiteResourceName::new(parent.shipper(), aip::resourceid::generate_system())
-            .expect("a parsed parent and a system-minted id are valid site segments")
-            .to_string();
+        // Parse `parent` via `parse_field` — validates the name and matches the
+        // shipper pattern in one call, producing an AIP-193 `BadRequest` on the
+        // `"parent"` field if either check fails. `mint_under` then mints the
+        // system-assigned `{site}` id; a UUIDv4 is always a valid segment, so
+        // construction is infallible (AIP-122 / ADR-0011 / AIP-148).
+        let parent = ShipperResourceName::parse_field("parent", &req.parent)?;
+        site.name = SiteResourceName::mint_under(&parent).to_string();
 
         let ts = now();
         site.create_time = Some(ts);
@@ -545,7 +535,7 @@ impl FreightService for FreightServer {
         request: Request<ListShipmentsRequest>,
     ) -> Result<Response<ListShipmentsResponse>, Status> {
         let req = request.into_inner();
-        validate_shipper_name("parent", &req.parent)?;
+        ShipperResourceName::parse_field("parent", &req.parent)?;
 
         // Offset pagination (AIP-158). `filter` is a non-pagination field, so the
         // request checksum `Page::parse` computes covers it: changing it
@@ -593,7 +583,6 @@ impl FreightService for FreightServer {
         {
             return Ok(Response::new(existing));
         }
-        validate_shipper_name("parent", &req.parent)?;
         // AIP-203 REQUIRED-field validation runs reflectively over the whole
         // request, enforcing **all six** REQUIRED fields the proto declares
         // (`origin_site`, `destination_site`, and the four pickup/delivery
@@ -609,18 +598,13 @@ impl FreightService for FreightServer {
             .shipment
             .ok_or_else(|| Status::invalid_argument("shipment is required"))?;
 
-        // The validated `parent` binds the `{shipper}` of the canonical shipment
-        // pattern; mint a system-assigned `{shipment}` id (a UUIDv4, per AIP-148)
-        // and build the full resource name through the typed wrappers generated
-        // from the `google.api.resource` annotations (AIP-122 / ADR-0011). Both
-        // variables are known-valid segments (a parsed parent and a UUID), so
-        // construction cannot fail and `Display` is infallible.
-        let parent = ShipperResourceName::parse(&req.parent)
-            .expect("parent validated to match the shipper pattern");
-        shipment.name =
-            ShipmentResourceName::new(parent.shipper(), aip::resourceid::generate_system())
-                .expect("a parsed parent and a system-minted id are valid shipment segments")
-                .to_string();
+        // Parse `parent` via `parse_field` — validates the name and matches the
+        // shipper pattern in one call, producing an AIP-193 `BadRequest` on the
+        // `"parent"` field if either check fails. `mint_under` then mints the
+        // system-assigned `{shipment}` id; a UUIDv4 is always a valid segment, so
+        // construction is infallible (AIP-122 / ADR-0011 / AIP-148).
+        let parent = ShipperResourceName::parse_field("parent", &req.parent)?;
+        shipment.name = ShipmentResourceName::mint_under(&parent).to_string();
 
         let ts = now();
         shipment.create_time = Some(ts);
@@ -795,30 +779,7 @@ fn scoped_predicate(parent: &str, user_filter: Option<aip::sql::Predicate>) -> a
     aip::sql::Predicate::all(clauses)
 }
 
-/// Validates that `value` is a well-formed shipper resource name (AIP-122): a
-/// valid resource name that parses as a [`ShipperResourceName`] — the typed
-/// wrapper generated from shipper.proto's `google.api.resource` pattern. Returns
-/// `INVALID_ARGUMENT` otherwise. `field` is the request field the value came from
-/// (`name` or `parent`), so the AIP-193 `BadRequest` points at the right one.
-fn validate_shipper_name(field: &str, value: &str) -> Result<(), Status> {
-    // A malformed name converts via the crate's AIP-193 `From<Error> for Status`
-    // to an `INVALID_ARGUMENT` carrying an `ErrorInfo`. The pattern-match
-    // check below is the server's own policy, so it builds its own AIP-193 details.
-    aip::resourcename::validate(value)?;
-    if ShipperResourceName::parse(value).is_err() {
-        let mut violations = Validator::new(SERVICE_DOMAIN, "RESOURCE_NAME_PATTERN_MISMATCH");
-        violations.add_field_violation(
-            field,
-            format!("must match the pattern `{}`", ShipperResourceName::PATTERN),
-        );
-        violations.into_result()?;
-    }
-    Ok(())
-}
-
-/// The AIP-193 `ErrorInfo.domain` the service presents to its clients. Passed to
-/// every [`Validator`] the handlers build for the policy checks no aip-rs
-/// primitive covers (e.g. the shipper-name pattern), and — per ADR-0007 — handed
+/// The AIP-193 `ErrorInfo.domain` the service presents to its clients. Handed
 /// once to the `aip::errordomain` boundary layer in `main.rs`, which rewrites the
 /// `aip-rs` sentinel every library error carries to this one service domain. So
 /// the handlers convert library errors with a bare `?`: the boundary, not each
@@ -1923,10 +1884,11 @@ mod tests {
     async fn list_sites_bad_parent_names_the_parent_field() {
         use tonic_types::StatusExt as _;
 
-        // `validate_shipper_name` is shared by `name`- and `parent`-bearing
-        // handlers; the BadRequest must point at the field the value came from.
+        // `ShipperResourceName::parse_field("parent", …)` validates and matches in
+        // one call; the BadRequest must point at the field the value came from.
         // `shippers/acme/sites/x` is a valid resource name but does not match the
-        // `shippers/{shipper}` pattern, so it trips the server's policy check.
+        // `shippers/{shipper}` pattern, so it trips the pattern-mismatch check.
+        // Direct handler call → pre-boundary `aip-rs` sentinel (ADR-0007 / #145).
         let server = FreightServer::default();
         let status = server
             .list_sites(Request::new(ListSitesRequest {
@@ -1935,6 +1897,14 @@ mod tests {
             }))
             .await
             .expect_err("a parent that is not a shipper name is rejected");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+        let info = status
+            .get_details_error_info()
+            .expect("an ErrorInfo is attached (AIP-193 MUST)");
+        assert_eq!(info.reason, "RESOURCE_NAME_PATTERN_MISMATCH");
+        assert_eq!(info.domain, "aip-rs");
+
         let bad = status
             .get_details_bad_request()
             .expect("a BadRequest field violation is attached");
