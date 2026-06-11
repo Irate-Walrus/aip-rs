@@ -188,7 +188,7 @@ impl FreightService for FreightServer {
         // The visibility rule is the same `aip::softdelete` primitive `GetShipper`
         // uses; here it filters the in-memory listing before the page is sliced, so
         // page boundaries are computed over exactly the visible shippers.
-        let mut shippers: Vec<Shipper> = self
+        let shippers: Vec<Shipper> = self
             .storage
             .list_shippers()
             .into_iter()
@@ -199,12 +199,10 @@ impl FreightService for FreightServer {
                 )
             })
             .collect();
-        let total = shippers.len();
-        let start = usize::try_from(page.token.offset).unwrap_or(0).min(total);
-        let end = start.saturating_add(page.size as usize).min(total);
-        // Only hand back a `next_page_token` when results remain past this page.
-        let next_page_token = page.next_token(end < total);
-        let shippers = shippers.drain(start..end).collect();
+        // The visible shippers already live in memory (a post-filter set), so
+        // `Page::apply` owns the slice-and-mint: it windows the page out of the
+        // `Vec`, decides whether more remain, and returns the `next_page_token`.
+        let (shippers, next_page_token) = page.apply(shippers);
         Ok(Response::new(ListShippersResponse {
             shippers,
             next_page_token,
@@ -444,19 +442,17 @@ impl FreightService for FreightServer {
         let mut order = aip::sql::transpile_order_by(&order_by, &site_schema())?;
         order.push(aip::sql::Order::asc("name"));
 
-        // Fetch one row past the page so an extra row signals a further page (the
-        // AIP-158 `next_page_token`). The parent scope lives in the SQL `WHERE`,
-        // so the `LIMIT`/`OFFSET` page boundaries are computed over exactly the
+        // Overfetch probe: fetch one row past the page (`page.fetch_limit()`) at the
+        // page offset, both unsigned off `Page` — the forged-token clamp and the
+        // size floor already happened, so no cast lives here. The parent scope is in
+        // the SQL `WHERE`, so the `LIMIT`/`OFFSET` boundaries cover exactly the
         // in-scope rows — no in-memory post-filter that could under-fill a page.
-        // A forged token's offset is clamped non-negative.
-        let offset = page.token.offset.max(0) as u64;
-        let mut sites =
+        let sites =
             self.storage
-                .list_sites_page(&predicate, &order, page.size as u64 + 1, offset);
-        let has_more = sites.len() > page.size as usize;
-        sites.truncate(page.size as usize);
-
-        let next_page_token = page.next_token(has_more);
+                .list_sites_page(&predicate, &order, page.fetch_limit(), page.offset());
+        // `split_overfetch` reads the probe row's presence as `has_more`, truncates
+        // it off, and mints the `next_page_token`.
+        let (sites, next_page_token) = page.split_overfetch(sites);
         Ok(Response::new(ListSitesResponse {
             sites,
             next_page_token,
@@ -563,14 +559,13 @@ impl FreightService for FreightServer {
         // `ListShipments` carries no `order_by`, so results are ordered by
         // resource name — a total, stable page order across the offset pages.
         let order = [aip::sql::Order::asc("name")];
-        let offset = page.token.offset.max(0) as u64;
-        let mut shipments =
+        // The same overfetch probe as `ListSites`: fetch `fetch_limit()` rows at the
+        // unsigned page offset, then `split_overfetch` truncates the probe row and
+        // mints the `next_page_token` — no integer casts in the handler.
+        let shipments =
             self.storage
-                .list_shipments_page(&predicate, &order, page.size as u64 + 1, offset);
-        let has_more = shipments.len() > page.size as usize;
-        shipments.truncate(page.size as usize);
-
-        let next_page_token = page.next_token(has_more);
+                .list_shipments_page(&predicate, &order, page.fetch_limit(), page.offset());
+        let (shipments, next_page_token) = page.split_overfetch(shipments);
         Ok(Response::new(ListShipmentsResponse {
             shipments,
             next_page_token,
@@ -1212,6 +1207,44 @@ mod tests {
             .get_details_bad_request()
             .expect("a BadRequest field violation is attached");
         assert_eq!(bad.field_violations[0].field, "page_size");
+    }
+
+    #[tokio::test]
+    async fn list_sites_clamps_a_forged_negative_offset_token() {
+        // Page tokens are unsigned and client-forgeable (ADR-0004). A token carrying
+        // a negative offset must not skip rows or panic: `Page::parse` clamps the
+        // offset non-negative, so the page is served from the start. The forged
+        // token still has to pass the request checksum — that guard is unchanged —
+        // so it is minted with the request's own checksum.
+        let server = FreightServer::default();
+        seed_site(&server, "only", 0.0).await;
+
+        // `request_checksum` ignores the pagination fields, so the checksum computed
+        // over the token-less request is the one the forged token must carry.
+        let base = ListSitesRequest {
+            parent: PARENT.to_owned(),
+            page_size: 10,
+            ..Default::default()
+        };
+        let checksum = aip::pagination::request_checksum(&base);
+        let forged = aip::pagination::PageToken {
+            offset: -100,
+            request_checksum: checksum,
+        }
+        .encode();
+
+        let resp = server
+            .list_sites(Request::new(ListSitesRequest {
+                page_token: forged,
+                ..base
+            }))
+            .await
+            .expect("a forged negative-offset token is clamped, not rejected")
+            .into_inner();
+        // Clamped to offset 0 ⇒ the one seeded site is served; a wrapped huge offset
+        // would have returned nothing.
+        assert_eq!(resp.sites.len(), 1);
+        assert_eq!(resp.sites[0].display_name, "only");
     }
 
     #[tokio::test]

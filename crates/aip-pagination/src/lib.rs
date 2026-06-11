@@ -143,20 +143,33 @@ pub struct SizeLimits {
 }
 
 /// The resolved AIP-158 pagination state for one list page: the verified offset
-/// [`PageToken`] and the effective [`size`](Self::size) after the policy
-/// default/cap has been applied.
+/// [`PageToken`] and the effective page size after the policy default/cap has
+/// been applied.
 ///
 /// Produced by [`Page::parse`], which folds the whole list-pagination preamble —
 /// request checksum, token parse/verify, size resolution — into one call. A list
-/// handler opens with `Page::parse(&req, limits)?` and closes with
-/// `page.next_token(has_more)`.
+/// handler opens with `Page::parse(&req, limits)?`, reads the page start and width
+/// through the unsigned [`offset`](Self::offset) / [`size`](Self::size) accessors,
+/// and **owns applying itself to the results**: [`apply`](Self::apply) for a
+/// collection already in memory, or the [`fetch_limit`](Self::fetch_limit) /
+/// [`split_overfetch`](Self::split_overfetch) pair for a store-backed listing.
+/// Each of those mints the `next_page_token` the handler returns.
+///
+/// The fields are **private**: by [`parse`](Self::parse) the offset is clamped
+/// non-negative and the size is floored at zero, so the post-validation surface a
+/// handler reads is unsigned — there is no signed [`PageToken::offset`] or `i32`
+/// size left to cast at the call site. The raw signed `i64`/`i32` representation is
+/// an internal detail, not the consumer story.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Page {
-    /// The verified offset page token. `token.offset` is where this page starts.
-    pub token: PageToken,
-    /// The page size after the [`SizeLimits`] default/cap has been applied —
-    /// always positive (a negative request is an [`Error::NegativePageSize`]).
-    pub size: i32,
+    /// The verified offset page token, its `offset` clamped non-negative by
+    /// [`parse`](Self::parse) — where this page starts.
+    token: PageToken,
+    /// The page size after the [`SizeLimits`] default/cap has been applied, floored
+    /// at zero by [`resolve_size`] so a degenerate [`SizeLimits`] yields a 0-size
+    /// page rather than a wrapped cast (a negative *request* is the separate
+    /// [`Error::NegativePageSize`]).
+    size: i32,
 }
 
 impl Page {
@@ -178,16 +191,112 @@ impl Page {
         limits: SizeLimits,
     ) -> Result<Self, Error> {
         let checksum = request_checksum(request);
-        let token = PageToken::parse(request, checksum)?;
+        let mut token = PageToken::parse(request, checksum)?;
+        // Clamp a forged negative offset to 0 *here*, not in the accessor: the
+        // next-page token is minted from `offset + size` (see [`PageToken::next`]),
+        // so clamping only on read would advance from `negative + size` and skip
+        // rows. Tokens are unsigned and client-forgeable (ADR-0004), so this is the
+        // one place the negative is neutralized for both the served page and its
+        // successor. `PageToken::offset` stays a signed wire artifact.
+        token.offset = token.offset.max(0);
         let size = resolve_size(request.page_size(), limits)?;
         Ok(Self { token, size })
+    }
+
+    /// Where this page starts: the verified offset, clamped non-negative by
+    /// [`parse`](Self::parse), as an unsigned `u64`.
+    ///
+    /// This is the post-validation surface a list handler hands to its store
+    /// (`OFFSET ?`) — no `as u64` / `try_from` ceremony at the call site, because
+    /// the clamp already happened.
+    pub fn offset(&self) -> u64 {
+        // Clamped non-negative at parse, so the cast cannot wrap into the high
+        // `u64` range.
+        self.token.offset as u64
+    }
+
+    /// The effective page size as an unsigned `u64` — the AIP-158 size after the
+    /// [`SizeLimits`] default/cap, floored at zero by [`resolve_size`].
+    ///
+    /// The unsigned partner to [`offset`](Self::offset): the width a handler passes
+    /// to a store or compares a result length against, cast-free.
+    pub fn size(&self) -> u64 {
+        // Floored at zero by `resolve_size`, so the cast cannot wrap.
+        self.size as u64
+    }
+
+    /// The `LIMIT` for the overfetch probe: this page's [`size`](Self::size) plus
+    /// one. Fetching one row past the page turns "is there another page?" into a
+    /// length check the store answers for free — the extra row's *presence* is the
+    /// `has_more` signal, and [`split_overfetch`](Self::split_overfetch) truncates
+    /// it back off before the response. See the **Overfetch probe** glossary entry.
+    pub fn fetch_limit(&self) -> u64 {
+        // `size` is bounded by `SizeLimits.max` (an `i32`), so `+ 1` cannot overflow
+        // a `u64`.
+        self.size() + 1
+    }
+
+    /// Apply this page to a collection that **lives in memory**: slice out the
+    /// page's window, decide whether more remain, and mint the
+    /// `next_page_token` — returning the page rows paired with that token.
+    ///
+    /// For the freight demo this is the shipper `BTreeMap` listing and any
+    /// post-filter set (e.g. the soft-delete visibility filter) — collections the
+    /// handler already holds in full. The `Vec` is consumed and the page drained
+    /// out of it in place, so there are no element clones.
+    ///
+    /// **Do not** `fetch_all().apply(..)` a store-backed listing to use this: that
+    /// pulls the whole table into memory to serve one page, exactly what the
+    /// [`fetch_limit`](Self::fetch_limit) / [`split_overfetch`](Self::split_overfetch)
+    /// pair exists to avoid. This helper is for collections that are *already*
+    /// resident, not a shortcut around paging in the store.
+    pub fn apply<T>(&self, mut items: Vec<T>) -> (Vec<T>, String) {
+        let total = items.len();
+        // `offset`/`size` are bounded unsigned values; saturate the `usize`
+        // conversions so a 32-bit target degrades to "past the end" (an empty page)
+        // rather than wrapping. `.min(total)` keeps both within the collection.
+        let start = usize::try_from(self.offset())
+            .unwrap_or(usize::MAX)
+            .min(total);
+        let width = usize::try_from(self.size()).unwrap_or(usize::MAX);
+        let end = start.saturating_add(width).min(total);
+        // More remain only when this page stops short of the full collection.
+        let token = self.next_token(end < total);
+        // Drop the tail past `end`, then drain the `0..start` prefix away (the
+        // `Drain` drop shifts the rest down), leaving exactly `start..end` — no
+        // clones.
+        items.truncate(end);
+        items.drain(..start);
+        (items, token)
+    }
+
+    /// Split a store-backed **overfetch** (a `LIMIT` of [`fetch_limit`](Self::fetch_limit)
+    /// rows) into the page to return and the `next_page_token`: if the store handed
+    /// back more rows than the page size, another page remains — truncate the extra
+    /// probe row off and mint the token; otherwise the listing is exhausted.
+    ///
+    /// Pairs with [`fetch_limit`](Self::fetch_limit): the handler fetches
+    /// `fetch_limit()` rows at [`offset`](Self::offset), then hands the result
+    /// straight here. See the **Overfetch probe** glossary entry.
+    pub fn split_overfetch<T>(&self, mut rows: Vec<T>) -> (Vec<T>, String) {
+        // The probe row makes the result longer than the page exactly when a
+        // further page exists.
+        let has_more = rows.len() as u64 > self.size();
+        // Truncate is a no-op when the store returned a short final page.
+        rows.truncate(usize::try_from(self.size()).unwrap_or(usize::MAX));
+        let token = self.next_token(has_more);
+        (rows, token)
     }
 
     /// The opaque token for the page after this one, or the empty string when no
     /// further page remains.
     ///
-    /// `has_more` is the caller's "is there another page?" signal — a fetch-N+1
-    /// overflow row, or `end < total` for a total-count handler. When set, the
+    /// The escape hatch behind [`apply`](Self::apply) and
+    /// [`split_overfetch`](Self::split_overfetch) — reach for it directly only in a
+    /// custom flow they do not cover (e.g. a total-count handler computing
+    /// `has_more` as `end < total` itself).
+    ///
+    /// `has_more` is the caller's "is there another page?" signal. When set, the
     /// token advances the offset by this page's [`size`](Self::size), carrying the
     /// request checksum forward so the next page still rejects a changed request;
     /// when unset, the empty string tells the client the listing is exhausted.
@@ -203,7 +312,7 @@ impl Page {
 /// Resolves the effective page size from a request's `page_size` per AIP-158: a
 /// negative value is [`Error::NegativePageSize`], zero/unset falls back to
 /// `limits.default`, and the result is capped at `limits.max` (the cap applies to
-/// the default too, so `default > max` self-heals to `max`).
+/// the default too, so `default > max` self-heals to `max`) and floored at zero.
 fn resolve_size(requested: i32, limits: SizeLimits) -> Result<i32, Error> {
     if requested < 0 {
         return Err(Error::NegativePageSize { requested });
@@ -215,7 +324,10 @@ fn resolve_size(requested: i32, limits: SizeLimits) -> Result<i32, Error> {
     } else {
         requested
     };
-    Ok(base.min(limits.max))
+    // Floor at zero so a degenerate [`SizeLimits`] (a non-positive `max`, a caller
+    // bug per its docs) yields a harmless 0-size page rather than a negative size
+    // that [`Page::size`]'s `as u64` cast would balloon into billions of rows.
+    Ok(base.min(limits.max).max(0))
 }
 
 /// Encodes an arbitrary cursor payload as an opaque page token.
@@ -722,6 +834,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resolve_size_floors_a_degenerate_size_limit_at_zero() {
+        // A non-positive `max` is a documented caller bug, not a checked error. The
+        // resolved size floors at 0 (a loud, harmless empty page) rather than going
+        // negative — which `Page::size`'s `as u64` cast would otherwise balloon into
+        // billions of rows. Both an unset and a positive request size land there.
+        let degenerate = SizeLimits {
+            default: 50,
+            max: 0,
+        };
+        assert_eq!(resolve_size(0, degenerate).expect("unset → floored 0"), 0);
+        assert_eq!(resolve_size(10, degenerate).expect("capped to 0"), 0);
+
+        // A negative `max` caps below zero, then the floor lifts it back to 0.
+        let negative_max = SizeLimits {
+            default: 50,
+            max: -5,
+        };
+        assert_eq!(resolve_size(10, negative_max).expect("floored 0"), 0);
+    }
+
     // `Page::parse` folds `request_checksum` + `PageToken::parse` + `resolve_size`,
     // each unit-tested above. The fold needs a `PageRequest + ReflectMessage`
     // request — a generated type, which the crate's `DynamicMessage` fixtures are
@@ -749,5 +882,123 @@ mod tests {
         let decoded: PageToken = decode_page_token(&next).expect("the next token round-trips");
         assert_eq!(decoded.offset, 30);
         assert_eq!(decoded.request_checksum, 0x1234);
+    }
+
+    /// Builds a [`Page`] at `offset` with page size `size` — the unsigned accessors'
+    /// post-validation state, constructed directly (private fields are in reach
+    /// crate-internally) so the apply/overfetch helpers can be unit-tested without a
+    /// generated `PageRequest + ReflectMessage` request.
+    fn page(offset: i64, size: i32) -> Page {
+        Page {
+            token: PageToken {
+                offset,
+                request_checksum: 0x1234,
+            },
+            size,
+        }
+    }
+
+    /// Decodes a non-empty `next_page_token` back to its offset, asserting it is
+    /// non-empty first — the shape every "more pages remain" assertion below checks.
+    fn next_offset(token: &str) -> i64 {
+        let decoded: PageToken = decode_page_token(token).expect("a non-empty token round-trips");
+        decoded.offset
+    }
+
+    #[test]
+    fn offset_and_size_accessors_are_unsigned() {
+        // The post-validation surface: a clamped offset and a floored size read back
+        // as plain `u64`, no cast at the call site.
+        let page = page(20, 10);
+        assert_eq!(page.offset(), 20);
+        assert_eq!(page.size(), 10);
+    }
+
+    #[test]
+    fn fetch_limit_is_size_plus_one() {
+        // The overfetch probe pulls one row past the page so its presence answers
+        // `has_more`.
+        assert_eq!(page(0, 10).fetch_limit(), 11);
+        assert_eq!(page(40, 0).fetch_limit(), 1);
+    }
+
+    #[test]
+    fn apply_empty_collection_yields_empty_page_and_no_token() {
+        // Nothing in memory ⇒ an empty page and an exhausted listing.
+        let (items, token) = page(0, 10).apply(Vec::<u32>::new());
+        assert!(items.is_empty());
+        assert_eq!(token, "");
+    }
+
+    #[test]
+    fn apply_full_page_mid_listing_mints_next_token() {
+        // A full page with rows beyond it: the window is sliced out and the token
+        // advances the offset by the page size.
+        let (items, token) = page(0, 2).apply(vec![10, 20, 30, 40, 50]);
+        assert_eq!(items, [10, 20]);
+        assert_eq!(next_offset(&token), 2);
+
+        // The second page starts where the first stopped.
+        let (items, token) = page(2, 2).apply(vec![10, 20, 30, 40, 50]);
+        assert_eq!(items, [30, 40]);
+        assert_eq!(next_offset(&token), 4);
+    }
+
+    #[test]
+    fn apply_exact_fit_last_page_has_no_next_token() {
+        // The page ends exactly at the collection's end ⇒ no further page.
+        let (items, token) = page(2, 2).apply(vec![10, 20, 30, 40]);
+        assert_eq!(items, [30, 40]);
+        assert_eq!(token, "");
+    }
+
+    #[test]
+    fn apply_under_filled_last_page_has_no_next_token() {
+        // A final page shorter than the page size ⇒ the listing is exhausted.
+        let (items, token) = page(2, 10).apply(vec![10, 20, 30]);
+        assert_eq!(items, [30]);
+        assert_eq!(token, "");
+    }
+
+    #[test]
+    fn apply_offset_past_total_yields_empty_page() {
+        // An offset beyond the collection (a stale or over-skipped token) clamps to
+        // the end: an empty page, no next token, no panic.
+        let (items, token) = page(100, 10).apply(vec![10, 20, 30]);
+        assert!(items.is_empty());
+        assert_eq!(token, "");
+    }
+
+    #[test]
+    fn split_overfetch_overfull_truncates_and_mints_token() {
+        // The store handed back `size + 1` rows: the probe row proves a further page
+        // exists. Truncate it off, mint the token advancing past this page.
+        let (rows, token) = page(0, 2).split_overfetch(vec![10, 20, 30]);
+        assert_eq!(rows, [10, 20]);
+        assert_eq!(next_offset(&token), 2);
+    }
+
+    #[test]
+    fn split_overfetch_exact_fit_has_no_next_token() {
+        // Exactly `size` rows came back ⇒ no probe row ⇒ the listing is exhausted.
+        let (rows, token) = page(0, 2).split_overfetch(vec![10, 20]);
+        assert_eq!(rows, [10, 20]);
+        assert_eq!(token, "");
+    }
+
+    #[test]
+    fn split_overfetch_under_filled_page_has_no_next_token() {
+        // A short final page (fewer than `size` rows) ⇒ exhausted.
+        let (rows, token) = page(4, 2).split_overfetch(vec![50]);
+        assert_eq!(rows, [50]);
+        assert_eq!(token, "");
+    }
+
+    #[test]
+    fn split_overfetch_empty_store_yields_empty_page() {
+        // The store returned nothing ⇒ an empty page and no token.
+        let (rows, token) = page(0, 2).split_overfetch(Vec::<u32>::new());
+        assert!(rows.is_empty());
+        assert_eq!(token, "");
     }
 }
