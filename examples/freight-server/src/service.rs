@@ -491,16 +491,20 @@ impl FreightService for FreightServer {
             return Ok(Response::new(existing));
         }
         validate_shipper_name("parent", &req.parent)?;
+        // AIP-203 REQUIRED-field validation runs reflectively over the whole
+        // request, so the `BadRequest` paths are request-rooted
+        // (`site.display_name`) and every missing field comes back in one
+        // response. The library error is re-stamped to the service domain so the
+        // service presents a single AIP-193 domain to clients (ADR-0007 #118) —
+        // this replaces the hand-rolled `display_name` presence check.
+        aip::fieldbehavior::validate_required(&req)
+            .map_err(|e| e.into_status_with_domain(SERVICE_DOMAIN))?;
+        // `site` is REQUIRED, so `validate_required` already rejected a missing
+        // one above; keep the explicit guard rather than unwrapping, so this
+        // never panics on a malformed request even if that annotation changes.
         let mut site = req
             .site
             .ok_or_else(|| Status::invalid_argument("site is required"))?;
-        // Accumulate the server's own presence checks (no aip-rs primitive covers
-        // them) into one AIP-193 error, so the client sees every bad field at once.
-        let mut violations = Validator::new(SERVICE_DOMAIN, "FIELD_REQUIRED");
-        if site.display_name.is_empty() {
-            violations.add_field_violation("site.display_name", "field is required");
-        }
-        violations.into_result()?;
 
         // The validated `parent` binds the `{shipper}` of the canonical site
         // pattern; mint a system-assigned `{site}` id (a UUIDv4, per AIP-148) and
@@ -610,20 +614,20 @@ impl FreightService for FreightServer {
             return Ok(Response::new(existing));
         }
         validate_shipper_name("parent", &req.parent)?;
+        // AIP-203 REQUIRED-field validation runs reflectively over the whole
+        // request, enforcing **all six** REQUIRED fields the proto declares
+        // (`origin_site`, `destination_site`, and the four pickup/delivery
+        // timestamps) — not just the two endpoints the hand-rolled check covered.
+        // Every missing field comes back in one response, re-stamped to the
+        // service domain (ADR-0007 #118).
+        aip::fieldbehavior::validate_required(&req)
+            .map_err(|e| e.into_status_with_domain(SERVICE_DOMAIN))?;
+        // `shipment` is REQUIRED, so `validate_required` already rejected a
+        // missing one above; keep the explicit guard rather than unwrapping, so
+        // this never panics on a malformed request even if that annotation changes.
         let mut shipment = req
             .shipment
             .ok_or_else(|| Status::invalid_argument("shipment is required"))?;
-        // Both endpoints are required (AIP-203). Accumulate them into one
-        // `Validator` so a request missing both gets both violations back in a
-        // single response, rather than bailing on the first.
-        let mut violations = Validator::new(SERVICE_DOMAIN, "FIELD_REQUIRED");
-        if shipment.origin_site.is_empty() {
-            violations.add_field_violation("shipment.origin_site", "field is required");
-        }
-        if shipment.destination_site.is_empty() {
-            violations.add_field_violation("shipment.destination_site", "field is required");
-        }
-        violations.into_result()?;
 
         // The validated `parent` binds the `{shipper}` of the canonical shipment
         // pattern; mint a system-assigned `{shipment}` id (a UUIDv4, per AIP-148)
@@ -925,11 +929,14 @@ fn validate_shipper_name(field: &str, value: &str) -> Result<(), Status> {
     Ok(())
 }
 
-/// The AIP-193 `ErrorInfo.domain` for errors the server raises itself — the
-/// presence and policy checks no aip-rs primitive covers. Passed to every
-/// [`Validator`] the handlers build, so the service's own field violations carry
-/// its domain; the aip-rs crates use their own (`aip-rs`) domain for the values
-/// they validate (#16).
+/// The AIP-193 `ErrorInfo.domain` the service presents to its clients. Passed to
+/// every [`Validator`] the handlers build for the policy checks no aip-rs
+/// primitive covers (e.g. the shipper-name pattern), and — since ADR-0007 #118 —
+/// also to `Error::into_status_with_domain` so the reflective REQUIRED-field
+/// validation in `create_site` / `create_shipment` re-stamps its library error
+/// to this one service domain instead of leaking `aip-rs` to clients. Handlers
+/// that still pass library errors through `From<Error>` (e.g. the `order_by` and
+/// IAM checks) keep the `aip-rs` default (#16).
 const SERVICE_DOMAIN: &str = "freight.example.com";
 
 /// The request-metadata key the demo reads the caller's IAM **Member** identity
@@ -2075,13 +2082,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_shipment_missing_endpoints_aggregates_field_violations() {
+    async fn create_site_missing_display_name_carries_service_domain() {
         use tonic_types::StatusExt as _;
 
-        // A shipment with neither endpoint set trips both presence checks. The
-        // `Validator` accumulates them, so the client gets *both* violations in a
-        // single `BadRequest` — not just the first — carrying the service's own
-        // domain (no aip-rs primitive covers these presence checks).
+        // `create_site` validates the required `display_name` reflectively
+        // (dropping the old hand-rolled check). The request-rooted path is
+        // `site.display_name`, and the library error is re-stamped to the
+        // service domain (ADR-0007 #118).
+        let server = FreightServer::new();
+        let status = server
+            .create_site(Request::new(CreateSiteRequest {
+                parent: PARENT.to_owned(),
+                site: Some(Site::default()),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("a site without display_name is rejected");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+        let bad = status
+            .get_details_bad_request()
+            .expect("a BadRequest field violation is attached");
+        assert_eq!(bad.field_violations.len(), 1);
+        assert_eq!(bad.field_violations[0].field, "site.display_name");
+
+        let info = status
+            .get_details_error_info()
+            .expect("an ErrorInfo is attached (AIP-193 MUST)");
+        assert_eq!(info.reason, "FIELD_REQUIRED");
+        assert_eq!(info.domain, "freight.example.com");
+    }
+
+    #[tokio::test]
+    async fn create_shipment_missing_required_aggregates_field_violations() {
+        use tonic_types::StatusExt as _;
+
+        // A bare shipment is missing all six REQUIRED fields (AIP-203). The
+        // reflective validator accumulates them, so the client gets *every*
+        // violation in a single `BadRequest` — request-rooted paths under
+        // `shipment.*` — carrying the service's own domain (ADR-0007 #118).
         let server = FreightServer::new();
         let status = server
             .create_shipment(Request::new(CreateShipmentRequest {
@@ -2090,7 +2129,7 @@ mod tests {
                 ..Default::default()
             }))
             .await
-            .expect_err("a shipment missing both endpoints is rejected");
+            .expect_err("a shipment missing required fields is rejected");
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
 
         let bad = status
@@ -2103,7 +2142,14 @@ mod tests {
             .collect();
         assert_eq!(
             fields,
-            ["shipment.origin_site", "shipment.destination_site"]
+            [
+                "shipment.origin_site",
+                "shipment.destination_site",
+                "shipment.pickup_earliest_time",
+                "shipment.pickup_latest_time",
+                "shipment.delivery_earliest_time",
+                "shipment.delivery_latest_time",
+            ]
         );
 
         let info = status
@@ -2515,8 +2561,20 @@ mod tests {
         assert_eq!(list_display_names(&server, "display_name").await, ["Live"]);
     }
 
+    /// A present timestamp satisfying a shipment's REQUIRED pickup/delivery
+    /// fields (AIP-203). The reflective REQUIRED check only asks that the field
+    /// be present, so any set value suffices.
+    fn valid_time() -> Option<prost_types::Timestamp> {
+        Some(prost_types::Timestamp {
+            seconds: 1_700_000_000,
+            nanos: 0,
+        })
+    }
+
     /// Creates a shipment under `PARENT` with the given origin/destination site
-    /// references and annotations, returning the stored resource.
+    /// references and annotations, returning the stored resource. The four
+    /// REQUIRED pickup/delivery timestamps are filled so the reflective
+    /// validation in `create_shipment` passes.
     async fn create_shipment(
         server: &FreightServer,
         origin: &str,
@@ -2529,6 +2587,10 @@ mod tests {
                 shipment: Some(Shipment {
                     origin_site: origin.to_owned(),
                     destination_site: destination.to_owned(),
+                    pickup_earliest_time: valid_time(),
+                    pickup_latest_time: valid_time(),
+                    delivery_earliest_time: valid_time(),
+                    delivery_latest_time: valid_time(),
                     annotations: annotations
                         .iter()
                         .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -2572,6 +2634,10 @@ mod tests {
                 shipment: Some(Shipment {
                     origin_site: site.to_owned(),
                     destination_site: site.to_owned(),
+                    pickup_earliest_time: valid_time(),
+                    pickup_latest_time: valid_time(),
+                    delivery_earliest_time: valid_time(),
+                    delivery_latest_time: valid_time(),
                     ..Default::default()
                 }),
                 ..Default::default()

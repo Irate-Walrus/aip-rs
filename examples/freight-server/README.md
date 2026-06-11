@@ -165,8 +165,15 @@ carries no `order_by`, so results come back in resource-name order:
 
 ```sh
 # Seed a couple of shipments between sites, each carrying `annotations` (a map).
-gc -d '{"parent":"shippers/$ID","shipment":{"origin_site":"shippers/$ID/sites/a","destination_site":"shippers/$ID/sites/b","annotations":{"priority":"high"}}}' 127.0.0.1:50051 $SVC/CreateShipment
-gc -d '{"parent":"shippers/$ID","shipment":{"origin_site":"shippers/$ID/sites/b","destination_site":"shippers/$ID/sites/a","annotations":{"region":"west"}}}'   127.0.0.1:50051 $SVC/CreateShipment
+# All six REQUIRED fields (AIP-203) must be set: both endpoints and the four
+# pickup/delivery timestamps — a missing one is rejected (see below).
+gc -d '{"parent":"shippers/$ID","shipment":{"origin_site":"shippers/$ID/sites/a","destination_site":"shippers/$ID/sites/b","pickup_earliest_time":"2024-01-01T08:00:00Z","pickup_latest_time":"2024-01-01T12:00:00Z","delivery_earliest_time":"2024-01-02T08:00:00Z","delivery_latest_time":"2024-01-02T12:00:00Z","annotations":{"priority":"high"}}}' 127.0.0.1:50051 $SVC/CreateShipment
+gc -d '{"parent":"shippers/$ID","shipment":{"origin_site":"shippers/$ID/sites/b","destination_site":"shippers/$ID/sites/a","pickup_earliest_time":"2024-01-01T08:00:00Z","pickup_latest_time":"2024-01-01T12:00:00Z","delivery_earliest_time":"2024-01-02T08:00:00Z","delivery_latest_time":"2024-01-02T12:00:00Z","annotations":{"region":"west"}}}'   127.0.0.1:50051 $SVC/CreateShipment
+
+# A bare shipment is rejected with every missing REQUIRED field in one AIP-193
+# response (reason FIELD_REQUIRED / domain freight.example.com), accumulated by
+# the reflective `aip-fieldbehavior` validator (#119):
+gc -d '{"parent":"shippers/$ID","shipment":{}}'                                              127.0.0.1:50051 $SVC/CreateShipment
 
 # List all in-scope shipments, then filter: a `=` on a scalar column, and the has
 # operator over the `annotations` map (via SQLite `json_each`). The parent scope
@@ -312,9 +319,9 @@ wired up.
 | `UpdateShipper`   | `fieldmask` (typed `update` over `update_mask`), `fieldbehavior` (copy OUTPUT_ONLY from existing, validate REQUIRED in mask), `etag` (AIP-154 freshness check + re-stamp), AIP-163 `validate_only` preview | #8, #48, #59, #93, #95 | wired⁸⁹ |
 | `DeleteShipper`   | `resourcename` (validate) + generated `ShipperResourceName` (pattern match), `etag` (AIP-154 freshness check), `softdelete` (AIP-164 soft delete — stamp `delete_time`, keep the record) | #4, #82, #93, #96 | wired⁸¹⁰ |
 | `UndeleteShipper` | `resourcename` (validate) + generated `ShipperResourceName` (pattern match), `softdelete` (AIP-164 undelete — clear `delete_time` after confirming the shipper is soft-deleted, else `ALREADY_EXISTS`) | #96 | wired¹⁰ |
-| `CreateSite`      | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `SiteResourceName` (format), `validation` (accumulate REQUIRED-field violations → AIP-193), `requestid` (AIP-155 idempotent replay), AIP-163 `validate_only` preview | #5, #3, #60, #82, #94, #95 | wired⁹ |
+| `CreateSite`      | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `SiteResourceName` (format), `fieldbehavior` (reflective REQUIRED validation re-stamped to the service domain → AIP-193), `requestid` (AIP-155 idempotent replay), AIP-163 `validate_only` preview | #5, #3, #59, #82, #94, #95, #119 | wired⁹ |
 | `ListSites`       | `ordering` (parse/validate) + `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (filter + server-composed scope/soft-delete + `ORDER BY`/`LIMIT`/`OFFSET` → in-memory SQLite), with the in-memory `filtering` matcher pinned against SQLite | #9, #10, #6, #7, #11, #39, #40, #41, #42, #43, #92 | wired³ |
-| `CreateShipment`  | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `ShipmentResourceName` (format), `validation` (accumulate both REQUIRED endpoints → one AIP-193 response), `requestid` (AIP-155 idempotent replay), AIP-163 `validate_only` preview | #5, #3, #60, #82, #94, #95 | wired⁴⁹ |
+| `CreateShipment`  | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `ShipmentResourceName` (format), `fieldbehavior` (reflective REQUIRED validation of all six fields — endpoints + four pickup/delivery timestamps — re-stamped to the service domain → one AIP-193 response), `requestid` (AIP-155 idempotent replay), AIP-163 `validate_only` preview | #5, #3, #59, #82, #94, #95, #119 | wired⁴⁹ |
 | `ListShipments`   | `pagination` (offset + checksum guard) + `filtering`/`aip-sql` (filter + server-composed scope/soft-delete → in-memory SQLite) | #6, #7, #43 | wired⁴ |
 | `IAMPolicy.GetIamPolicy` / `SetIamPolicy` | `iam` (Member validation + structural read-modify-write: dedupe/normalise, `etag` optimistic concurrency, conditions⟹version-3) over a decomposed SQLite policy store (iam-go's `iam_policy_bindings` schema) | #64, #65 | wired⁵ |
 | `IAMPolicy.TestIamPermissions` | `iam` + the opt-in cel-backed `eval` adapter (`aip::iam::eval`): role→permission expansion via an example-owned catalogue, Member matching, Condition evaluation | #66, #68 | wired⁷ |
@@ -500,12 +507,16 @@ field path, a `BadRequest` field violation — see
 [`docs/adr/0007-aip193-error-details.md`](../../docs/adr/0007-aip193-error-details.md).
 So `UpdateShipper`'s bad `update_mask` path, `ListSites`'s unknown `order_by`
 field, and a stale page token all surface as structured errors with no per-call
-wiring. The server's own presence and policy checks — the ones no aip-rs
-primitive covers (e.g. a required `display_name`, both shipment endpoints, the
-shipper-name pattern) — accumulate into an `aip::validation::Validator` (#60),
-which resolves to the same AIP-193 details under the service's own domain. So a
-`CreateShipment` missing both endpoints comes back with every violation in one
-`BadRequest`, rather than one error per round-trip.
+wiring. `CreateSite` and `CreateShipment` validate their REQUIRED fields
+**reflectively** through `aip::fieldbehavior` (#119) — every missing path in one
+accumulated `BadRequest` — and re-stamp the library error to the service's own
+domain via `Error::into_status_with_domain(SERVICE_DOMAIN)` (ADR-0007 #118), so a
+`CreateShipment` missing fields returns all six violations
+(`shipment.origin_site`, `shipment.destination_site`, and the four
+pickup/delivery timestamps) under `freight.example.com` in a single response. The
+checks no primitive covers — the shipper-name pattern and other service-owned
+policy rules — still accumulate into an `aip::validation::Validator` (#60), which
+already carries the service domain.
 
 ## How the proto types are built
 
