@@ -85,6 +85,15 @@ fn policy_v3_conditional(role: &str, members: &[&str], expression: &str) -> Poli
     }
 }
 
+/// A present timestamp satisfying a shipment's REQUIRED pickup/delivery fields
+/// (AIP-203). The reflective REQUIRED check only asks that the field be present.
+fn valid_time() -> Option<prost_types::Timestamp> {
+    Some(prost_types::Timestamp {
+        seconds: 1_700_000_000,
+        nanos: 0,
+    })
+}
+
 /// Create a site under [`PARENT`] with the given display name.
 async fn seed_site(freight: &FreightServer, display_name: &str) {
     freight
@@ -529,9 +538,10 @@ async fn list_sites_aip160_filtering_and_error_details() {
         .expect("BadRequest is attached");
     assert_eq!(bad.field_violations[0].field, "bogus_field");
 
-    // A `CreateSite` missing `display_name` is rejected by the server's own
-    // presence check — no aip-rs primitive covers it — through a `Validator`
-    // that carries the service's own AIP-193 domain (`freight.example.com`).
+    // A `CreateSite` missing `display_name` is rejected by reflective REQUIRED
+    // validation (`aip-fieldbehavior`) re-stamped to the service's own AIP-193
+    // domain (`freight.example.com`), naming the request-rooted path
+    // `site.display_name` (ADR-0007 #118).
     let status = freight
         .create_site(Request::new(CreateSiteRequest {
             parent: PARENT.to_owned(),
@@ -546,6 +556,10 @@ async fn list_sites_aip160_filtering_and_error_details() {
         .expect("ErrorInfo is attached");
     assert_eq!(info.reason, "FIELD_REQUIRED");
     assert_eq!(info.domain, "freight.example.com");
+    let bad = status
+        .get_details_bad_request()
+        .expect("BadRequest is attached");
+    assert_eq!(bad.field_violations[0].field, "site.display_name");
 }
 
 // ─── Shipments journey ────────────────────────────────────────────────────────
@@ -578,6 +592,13 @@ async fn list_shipments_filtering_and_missing_endpoints_aip193() {
                 shipment: Some(Shipment {
                     origin_site: origin.to_owned(),
                     destination_site: dest.to_owned(),
+                    // All four pickup/delivery timestamps are REQUIRED (AIP-203)
+                    // and now enforced reflectively, so a valid create must set
+                    // them.
+                    pickup_earliest_time: valid_time(),
+                    pickup_latest_time: valid_time(),
+                    delivery_earliest_time: valid_time(),
+                    delivery_latest_time: valid_time(),
                     annotations: ann
                         .iter()
                         .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -632,9 +653,9 @@ async fn list_shipments_filtering_and_missing_endpoints_aip193() {
     assert_eq!(resp.shipments.len(), 1);
     assert_eq!(resp.shipments[0].origin_site, site_a);
 
-    // A `CreateShipment` missing both endpoints accumulates both violations into
-    // one `BadRequest` — a `Validator` collects them so the client gets all of
-    // them in a single response (AIP-193 + freight service domain).
+    // A bare `CreateShipment` accumulates all six REQUIRED-field violations into
+    // one `BadRequest` — the reflective validator collects them so the client
+    // gets every one in a single response (AIP-193 + freight service domain).
     let status = freight
         .create_shipment(Request::new(CreateShipmentRequest {
             parent: PARENT.to_owned(),
@@ -642,7 +663,7 @@ async fn list_shipments_filtering_and_missing_endpoints_aip193() {
             ..Default::default()
         }))
         .await
-        .expect_err("a shipment missing both endpoints is rejected");
+        .expect_err("a shipment missing required fields is rejected");
     assert_eq!(status.code(), tonic::Code::InvalidArgument);
     let bad = status
         .get_details_bad_request()
@@ -654,8 +675,15 @@ async fn list_shipments_filtering_and_missing_endpoints_aip193() {
         .collect();
     assert_eq!(
         fields,
-        ["shipment.origin_site", "shipment.destination_site"],
-        "both missing endpoints appear in one BadRequest"
+        [
+            "shipment.origin_site",
+            "shipment.destination_site",
+            "shipment.pickup_earliest_time",
+            "shipment.pickup_latest_time",
+            "shipment.delivery_earliest_time",
+            "shipment.delivery_latest_time",
+        ],
+        "every missing REQUIRED field appears in one BadRequest"
     );
     let info = status
         .get_details_error_info()

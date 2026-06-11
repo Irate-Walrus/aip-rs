@@ -44,8 +44,31 @@ fn required_errors_on_missing_field() {
     let msg = shipper("{}");
     let err = validate_required_dynamic(&msg).expect_err("display_name is required");
     match err {
-        Error::RequiredField { path } => assert_eq!(path, "display_name"),
-        other => panic!("expected RequiredField, got {other:?}"),
+        Error::RequiredFields { paths } => assert_eq!(paths, ["display_name"]),
+        other => panic!("expected RequiredFields, got {other:?}"),
+    }
+}
+
+#[test]
+fn required_accumulates_every_missing_field() {
+    // A bare Shipment is missing all six REQUIRED fields; the maskless validator
+    // collects every path in declaration order rather than bailing on the first
+    // (ADR-0007).
+    let msg = shipment("{}");
+    let err = validate_required_dynamic(&msg).expect_err("all REQUIRED fields are missing");
+    match err {
+        Error::RequiredFields { paths } => assert_eq!(
+            paths,
+            [
+                "origin_site",
+                "destination_site",
+                "pickup_earliest_time",
+                "pickup_latest_time",
+                "delivery_earliest_time",
+                "delivery_latest_time",
+            ]
+        ),
+        other => panic!("expected RequiredFields, got {other:?}"),
     }
 }
 
@@ -71,8 +94,8 @@ fn required_with_mask_wildcard_catches_missing() {
     let err = validate_required_with_mask_dynamic(&msg, &mask(&["*"]))
         .expect_err("display_name is required");
     match err {
-        Error::RequiredField { path } => assert_eq!(path, "display_name"),
-        other => panic!("expected RequiredField, got {other:?}"),
+        Error::RequiredFields { paths } => assert_eq!(paths, ["display_name"]),
+        other => panic!("expected RequiredFields, got {other:?}"),
     }
 }
 
@@ -91,8 +114,8 @@ fn required_with_mask_catches_missing_nested_field() {
     let err = validate_required_with_mask_dynamic(&msg, &mask(&["origin_site"]))
         .expect_err("origin_site is required");
     match err {
-        Error::RequiredField { path } => assert_eq!(path, "origin_site"),
-        other => panic!("expected RequiredField, got {other:?}"),
+        Error::RequiredFields { paths } => assert_eq!(paths, ["origin_site"]),
+        other => panic!("expected RequiredFields, got {other:?}"),
     }
 }
 

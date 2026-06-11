@@ -189,9 +189,12 @@ pub fn copy_fields<M: ReflectMessage + Default>(dst: &mut M, src: &M, behaviors:
 /// Errors produced by the validation side of the field-behavior primitive.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// A field tagged `REQUIRED` is unset (zero / nil / empty) in the message.
-    #[error("missing required field: {path}")]
-    RequiredField { path: String },
+    /// One or more fields tagged `REQUIRED` are unset (zero / nil / empty) in the
+    /// message. The validator accumulates **every** missing path rather than
+    /// bailing on the first, so a caller sees all violations in one response
+    /// (ADR-0007).
+    #[error("missing required fields: {}", paths.join(", "))]
+    RequiredFields { paths: Vec<String> },
     /// A field tagged `IMMUTABLE` changed its value within the update mask.
     #[error("immutable field cannot be changed: {path}")]
     ImmutableField { path: String },
@@ -202,13 +205,15 @@ pub enum Error {
 }
 
 /// The [Dynamic core](self) of the required-field validator: returns
-/// [`Error::RequiredField`] if any field tagged `REQUIRED` is unset, recursing
-/// into nested messages, lists, and maps (ADR-0009).
+/// [`Error::RequiredFields`] listing **every** field tagged `REQUIRED` that is
+/// unset, recursing into nested messages, lists, and maps (ADR-0009).
 ///
 /// Equivalent to calling [`validate_required_with_mask_dynamic`] with a
 /// wildcard mask — all `REQUIRED` fields are checked.
 pub fn validate_required_dynamic(msg: &DynamicMessage) -> Result<(), Error> {
-    validate_required_inner(msg, None, "")
+    let mut paths = Vec::new();
+    validate_required_inner(msg, None, "", &mut paths);
+    into_required_result(paths)
 }
 
 /// Returns [`Error::RequiredField`] if any `REQUIRED` field in `msg` is unset.
@@ -233,7 +238,9 @@ pub fn validate_required_with_mask_dynamic(
     if mask.paths.is_empty() {
         return Ok(());
     }
-    validate_required_inner(msg, Some(mask), "")
+    let mut paths = Vec::new();
+    validate_required_inner(msg, Some(mask), "", &mut paths);
+    into_required_result(paths)
 }
 
 /// Validates only `REQUIRED` fields whose exact path appears in `mask`. The
@@ -436,15 +443,29 @@ fn recurse_clear(msg: &mut DynamicMessage, field: &FieldDescriptor, behaviors: &
     }
 }
 
+/// Collapses an accumulated path list into a result: `Ok(())` when empty, else
+/// one [`Error::RequiredFields`] carrying every missing path.
+fn into_required_result(paths: Vec<String>) -> Result<(), Error> {
+    if paths.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::RequiredFields { paths })
+    }
+}
+
 /// Inner recursion for `validate_required_dynamic` and `validate_required_with_mask_dynamic`.
 ///
 /// `mask = None` means "check all REQUIRED fields" (the maskless variant).
 /// `mask = Some(m)` means "check only fields with an exact path in m".
+///
+/// Accumulates every missing REQUIRED path into `missing` rather than returning
+/// on the first, so the caller reports all violations at once (ADR-0007).
 fn validate_required_inner(
     msg: &DynamicMessage,
     mask: Option<&FieldMask>,
     path: &str,
-) -> Result<(), Error> {
+    missing: &mut Vec<String>,
+) {
     let descriptor = msg.descriptor();
     for field in descriptor.fields() {
         let curr_path = join_path(path, field.name());
@@ -454,7 +475,7 @@ fn validate_required_inner(
             if has(&field, FieldBehavior::Required)
                 && mask.is_none_or(|m| has_exact_path(m, &curr_path))
             {
-                return Err(Error::RequiredField { path: curr_path });
+                missing.push(curr_path);
             }
         } else {
             // Recurse into set message fields.
@@ -464,7 +485,7 @@ fn validate_required_inner(
                     if let Value::List(list) = v.as_ref() {
                         for item in list {
                             if let Value::Message(nested) = item {
-                                validate_required_inner(nested, mask, &curr_path)?;
+                                validate_required_inner(nested, mask, &curr_path, missing);
                             }
                         }
                     }
@@ -480,7 +501,7 @@ fn validate_required_inner(
                     if let Value::Map(map) = v.as_ref() {
                         for item in map.values() {
                             if let Value::Message(nested) = item {
-                                validate_required_inner(nested, mask, &curr_path)?;
+                                validate_required_inner(nested, mask, &curr_path, missing);
                             }
                         }
                     }
@@ -488,14 +509,13 @@ fn validate_required_inner(
                 Kind::Message(_) => {
                     let v = msg.get_field(&field);
                     if let Value::Message(nested) = v.as_ref() {
-                        validate_required_inner(nested, mask, &curr_path)?;
+                        validate_required_inner(nested, mask, &curr_path, missing);
                     }
                 }
                 _ => {}
             }
         }
     }
-    Ok(())
 }
 
 /// Inner recursion for `validate_immutable_not_changed_dynamic`.
@@ -624,52 +644,73 @@ fn has_path_with_prefix(mask: &FieldMask, needle: &str) -> bool {
     false
 }
 
-/// The AIP-193 `ErrorInfo.domain` for every error this crate maps.
+/// The default AIP-193 `ErrorInfo.domain` for every error this crate maps. A
+/// deploying service overrides it per call via [`Error::into_status_with_domain`]
+/// so library-caught violations carry the service's own domain (ADR-0007).
 #[cfg(feature = "tonic")]
 const ERROR_DOMAIN: &str = "aip-rs";
 
 #[cfg(feature = "tonic")]
-impl From<Error> for tonic::Status {
-    /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details: an `ErrorInfo`
-    /// (machine-readable `reason` + [`domain`](ERROR_DOMAIN), with the error's
-    /// dynamic values as `metadata`) and, when the error names a field path, a
-    /// `BadRequest` field violation keyed on that path.
-    /// See `docs/adr/0007-aip193-error-details.md`.
-    fn from(err: Error) -> Self {
+impl Error {
+    /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details, stamping
+    /// `domain` into the `ErrorInfo` in place of the default [`ERROR_DOMAIN`]
+    /// (`aip-rs`). The `reason` and `metadata` are unchanged — a service
+    /// re-domains a library error without inventing its own machine-readable
+    /// `reason` (for that it raises its own check through `aip-validation`).
+    ///
+    /// The details: an `ErrorInfo` on every error (the AIP-193 MUST) and, when
+    /// the error names field paths, one `BadRequest` violation per path. See
+    /// `docs/adr/0007-aip193-error-details.md`.
+    pub fn into_status_with_domain(self, domain: impl Into<String>) -> tonic::Status {
         use std::collections::HashMap;
         use tonic_types::{ErrorDetails, StatusExt};
 
-        let message = err.to_string();
-        let (reason, metadata, violation): (
-            &str,
-            HashMap<String, String>,
-            Option<(String, String)>,
-        ) = match &err {
-            Error::RequiredField { path } => (
-                "FIELD_REQUIRED",
-                HashMap::from([("path".to_owned(), path.clone())]),
-                Some((path.clone(), "field is required".to_owned())),
-            ),
-            Error::ImmutableField { path } => (
-                "FIELD_IMMUTABLE",
-                HashMap::from([("path".to_owned(), path.clone())]),
-                Some((path.clone(), "immutable field cannot be changed".to_owned())),
-            ),
-            Error::TypeMismatch { old, updated } => (
-                "FIELD_BEHAVIOR_TYPE_MISMATCH",
-                HashMap::from([
-                    ("old".to_owned(), old.clone()),
-                    ("updated".to_owned(), updated.clone()),
-                ]),
-                None,
-            ),
-        };
+        let message = self.to_string();
+        let (reason, metadata, violations): (&str, HashMap<String, String>, Vec<(String, String)>) =
+            match &self {
+                Error::RequiredFields { paths } => (
+                    "FIELD_REQUIRED",
+                    // Mirror the offending paths under `fields`, matching
+                    // `aip-validation`'s wire shape so a service can swap a
+                    // hand-rolled `Validator` for the reflective validator without
+                    // changing what clients see (ADR-0007).
+                    HashMap::from([("fields".to_owned(), paths.join(", "))]),
+                    paths
+                        .iter()
+                        .map(|path| (path.clone(), "field is required".to_owned()))
+                        .collect(),
+                ),
+                Error::ImmutableField { path } => (
+                    "FIELD_IMMUTABLE",
+                    HashMap::from([("path".to_owned(), path.clone())]),
+                    vec![(path.clone(), "immutable field cannot be changed".to_owned())],
+                ),
+                Error::TypeMismatch { old, updated } => (
+                    "FIELD_BEHAVIOR_TYPE_MISMATCH",
+                    HashMap::from([
+                        ("old".to_owned(), old.clone()),
+                        ("updated".to_owned(), updated.clone()),
+                    ]),
+                    Vec::new(),
+                ),
+            };
         let mut details = ErrorDetails::new();
-        details.set_error_info(reason, ERROR_DOMAIN, metadata);
-        if let Some((field, description)) = violation {
+        details.set_error_info(reason, domain, metadata);
+        for (field, description) in violations {
             details.add_bad_request_violation(field, description);
         }
         tonic::Status::with_error_details(tonic::Code::InvalidArgument, message, details)
+    }
+}
+
+#[cfg(feature = "tonic")]
+impl From<Error> for tonic::Status {
+    /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details under the default
+    /// [`ERROR_DOMAIN`] (`aip-rs`). A service that wants its own domain calls
+    /// [`Error::into_status_with_domain`] instead. See
+    /// `docs/adr/0007-aip193-error-details.md`.
+    fn from(err: Error) -> Self {
+        err.into_status_with_domain(ERROR_DOMAIN)
     }
 }
 
@@ -680,8 +721,8 @@ mod tonic_tests {
 
     #[test]
     fn required_field_attaches_bad_request_violation() {
-        let status: tonic::Status = Error::RequiredField {
-            path: "display_name".to_owned(),
+        let status: tonic::Status = Error::RequiredFields {
+            paths: vec!["display_name".to_owned()],
         }
         .into();
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
@@ -691,11 +732,76 @@ mod tonic_tests {
             .expect("ErrorInfo always attached (AIP-193)");
         assert_eq!(info.reason, "FIELD_REQUIRED");
         assert_eq!(info.domain, ERROR_DOMAIN);
+        assert_eq!(
+            info.metadata.get("fields").map(String::as_str),
+            Some("display_name")
+        );
 
         let bad = status
             .get_details_bad_request()
             .expect("BadRequest attached for path errors");
         assert_eq!(bad.field_violations.len(), 1);
+        assert_eq!(bad.field_violations[0].field, "display_name");
+    }
+
+    #[test]
+    fn required_fields_accumulate_one_violation_per_path() {
+        // Several missing REQUIRED fields map to one BadRequest per path plus a
+        // single comma-joined `fields` metadata key (ADR-0007).
+        let status: tonic::Status = Error::RequiredFields {
+            paths: vec!["origin_site".to_owned(), "destination_site".to_owned()],
+        }
+        .into();
+
+        let info = status
+            .get_details_error_info()
+            .expect("ErrorInfo always attached (AIP-193)");
+        assert_eq!(
+            info.metadata.get("fields").map(String::as_str),
+            Some("origin_site, destination_site")
+        );
+
+        let bad = status
+            .get_details_bad_request()
+            .expect("BadRequest attached for path errors");
+        let fields: Vec<&str> = bad
+            .field_violations
+            .iter()
+            .map(|v| v.field.as_str())
+            .collect();
+        assert_eq!(fields, ["origin_site", "destination_site"]);
+    }
+
+    #[test]
+    fn into_status_with_domain_overrides_the_default_domain() {
+        // The default conversion yields `aip-rs`; the override stamps the
+        // caller's service domain while leaving `reason` and `metadata` intact
+        // (ADR-0007 #118).
+        let default: tonic::Status = Error::RequiredFields {
+            paths: vec!["display_name".to_owned()],
+        }
+        .into();
+        assert_eq!(
+            default
+                .get_details_error_info()
+                .expect("ErrorInfo attached")
+                .domain,
+            "aip-rs"
+        );
+
+        let overridden = Error::RequiredFields {
+            paths: vec!["display_name".to_owned()],
+        }
+        .into_status_with_domain("freight.example.com");
+        let info = overridden
+            .get_details_error_info()
+            .expect("ErrorInfo attached");
+        assert_eq!(info.domain, "freight.example.com");
+        assert_eq!(info.reason, "FIELD_REQUIRED");
+        // The override changes only the domain — the field violation is unchanged.
+        let bad = overridden
+            .get_details_bad_request()
+            .expect("BadRequest attached");
         assert_eq!(bad.field_violations[0].field, "display_name");
     }
 
@@ -712,6 +818,8 @@ mod tonic_tests {
             .expect("ErrorInfo always attached (AIP-193)");
         assert_eq!(info.reason, "FIELD_IMMUTABLE");
         assert_eq!(info.domain, ERROR_DOMAIN);
+        // `validate_immutable_not_changed` keeps bail-on-first, so it stays a
+        // single-path error mirrored under `path` (ADR-0007).
 
         let bad = status
             .get_details_bad_request()
