@@ -10,9 +10,9 @@ pub struct SiteResourceName {
 }
 
 /// The compiled `shippers/{shipper}/sites/{site}` pattern, parsed once.
-static SITE_RESOURCE_NAME_PATTERN: ::std::sync::LazyLock<::aip_resourcename::Pattern> =
+static SITE_RESOURCE_NAME_PATTERN: ::std::sync::LazyLock<::aip::resourcename::Pattern> =
     ::std::sync::LazyLock::new(|| {
-        ::aip_resourcename::Pattern::parse(SiteResourceName::PATTERN)
+        ::aip::resourcename::Pattern::parse(SiteResourceName::PATTERN)
             .expect("a generated pattern parses")
     });
 
@@ -28,11 +28,11 @@ impl SiteResourceName {
     pub fn new(
         shipper: impl Into<String>,
         site: impl Into<String>,
-    ) -> Result<Self, ::aip_resourcename::Error> {
+    ) -> Result<Self, ::aip::resourcename::Error> {
         let shipper = shipper.into();
         let site = site.into();
-        ::aip_resourcename::validate_variable("shipper", &shipper)?;
-        ::aip_resourcename::validate_variable("site", &site)?;
+        ::aip::resourcename::validate_variable("shipper", &shipper)?;
+        ::aip::resourcename::validate_variable("site", &site)?;
         Ok(Self { shipper, site })
     }
 
@@ -47,22 +47,22 @@ impl SiteResourceName {
     }
 
     /// Parse a resource name string into its typed variables.
-    pub fn parse(name: &str) -> Result<Self, ::aip_resourcename::Error> {
+    pub fn parse(name: &str) -> Result<Self, ::aip::resourcename::Error> {
         let Some(captures) = SITE_RESOURCE_NAME_PATTERN.match_name(name) else {
-            return Err(::aip_resourcename::Error::PatternMismatch {
+            return Err(::aip::resourcename::Error::PatternMismatch {
                 pattern: Self::PATTERN.to_owned(),
             });
         };
         Ok(Self {
             shipper: captures
                 .get("shipper")
-                .ok_or_else(|| ::aip_resourcename::Error::MissingVariable {
+                .ok_or_else(|| ::aip::resourcename::Error::MissingVariable {
                     name: "shipper".to_owned(),
                 })?
                 .to_owned(),
             site: captures
                 .get("site")
-                .ok_or_else(|| ::aip_resourcename::Error::MissingVariable {
+                .ok_or_else(|| ::aip::resourcename::Error::MissingVariable {
                     name: "site".to_owned(),
                 })?
                 .to_owned(),
@@ -92,7 +92,7 @@ impl ::std::fmt::Display for SiteResourceName {
 }
 
 impl ::std::str::FromStr for SiteResourceName {
-    type Err = ::aip_resourcename::Error;
+    type Err = ::aip::resourcename::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::parse(s)

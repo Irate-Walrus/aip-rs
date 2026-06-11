@@ -195,8 +195,14 @@ impl Storage {
     /// `json_each`, and `delete_time` (NULL when live) for the soft-delete
     /// predicate (#43).
     pub fn put_shipment(&self, shipment: Shipment) {
-        let create_time = shipment.create_time.as_ref().map(aip::sql::format_timestamp);
-        let delete_time = shipment.delete_time.as_ref().map(aip::sql::format_timestamp);
+        let create_time = shipment
+            .create_time
+            .as_ref()
+            .map(aip::sql::format_timestamp);
+        let delete_time = shipment
+            .delete_time
+            .as_ref()
+            .map(aip::sql::format_timestamp);
         let annotations =
             serde_json::to_string(&shipment.annotations).expect("serialize annotations");
         self.shipments

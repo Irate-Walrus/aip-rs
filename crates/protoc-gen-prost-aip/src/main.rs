@@ -29,7 +29,7 @@
 use std::io::{Read as _, Write as _};
 use std::process::ExitCode;
 
-use aip_codegen::{generate, GenInput};
+use aip_codegen::{generate, CratePaths, GenInput};
 use aip_reflect::{request_descriptors_in_file, resource_descriptors_in_file};
 use prost::Message as _;
 use prost_reflect::DescriptorPool;
@@ -98,21 +98,24 @@ fn run(request: CodeGeneratorRequest) -> CodeGeneratorResponse {
 }
 
 /// The plugin's opt-in emission flags, parsed from the `CodeGeneratorRequest`
-/// `parameter` (buf's `opt:` entries, comma-joined `key=value` pairs). All
-/// default **off**; an unrecognized key or a value other than `true`/`false` is
-/// an error that fails the generation — a typo must not silently disable
-/// emission (ADR-0013). The `filtering` flag lands with its emission slice and
-/// is unrecognized until then.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+/// `parameter` (buf's `opt:` entries, comma-joined `key=value` pairs). Bool
+/// flags default **off**; an unrecognized key or a value other than
+/// `true`/`false` for a bool flag is an error that fails the generation — a
+/// typo must not silently disable emission (ADR-0013). The `filtering` flag
+/// lands with its emission slice and is unrecognized until then.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct Flags {
-    /// Emit `impl aip_pagination::PageRequest` for pagination-shaped requests.
+    /// Emit `impl PageRequest` for pagination-shaped requests.
     pagination: bool,
-    /// Emit `impl aip_ordering::OrderByRequest` for requests carrying `order_by`.
+    /// Emit `impl OrderByRequest` for requests carrying `order_by`.
     ordering: bool,
+    /// Route generated crate references through this umbrella root instead of
+    /// per-crate names (e.g. `"aip"` -> `::aip::pagination::PageRequest`).
+    aip_crate: Option<String>,
 }
 
 impl Flags {
-    /// Parses `parameter` (`None`/`""` means every flag off).
+    /// Parses `parameter` (`None`/`""` means every bool flag off, no crate override).
     fn parse(parameter: Option<&str>) -> Result<Self, String> {
         let mut flags = Self::default();
         for pair in parameter
@@ -123,6 +126,16 @@ impl Flags {
             let (key, value) = pair
                 .split_once('=')
                 .ok_or_else(|| format!("invalid parameter {pair:?}: expected `key=value`"))?;
+            // `aip_crate` takes a string value; all other flags take bool.
+            if key == "aip_crate" {
+                if value.is_empty() {
+                    return Err(format!(
+                        "invalid parameter {pair:?}: `aip_crate` value must not be empty"
+                    ));
+                }
+                flags.aip_crate = Some(value.to_owned());
+                continue;
+            }
             let value = match value {
                 "true" => true,
                 "false" => false,
@@ -189,7 +202,8 @@ fn generate_response(request: CodeGeneratorRequest) -> Result<Vec<File>, String>
         });
     }
 
-    let files = generate(&inputs).map_err(|e| e.to_string())?;
+    let paths = CratePaths::from_aip_crate(flags.aip_crate.as_deref());
+    let files = generate(&inputs, &paths).map_err(|e| e.to_string())?;
     Ok(files
         .into_iter()
         .map(|f| File {
@@ -212,7 +226,8 @@ mod tests {
             Flags::default(),
             Flags {
                 pagination: false,
-                ordering: false
+                ordering: false,
+                aip_crate: None,
             }
         );
     }
@@ -223,14 +238,16 @@ mod tests {
             Flags::parse(Some("pagination=true")).unwrap(),
             Flags {
                 pagination: true,
-                ordering: false
+                ordering: false,
+                aip_crate: None,
             }
         );
         assert_eq!(
             Flags::parse(Some("pagination=false")).unwrap(),
             Flags {
                 pagination: false,
-                ordering: false
+                ordering: false,
+                aip_crate: None,
             }
         );
     }
@@ -241,14 +258,16 @@ mod tests {
             Flags::parse(Some("ordering=true")).unwrap(),
             Flags {
                 pagination: false,
-                ordering: true
+                ordering: true,
+                aip_crate: None,
             }
         );
         assert_eq!(
             Flags::parse(Some("ordering=false")).unwrap(),
             Flags {
                 pagination: false,
-                ordering: false
+                ordering: false,
+                aip_crate: None,
             }
         );
     }
@@ -260,9 +279,33 @@ mod tests {
             Flags::parse(Some("pagination=true,ordering=true")).unwrap(),
             Flags {
                 pagination: true,
-                ordering: true
+                ordering: true,
+                aip_crate: None,
             }
         );
+    }
+
+    #[test]
+    fn aip_crate_flag_parses() {
+        assert_eq!(
+            Flags::parse(Some("aip_crate=aip")).unwrap(),
+            Flags {
+                pagination: false,
+                ordering: false,
+                aip_crate: Some("aip".to_owned()),
+            }
+        );
+        // Combines with bool flags.
+        assert_eq!(
+            Flags::parse(Some("pagination=true,aip_crate=aip,ordering=true")).unwrap(),
+            Flags {
+                pagination: true,
+                ordering: true,
+                aip_crate: Some("aip".to_owned()),
+            }
+        );
+        // Empty value is an error.
+        assert!(Flags::parse(Some("aip_crate=")).is_err());
     }
 
     /// A typo must fail the generation, not silently disable emission.

@@ -27,7 +27,7 @@ mod grammaticalname;
 mod methodtype;
 mod strcase;
 
-pub use generate::{generate, GenFile, GenInput};
+pub use generate::{generate, CratePaths, GenFile, GenInput};
 pub use grammaticalname::GrammaticalName;
 pub use methodtype::MethodType;
 pub use strcase::initial_upper_case;

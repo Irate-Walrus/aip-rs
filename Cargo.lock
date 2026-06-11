@@ -513,10 +513,7 @@ name = "freight-server"
 version = "0.1.0"
 dependencies = [
  "aip",
- "aip-ordering",
- "aip-pagination",
  "aip-proto",
- "aip-resourcename",
  "prost",
  "prost-reflect",
  "prost-types",

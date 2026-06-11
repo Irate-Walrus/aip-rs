@@ -39,7 +39,10 @@ mod tests {
     #[test]
     fn unix_epoch() {
         assert_eq!(
-            format_timestamp(&Timestamp { seconds: 0, nanos: 0 }),
+            format_timestamp(&Timestamp {
+                seconds: 0,
+                nanos: 0
+            }),
             "1970-01-01T00:00:00Z"
         );
     }
@@ -48,7 +51,10 @@ mod tests {
     fn known_date() {
         // 2024-03-15T11:34:56Z = 1710502496 Unix seconds
         assert_eq!(
-            format_timestamp(&Timestamp { seconds: 1710502496, nanos: 0 }),
+            format_timestamp(&Timestamp {
+                seconds: 1710502496,
+                nanos: 0
+            }),
             "2024-03-15T11:34:56Z"
         );
     }
@@ -56,7 +62,10 @@ mod tests {
     #[test]
     fn negative_clamps_to_epoch() {
         assert_eq!(
-            format_timestamp(&Timestamp { seconds: -1, nanos: 0 }),
+            format_timestamp(&Timestamp {
+                seconds: -1,
+                nanos: 0
+            }),
             "1970-01-01T00:00:00Z"
         );
     }
@@ -64,7 +73,10 @@ mod tests {
     #[test]
     fn nanoseconds_truncated() {
         assert_eq!(
-            format_timestamp(&Timestamp { seconds: 1710502496, nanos: 999_999_999 }),
+            format_timestamp(&Timestamp {
+                seconds: 1710502496,
+                nanos: 999_999_999
+            }),
             "2024-03-15T11:34:56Z"
         );
     }
