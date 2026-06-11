@@ -245,7 +245,7 @@ impl FreightService for FreightServer {
             &[FieldBehavior::OutputOnly, FieldBehavior::Immutable],
         );
         // Validate that all REQUIRED fields are populated (AIP-203).
-        aip::fieldbehavior::validate_required(&shipper).map_err(Status::from)?;
+        aip::fieldbehavior::validate_required(&shipper)?;
         // Mint a system-assigned resource ID (a UUIDv4) per AIP-148.
         // `CreateShipperRequest` has no `shipper_id` field, so there is no
         // user-supplied id to validate here; `validate_user_settable` guards
@@ -323,7 +323,7 @@ impl FreightService for FreightServer {
         // only the REQUIRED fields whose exact path is in the mask: an empty mask
         // is a no-op (nothing on the wire can blank a field), and a field the mask
         // does not name keeps its stored value.
-        aip::fieldbehavior::validate_required_with_mask(&shipper, &mask).map_err(Status::from)?;
+        aip::fieldbehavior::validate_required_with_mask(&shipper, &mask)?;
 
         // Restore all OUTPUT_ONLY fields from the stored record — the client must
         // not move server-owned timestamps (AIP-161 / AIP-203).
@@ -453,9 +453,10 @@ impl FreightService for FreightServer {
         // and stable across pages — equal `order_by` keys fall back to a fixed
         // name order. Every sortable path is in the allow-list and the schema maps
         // it, so transpilation can only fail on an allow-list/schema drift, an
-        // internal inconsistency rather than bad input.
-        let mut order = aip::sql::transpile_order_by(&order_by, &site_schema())
-            .map_err(|e| Status::internal(format!("transpile order_by: {e}")))?;
+        // internal inconsistency rather than bad input — which `aip-sql`'s
+        // `From<Error>` maps to `INTERNAL`, so a bare `?` carries the right fault
+        // without a hand-rolled `format!` (#128).
+        let mut order = aip::sql::transpile_order_by(&order_by, &site_schema())?;
         order.push(aip::sql::Order::asc("name"));
 
         // Fetch one row past the page so an extra row signals a further page (the
@@ -824,11 +825,13 @@ fn shipment_schema() -> aip::sql::Schema {
 /// [`Predicate`](aip::sql::Predicate), or `Ok(None)` for an empty filter (which
 /// lists every in-scope row). Shared by `ListSites` and `ListShipments` (#43).
 ///
-/// An invalid filter converts to `INVALID_ARGUMENT`: `check` via `aip-filtering`'s
-/// AIP-193 `From<Error>` (#16), and any construct the transpiler can't lower (e.g.
-/// a comparison between two columns) explicitly. The same `declarations` drive the
-/// check and the transpiler's type recovery — it recovers enum/timestamp/map/list
-/// typing from them (ADR-0008).
+/// An invalid filter converts to `INVALID_ARGUMENT` with AIP-193 details through
+/// each crate's `From<Error>` (#128): `check` via `aip-filtering` (#16), and an
+/// unlowerable construct (e.g. a comparison between two columns) or a malformed
+/// `duration(...)` literal via `aip-sql` — so a bare `?` carries the fault without
+/// a hand-rolled `format!`. The same `declarations` drive the check and the
+/// transpiler's type recovery — it recovers enum/timestamp/map/list typing from
+/// them (ADR-0008).
 fn parse_filter(
     filter: &str,
     declarations: &aip::filtering::Declarations,
@@ -838,8 +841,7 @@ fn parse_filter(
         return Ok(None);
     }
     let checked = aip::filtering::check(filter, declarations)?;
-    let predicate = aip::sql::transpile_filter(&checked, declarations, schema)
-        .map_err(|e| Status::invalid_argument(format!("filter: {e}")))?;
+    let predicate = aip::sql::transpile_filter(&checked, declarations, schema)?;
     Ok(Some(predicate))
 }
 
@@ -1011,7 +1013,7 @@ where
     if request_id.is_empty() {
         return Ok(None);
     }
-    aip::requestid::validate(request_id).map_err(Status::from)?;
+    aip::requestid::validate(request_id)?;
     let recorded = storage.idempotent_get(request_id);
     let matches = recorded.as_ref().map(|record| {
         Req::decode(record.request.as_slice())

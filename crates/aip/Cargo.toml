@@ -67,6 +67,7 @@ tonic = [
     "aip-validation?/tonic",
     "aip-reflect?/tonic",
     "aip-iam?/tonic",
+    "aip-sql?/tonic",
 ]
 cel-proto = ["aip-filtering?/cel-proto"]
 # Generate the google.iam.v1.Policy / Binding structure (ADR-0010), surfaced as

@@ -15,3 +15,12 @@ aip-filtering.workspace = true
 # The parsed AIP-132 Order by is the second transpile input (ADR-0008):
 # `transpile_order_by` maps its fields onto SQL `ORDER BY` columns.
 aip-ordering.workspace = true
+tonic = { workspace = true, optional = true }
+tonic-types = { workspace = true, optional = true }
+
+[features]
+# Adds `From<Error> for tonic::Status` with AIP-193 standard error details
+# (ErrorInfo) for the user-fault filter errors, and maps the server-fault
+# `UnknownIdentifier` (Schema/allow-list drift) to `INTERNAL`. See
+# docs/adr/0007-aip193-error-details.md and docs/adr/0008-aip-sql-predicate-dialect.md.
+tonic = ["dep:tonic", "dep:tonic-types"]
