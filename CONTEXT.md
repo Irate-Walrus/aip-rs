@@ -278,6 +278,17 @@ core is also the test surface and the escape hatch for a caller who holds only a
 **Dynamic message** (JSON ingestion, a generic gateway).
 _Avoid_: wrapper/inner, high-level/low-level (say facade/core).
 
+**Request descriptor**:
+The profile of which AIP-standard pagination (**Page size**, **Page token**,
+**Skip**) and **Ordering** (**Order by**) fields a request message carries, read
+by **field shape** — each field counts only when its name *and* type match — not
+by the method the request serves. It is what drives whether codegen emits the
+pagination/ordering request traits for that message. Distinct from a
+**Descriptor**: a Request descriptor is an aip-rs digest of standard-field
+presence over one message, not a `prost_reflect::MessageDescriptor`.
+_Avoid_: descriptor (the reflected message type), method type (a Request
+descriptor is read from field shape, not from the method's identity).
+
 ## Relationships
 
 - An **Order by** is an ordered list of **Ordering fields**.
@@ -299,6 +310,9 @@ _Avoid_: wrapper/inner, high-level/low-level (say facade/core).
 - A **Subscription** is a **Filter** over **Change events**, checked against a
   **Declaration**; matching decides delivery, transport delivers.
 - A **Page token** is either an **Offset page token** or a **Cursor page token**.
+- A **Request descriptor** records, by **field shape**, which **Page size** /
+  **Page token** / **Skip** / **Order by** fields a request message carries;
+  codegen emits the matching pagination/ordering request traits from it.
 - A **Resource name** is an ordered sequence of **Segments** joined by `/`.
 - A **Segment** is exactly one of: **Literal**, **Variable**, **Wildcard**.
 - A **Pattern** is matched against a **Resource name** to bind each **Variable**
