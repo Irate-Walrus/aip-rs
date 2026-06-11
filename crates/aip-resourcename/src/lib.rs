@@ -705,6 +705,7 @@ impl From<FieldError> for tonic::Status {
         use std::collections::HashMap;
         use tonic_types::{ErrorDetails, StatusExt};
 
+        let message = err.to_string();
         let description = err.source.to_string();
         let (reason, metadata): (&str, HashMap<String, String>) = match &err.source {
             Error::Empty => ("RESOURCE_NAME_EMPTY", HashMap::new()),
@@ -747,7 +748,7 @@ impl From<FieldError> for tonic::Status {
         let mut details = ErrorDetails::new();
         details.set_error_info(reason, ERROR_DOMAIN, metadata);
         details.add_bad_request_violation(&err.field, &description);
-        tonic::Status::with_error_details(tonic::Code::InvalidArgument, description, details)
+        tonic::Status::with_error_details(tonic::Code::InvalidArgument, message, details)
     }
 }
 
