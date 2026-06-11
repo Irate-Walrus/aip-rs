@@ -20,6 +20,8 @@ aip-reflect.workspace = true
 aip-resourcename.workspace = true
 
 [dev-dependencies]
-# The trait behind the generated `PageRequest` impls — the `roundtrip` test
-# compiles the golden fixtures and calls the accessors through it.
+# The traits behind the generated `PageRequest` / `OrderByRequest` impls — the
+# `roundtrip` test compiles the golden fixtures and calls the accessors through
+# them.
 aip-pagination.workspace = true
+aip-ordering.workspace = true

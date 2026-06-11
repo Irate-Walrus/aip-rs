@@ -97,3 +97,8 @@ plugins:
       # freight List requests — gets the impl generated instead of hand-written,
       # making `aip-pagination` a direct dependency of this crate.
       - pagination=true
+      # Opt in to the `aip_ordering::OrderByRequest` impls (ADR-0013): every
+      # request with `order_by` — `ListSitesRequest` alone — gets the impl
+      # generated instead of hand-written, making `aip-ordering` a direct
+      # dependency of this crate.
+      - ordering=true

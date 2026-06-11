@@ -12,7 +12,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use aip::fieldbehavior::FieldBehavior;
 use aip::iam::{Member, Permission};
-use aip::ordering::OrderByRequest;
 use aip::pagination::{PageRequest, PageToken};
 use aip::preview;
 use aip::validation::Validator;
@@ -674,19 +673,13 @@ impl FreightService for FreightServer {
     }
 }
 
-// The `PageRequest` impls the List handlers page through are **generated**
-// (ADR-0013): `protoc-gen-prost-aip` emits them into `freight_service.aip.rs`,
-// keyed on each request's AIP-158 field shape (`ListSitesRequest` alone has
-// `skip`, so it alone gets the override), behind `buf.gen.yaml`'s
-// `pagination=true`.
-
-/// Lets `aip::ordering::parse_order_by` read the AIP-132 `order_by` field off
-/// the generated request.
-impl OrderByRequest for ListSitesRequest {
-    fn order_by(&self) -> &str {
-        &self.order_by
-    }
-}
+// The `PageRequest` and `OrderByRequest` impls the List handlers read through
+// are **generated** (ADR-0013): `protoc-gen-prost-aip` emits them into
+// `freight_service.aip.rs`, keyed on each request's field shape — `PageRequest`
+// for every request with `page_token` + `page_size` (`ListSitesRequest` alone
+// has `skip`, so it alone gets the override), `OrderByRequest` for every
+// request with `order_by` (`ListSitesRequest` alone) — behind `buf.gen.yaml`'s
+// `pagination=true` / `ordering=true`.
 
 // The AIP-132 sort and AIP-158 page are pushed to SQLite (#42): `list_sites`
 // transpiles `order_by` to SQL `ORDER BY` items and the store renders `ORDER BY`
