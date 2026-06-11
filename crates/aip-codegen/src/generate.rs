@@ -1,6 +1,14 @@
-//! The resource-name generation logic: walk `google.api.resource` descriptors
-//! and emit typed resource-name wrappers layered on the runtime
-//! [`aip_resourcename::Pattern`] API (ADR-0011).
+//! The generation logic: walk `google.api.resource` descriptors and emit typed
+//! resource-name wrappers layered on the runtime [`aip_resourcename::Pattern`]
+//! API (ADR-0011), and walk **Request descriptors** and emit
+//! `impl aip_pagination::PageRequest` keyed on field shape (ADR-0013).
+//!
+//! Generated files are `use`-free and fully path-qualified
+//! (`::aip_resourcename::…`, `::aip_pagination::…`), so the consumer mounts
+//! every `*.aip.rs` directly in the module holding the prost message structs —
+//! one mount rule whether the file carries wrappers, trait impls, or both
+//! (ADR-0013). A trait impl names its prost struct (and a wrapper's [`parent`]
+//! its parent wrapper) by bare path in that shared module.
 //!
 //! Each resource yields a `<Type>ResourceName` struct — one **private** `String`
 //! field per pattern variable — built through a validated `new(...) ->
@@ -14,9 +22,14 @@
 //!
 //! A multi-segment wrapper also gets a [`parent`] accessor returning the parent
 //! pattern's typed wrapper when that parent pattern is generated in the same
-//! invocation. The parent is referenced as `super::<ParentResourceName>`, which
-//! assumes the convention each `*.aip.rs` is mounted in its own module with the
-//! wrappers re-exported flat one level up (as `examples/freight-server` does).
+//! invocation.
+//!
+//! A request message qualifies for `PageRequest` iff it has plain `string
+//! page_token` **and** `int32 page_size` fields — the Rust analog of aip-go's
+//! structural interface satisfaction — with a `skip()` override added only when
+//! it also has `int32 skip` (otherwise the trait's `0` default stands). The
+//! presence bools arrive pre-zeroed by the plugin when its `pagination` flag is
+//! off, so this generator never sees a flag.
 //!
 //! A multi-pattern resource is emitted as the single-pattern wrapper of its
 //! first pattern (aip-go's `SinglePatternStructName`); the multi-pattern
@@ -35,7 +48,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use aip_reflect::{ResourceDescriptor, ResourceType};
+use aip_reflect::{RequestDescriptor, ResourceDescriptor, ResourceType};
 use aip_resourcename::{Pattern, Scanner};
 
 use crate::Error;
@@ -51,7 +64,8 @@ pub struct GenFile {
     pub content: String,
 }
 
-/// The resources declared in one proto file — the unit of generation.
+/// The resources and request messages declared in one proto file — the unit of
+/// generation.
 ///
 /// The plugin builds these from a `CodeGeneratorRequest` (via runtime
 /// `aip-reflect`); a golden test constructs them directly.
@@ -62,13 +76,18 @@ pub struct GenInput {
     pub proto_file: String,
     /// The `google.api.resource` descriptors declared in that file.
     pub resources: Vec<ResourceDescriptor>,
+    /// The request descriptors of that file's top-level messages, with each
+    /// presence bool already zeroed by the plugin when its flag is off
+    /// (ADR-0013).
+    pub requests: Vec<RequestDescriptor>,
 }
 
-/// Generate typed resource-name wrappers, one output [`GenFile`] per input file
-/// that declares at least one patterned resource.
+/// Generate typed resource-name wrappers and request-trait impls, one output
+/// [`GenFile`] per input file whose body carries at least one of either.
 ///
-/// A resource with no patterns contributes nothing; a file whose resources all
-/// lack patterns produces no file at all (matching aip-go).
+/// A resource with no patterns contributes nothing, as does a request without
+/// the pagination field shape; a file contributing neither produces no file at
+/// all (matching aip-go).
 pub fn generate(inputs: &[GenInput]) -> Result<Vec<GenFile>, Error> {
     // A `pattern -> <Type>ResourceName` index over every resource in the whole
     // invocation, so a multi-segment wrapper can resolve its parent pattern to
@@ -77,7 +96,9 @@ pub fn generate(inputs: &[GenInput]) -> Result<Vec<GenFile>, Error> {
 
     let mut files = Vec::new();
     for input in inputs {
-        if let Some(content) = generate_file(&input.resources, &wrappers_by_pattern)? {
+        if let Some(content) =
+            generate_file(&input.resources, &input.requests, &wrappers_by_pattern)?
+        {
             files.push(GenFile {
                 path: output_path(&input.proto_file),
                 content,
@@ -108,13 +129,14 @@ fn output_path(proto_file: &str) -> String {
     format!("{stem}.aip.rs")
 }
 
-/// Generate the body of one file's resource-name wrappers, or `None` if none of
-/// the resources are patterned.
+/// Generate the body of one file's resource-name wrappers and request-trait
+/// impls, or `None` if it would be empty.
 ///
 /// `wrappers_by_pattern` is the whole-invocation `pattern -> struct name` index
 /// used to resolve a multi-segment wrapper's [`parent`](https://google.aip.dev/122).
 fn generate_file(
     resources: &[ResourceDescriptor],
+    requests: &[RequestDescriptor],
     wrappers_by_pattern: &BTreeMap<String, String>,
 ) -> Result<Option<String>, Error> {
     let mut body = String::new();
@@ -128,15 +150,51 @@ fn generate_file(
             )?;
         }
     }
+    for request in requests {
+        if request.has_page_token && request.has_page_size {
+            write_page_request(&mut body, request);
+        }
+    }
     if body.is_empty() {
         return Ok(None);
     }
     let mut out = String::new();
-    out.push_str("// @generated by protoc-gen-prost-aip (aip-codegen). DO NOT EDIT.\n\n");
-    out.push_str("use std::sync::LazyLock;\n\n");
-    out.push_str("use aip_resourcename::{Error, Pattern};\n");
+    out.push_str("// @generated by protoc-gen-prost-aip (aip-codegen). DO NOT EDIT.\n");
     out.push_str(&body);
     Ok(Some(out))
+}
+
+/// Append the `aip_pagination::PageRequest` impl for `request`, overriding the
+/// trait's `skip()` default only when the message has a `skip` field. The prost
+/// struct is named by bare path — the impl lands in the module that holds the
+/// generated message structs (ADR-0013's mount rule).
+fn write_page_request(out: &mut String, request: &RequestDescriptor) {
+    let mut line = |s: &str| {
+        let _ = writeln!(out, "{s}");
+    };
+    let message_name = &request.message_name;
+
+    line("");
+    line(&format!(
+        "/// AIP-158 pagination accessors, generated from `{message_name}`'s field shape."
+    ));
+    line(&format!(
+        "impl ::aip_pagination::PageRequest for {message_name} {{"
+    ));
+    line("    fn page_token(&self) -> &str {");
+    line("        &self.page_token");
+    line("    }");
+    line("");
+    line("    fn page_size(&self) -> i32 {");
+    line("        self.page_size");
+    line("    }");
+    if request.has_skip {
+        line("");
+        line("    fn skip(&self) -> i32 {");
+        line("        self.skip");
+        line("    }");
+    }
+    line("}");
 }
 
 /// The `<Type>ResourceName` struct name for `resource_type`, or an error if the
@@ -199,13 +257,18 @@ fn write_resource_name(
     line(&format!(
         "/// The compiled `{pattern}` pattern, parsed once."
     ));
+    // The fully-qualified type overflows the one-line form for any plausible
+    // struct name, so the static is emitted pre-broken the way rustfmt breaks
+    // it: after the `=`, then the `.expect` under the `parse` call.
     line(&format!(
-        "static {pattern_const}: LazyLock<Pattern> = LazyLock::new(|| {{"
+        "static {pattern_const}: ::std::sync::LazyLock<::aip_resourcename::Pattern> ="
     ));
+    line("    ::std::sync::LazyLock::new(|| {");
     line(&format!(
-        "    Pattern::parse({struct_name}::PATTERN).expect(\"a generated pattern parses\")"
+        "        ::aip_resourcename::Pattern::parse({struct_name}::PATTERN)"
     ));
-    line("});");
+    line("            .expect(\"a generated pattern parses\")");
+    line("    });");
     line("");
     line(&format!("impl {struct_name} {{"));
     line(&format!("    /// The resource type, `{resource_type}`."));
@@ -229,7 +292,7 @@ fn write_resource_name(
         .map(|var| format!("{var}: impl Into<String>"))
         .collect();
     let inline_sig = format!(
-        "    pub fn new({}) -> Result<Self, Error> {{",
+        "    pub fn new({}) -> Result<Self, ::aip_resourcename::Error> {{",
         params.join(", ")
     );
     if inline_sig.len() <= RUSTFMT_MAX_WIDTH {
@@ -239,14 +302,14 @@ fn write_resource_name(
         for param in &params {
             line(&format!("        {param},"));
         }
-        line("    ) -> Result<Self, Error> {");
+        line("    ) -> Result<Self, ::aip_resourcename::Error> {");
     }
     for var in &variables {
         line(&format!("        let {var} = {var}.into();"));
     }
     for var in &variables {
         line(&format!(
-            "        aip_resourcename::validate_variable(\"{var}\", &{var})?;"
+            "        ::aip_resourcename::validate_variable(\"{var}\", &{var})?;"
         ));
     }
     line(&format!("        Ok(Self {{ {} }})", variables.join(", ")));
@@ -262,11 +325,11 @@ fn write_resource_name(
 
     line("");
     line("    /// Parse a resource name string into its typed variables.");
-    line("    pub fn parse(name: &str) -> Result<Self, Error> {");
+    line("    pub fn parse(name: &str) -> Result<Self, ::aip_resourcename::Error> {");
     line(&format!(
         "        let Some(captures) = {pattern_const}.match_name(name) else {{"
     ));
-    line("            return Err(Error::PatternMismatch {");
+    line("            return Err(::aip_resourcename::Error::PatternMismatch {");
     line("                pattern: Self::PATTERN.to_owned(),");
     line("            });");
     line("        };");
@@ -274,7 +337,7 @@ fn write_resource_name(
     for var in &variables {
         line(&format!("            {var}: captures"));
         line(&format!("                .get(\"{var}\")"));
-        line("                .ok_or_else(|| Error::MissingVariable {");
+        line("                .ok_or_else(|| ::aip_resourcename::Error::MissingVariable {");
         line(&format!("                    name: \"{var}\".to_owned(),"));
         line("                })?");
         line("                .to_owned(),");
@@ -287,9 +350,7 @@ fn write_resource_name(
         line(&format!(
             "    /// The parent resource name, `{parent_pattern_str}`."
         ));
-        line(&format!(
-            "    pub fn parent(&self) -> super::{parent_name} {{"
-        ));
+        line(&format!("    pub fn parent(&self) -> {parent_name} {{"));
         line(
             "        // Each variable was validated at construction, so the parent name is valid.",
         );
@@ -301,12 +362,12 @@ fn write_resource_name(
         // the arguments fit on the `::new(...)` line, rustfmt indents `.expect`
         // one level under the receiver; when they don't, the broken `)` returns
         // to the method's indent and `.expect` follows at that indent.
-        let new_call = format!("        super::{parent_name}::new({})", args.join(", "));
+        let new_call = format!("        {parent_name}::new({})", args.join(", "));
         if new_call.len() <= RUSTFMT_MAX_WIDTH {
             line(&new_call);
             line("            .expect(\"a validated resource name has a valid parent\")");
         } else {
-            line(&format!("        super::{parent_name}::new("));
+            line(&format!("        {parent_name}::new("));
             for arg in &args {
                 line(&format!("            {arg},"));
             }
@@ -320,8 +381,8 @@ fn write_resource_name(
     // `Display` — infallible, since construction validated every variable. Emits
     // the `[(var, value), …]` array on one line when it fits, else one per line.
     line("");
-    line(&format!("impl std::fmt::Display for {struct_name} {{"));
-    line("    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {");
+    line(&format!("impl ::std::fmt::Display for {struct_name} {{"));
+    line("    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {");
     line("        // Construction validated each variable, so formatting is infallible.");
     let pairs: Vec<String> = variables
         .iter()
@@ -355,8 +416,8 @@ fn write_resource_name(
     line("}");
 
     line("");
-    line(&format!("impl std::str::FromStr for {struct_name} {{"));
-    line("    type Err = Error;");
+    line(&format!("impl ::std::str::FromStr for {struct_name} {{"));
+    line("    type Err = ::aip_resourcename::Error;");
     line("");
     line("    fn from_str(s: &str) -> Result<Self, Self::Err> {");
     line("        Self::parse(s)");

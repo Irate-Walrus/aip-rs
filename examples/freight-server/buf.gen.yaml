@@ -87,7 +87,13 @@ plugins:
       - extern_path=.google.rpc=::tonic_types
       - extern_path=.google.iam.v1=::aip_proto::google::iam::v1
       - extern_path=.google.type=::aip_proto::google::type
-  # The workspace's own resource-name plugin (ADR-0011), run from source so the
-  # generated wrappers always match the checked-out generator.
+  # The workspace's own AIP plugin (ADR-0011), run from source so the generated
+  # code always matches the checked-out generator.
   - local: ["cargo", "run", "--quiet", "--package", "protoc-gen-prost-aip"]
     out: src/gen
+    opt:
+      # Opt in to the field-shape-keyed `aip_pagination::PageRequest` impls
+      # (ADR-0013): every request with `page_token` + `page_size` — the three
+      # freight List requests — gets the impl generated instead of hand-written,
+      # making `aip-pagination` a direct dependency of this crate.
+      - pagination=true

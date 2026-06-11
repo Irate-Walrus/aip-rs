@@ -36,6 +36,7 @@ dependencies = [
 name = "aip-codegen"
 version = "0.1.0"
 dependencies = [
+ "aip-pagination",
  "aip-reflect",
  "aip-resourcename",
  "thiserror 2.0.18",
@@ -510,6 +511,7 @@ name = "freight-server"
 version = "0.1.0"
 dependencies = [
  "aip",
+ "aip-pagination",
  "aip-proto",
  "aip-resourcename",
  "prost",

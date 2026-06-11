@@ -1,25 +1,40 @@
 //! Compile the golden fixtures from `golden.rs` and exercise them — proving the
-//! generated wrappers are real, working code: validated `new`, infallible
-//! `Display`, `FromStr`/`parse` round-tripping over the runtime
-//! `aip_resourcename::Pattern` API, and a typed `parent()` accessor.
+//! generated code is real, working code: validated `new`, infallible `Display`,
+//! `FromStr`/`parse` round-tripping over the runtime `aip_resourcename::Pattern`
+//! API, a typed `parent()` accessor, and the `PageRequest` impls' accessors.
 //!
-//! The fixtures are mounted one module per file with the wrappers re-exported
-//! flat at this module's root, the convention the generated `parent()` relies on
-//! (`super::ShipperResourceName`) and that `examples/freight-server` follows.
+//! The fixtures are `use`-free and fully path-qualified, mounted **directly in
+//! the module that holds the message structs** (ADR-0013's one mount rule, as
+//! `examples/freight-server`'s `proto.rs` does) — which is also what lets the
+//! generated `parent()` name `ShipperResourceName`, and a `PageRequest` impl
+//! its request struct, by bare path. Here that module is `freight`, with stub
+//! request structs standing in for the prost-generated ones.
 
-mod shipper {
+mod freight {
+    /// Stands in for prost's `ListShippersRequest` — pagination fields, no `skip`.
+    #[derive(Default)]
+    pub struct ListShippersRequest {
+        pub page_size: i32,
+        pub page_token: String,
+    }
+
+    /// Stands in for prost's `ListSitesRequest` — pagination fields plus `skip`.
+    #[derive(Default)]
+    pub struct ListSitesRequest {
+        pub page_size: i32,
+        pub page_token: String,
+        pub skip: i32,
+    }
+
     include!("golden/einride/example/freight/v1/shipper.aip.rs");
-}
-mod site {
     include!("golden/einride/example/freight/v1/site.aip.rs");
+    include!("golden/einride/example/freight/v1/freight_service.aip.rs");
 }
 
 use std::str::FromStr;
 
-// Re-export flat so each wrapper is reachable as `super::<Name>` from the other
-// wrapper's module — what the generated `SiteResourceName::parent()` references.
-use shipper::ShipperResourceName;
-use site::SiteResourceName;
+use aip_pagination::PageRequest;
+use freight::{ListShippersRequest, ListSitesRequest, ShipperResourceName, SiteResourceName};
 
 #[test]
 fn single_variable_wrapper_round_trips() {
@@ -85,4 +100,29 @@ fn parent_returns_the_typed_parent_wrapper() {
     let parent: ShipperResourceName = site.parent();
     assert_eq!(parent, ShipperResourceName::new("acme").unwrap());
     assert_eq!(parent.to_string(), "shippers/acme");
+}
+
+/// A request without a `skip` field keeps the trait's `0` default.
+#[test]
+fn page_request_impl_reads_the_pagination_fields() {
+    let request = ListShippersRequest {
+        page_size: 25,
+        page_token: "next".to_owned(),
+    };
+    assert_eq!(request.page_token(), "next");
+    assert_eq!(request.page_size(), 25);
+    assert_eq!(request.skip(), 0, "no `skip` field -> the trait default");
+}
+
+/// A request with a `skip` field gets the generated override.
+#[test]
+fn page_request_impl_overrides_skip_when_the_field_exists() {
+    let request = ListSitesRequest {
+        page_size: 10,
+        page_token: String::new(),
+        skip: 30,
+    };
+    assert_eq!(request.page_token(), "");
+    assert_eq!(request.page_size(), 10);
+    assert_eq!(request.skip(), 30);
 }
