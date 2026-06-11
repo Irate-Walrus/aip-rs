@@ -25,3 +25,6 @@ aip-resourcename.workspace = true
 # them.
 aip-pagination.workspace = true
 aip-ordering.workspace = true
+# The golden fixtures reference `::aip_resourceid::generate_system` in `mint` /
+# `mint_under`, so the roundtrip test needs the crate in scope.
+aip-resourceid.workspace = true

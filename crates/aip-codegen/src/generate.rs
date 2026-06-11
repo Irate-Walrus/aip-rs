@@ -67,6 +67,9 @@ use crate::Error;
 pub struct CratePaths {
     /// Module path to `aip-resourcename`, e.g. `::aip_resourcename` or `::aip::resourcename`.
     pub resourcename: String,
+    /// Module path to `aip-resourceid`, e.g. `::aip_resourceid` or `::aip::resourceid`.
+    /// Used by the generated `mint` / `mint_under` constructors.
+    pub resourceid: String,
     /// Module path to `aip-pagination`, e.g. `::aip_pagination` or `::aip::pagination`.
     pub pagination: String,
     /// Module path to `aip-ordering`, e.g. `::aip_ordering` or `::aip::ordering`.
@@ -77,6 +80,7 @@ impl Default for CratePaths {
     fn default() -> Self {
         Self {
             resourcename: "::aip_resourcename".to_owned(),
+            resourceid: "::aip_resourceid".to_owned(),
             pagination: "::aip_pagination".to_owned(),
             ordering: "::aip_ordering".to_owned(),
         }
@@ -91,6 +95,7 @@ impl CratePaths {
             None => Self::default(),
             Some(root) => Self {
                 resourcename: format!("::{root}::resourcename"),
+                resourceid: format!("::{root}::resourceid"),
                 pagination: format!("::{root}::pagination"),
                 ordering: format!("::{root}::ordering"),
             },
@@ -430,6 +435,40 @@ fn write_resource_name(
     line("        })");
     line("    }");
 
+    // `parse_field` — validates the value as a resource name then matches the
+    // pattern, wrapping every error with the request field path as a
+    // `FieldError`. Handlers parse once and propagate via `?` to get the right
+    // AIP-193 `BadRequest` field violation.
+    line("");
+    line("    /// Parse `value` from request field `field`, wrapping any error with");
+    line("    /// the field path so `?` produces an AIP-193 `BadRequest` violation.");
+    line(&format!(
+        "    pub fn parse_field(field: &str, value: &str) -> Result<Self, {rn}::FieldError> {{"
+    ));
+    line("        let wrap = |source| {");
+    line(&format!(
+        "            {rn}::FieldError {{ field: field.to_owned(), source }}"
+    ));
+    line("        };");
+    line(&format!("        {rn}::validate(value).map_err(wrap)?;"));
+    line("        Self::parse(value).map_err(wrap)");
+    line("    }");
+
+    // `mint` — infallible constructor for single-variable (no parent) wrappers
+    // only; `mint_under` is the parented variant.
+    if parent.is_none() && variables.len() == 1 {
+        let last_var = variables.last().expect("at least one variable");
+        let ri = &paths.resourceid;
+        line("");
+        line("    /// Mint a resource name with a system-assigned ID (AIP-148).");
+        line("    /// A UUIDv4 is always a valid segment, so this is infallible.");
+        line("    pub fn mint() -> Self {");
+        line("        Self {");
+        line(&format!("            {last_var}: {ri}::generate_system(),"));
+        line("        }");
+        line("    }");
+    }
+
     if let Some((parent_pattern_str, parent_name, parent_variables)) = &parent {
         line("");
         line(&format!(
@@ -459,6 +498,23 @@ fn write_resource_name(
             line("        )");
             line("        .expect(\"a validated resource name has a valid parent\")");
         }
+        line("    }");
+
+        // `mint_under` — infallible constructor for parented wrappers.
+        let last_var = variables.last().expect("at least one variable");
+        let ri = &paths.resourceid;
+        line("");
+        line("    /// Mint a resource name under `parent` with a system-assigned ID (AIP-148).");
+        line("    /// A UUIDv4 is always a valid segment, so this is infallible.");
+        line(&format!(
+            "    pub fn mint_under(parent: &{parent_name}) -> Self {{"
+        ));
+        line("        Self {");
+        for var in parent_variables {
+            line(&format!("            {var}: parent.{var}().to_owned(),"));
+        }
+        line(&format!("            {last_var}: {ri}::generate_system(),"));
+        line("        }");
         line("    }");
     }
     line("}");

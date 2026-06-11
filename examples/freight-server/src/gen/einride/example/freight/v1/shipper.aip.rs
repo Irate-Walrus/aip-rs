@@ -51,6 +51,24 @@ impl ShipperResourceName {
                 .to_owned(),
         })
     }
+
+    /// Parse `value` from request field `field`, wrapping any error with
+    /// the field path so `?` produces an AIP-193 `BadRequest` violation.
+    pub fn parse_field(field: &str, value: &str) -> Result<Self, ::aip::resourcename::FieldError> {
+        let wrap = |source| {
+            ::aip::resourcename::FieldError { field: field.to_owned(), source }
+        };
+        ::aip::resourcename::validate(value).map_err(wrap)?;
+        Self::parse(value).map_err(wrap)
+    }
+
+    /// Mint a resource name with a system-assigned ID (AIP-148).
+    /// A UUIDv4 is always a valid segment, so this is infallible.
+    pub fn mint() -> Self {
+        Self {
+            shipper: ::aip::resourceid::generate_system(),
+        }
+    }
 }
 
 impl ::std::fmt::Display for ShipperResourceName {

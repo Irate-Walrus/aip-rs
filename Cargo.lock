@@ -40,6 +40,7 @@ dependencies = [
  "aip-ordering",
  "aip-pagination",
  "aip-reflect",
+ "aip-resourceid",
  "aip-resourcename",
  "thiserror 2.0.18",
 ]

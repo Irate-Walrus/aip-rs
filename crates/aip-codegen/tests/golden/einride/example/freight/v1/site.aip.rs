@@ -69,11 +69,30 @@ impl SiteResourceName {
         })
     }
 
+    /// Parse `value` from request field `field`, wrapping any error with
+    /// the field path so `?` produces an AIP-193 `BadRequest` violation.
+    pub fn parse_field(field: &str, value: &str) -> Result<Self, ::aip_resourcename::FieldError> {
+        let wrap = |source| {
+            ::aip_resourcename::FieldError { field: field.to_owned(), source }
+        };
+        ::aip_resourcename::validate(value).map_err(wrap)?;
+        Self::parse(value).map_err(wrap)
+    }
+
     /// The parent resource name, `shippers/{shipper}`.
     pub fn parent(&self) -> ShipperResourceName {
         // Each variable was validated at construction, so the parent name is valid.
         ShipperResourceName::new(self.shipper.clone())
             .expect("a validated resource name has a valid parent")
+    }
+
+    /// Mint a resource name under `parent` with a system-assigned ID (AIP-148).
+    /// A UUIDv4 is always a valid segment, so this is infallible.
+    pub fn mint_under(parent: &ShipperResourceName) -> Self {
+        Self {
+            shipper: parent.shipper().to_owned(),
+            site: ::aip_resourceid::generate_system(),
+        }
     }
 }
 

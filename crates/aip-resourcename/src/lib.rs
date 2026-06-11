@@ -679,6 +679,79 @@ impl From<Error> for tonic::Status {
     }
 }
 
+/// A resource-name error annotated with the request field that carried the
+/// offending value. Produced by the generated `parse_field` constructors.
+///
+/// `Display` renders as `"{field}: {source}"`. `From<FieldError> for
+/// tonic::Status` (under the `tonic` feature) maps to `INVALID_ARGUMENT` with
+/// the inner error's `ErrorInfo` plus a `BadRequest` field violation naming
+/// `field` — so a bare `?` in a handler produces the right AIP-193 response.
+#[derive(Debug, thiserror::Error)]
+#[error("{field}: {source}")]
+pub struct FieldError {
+    /// The request field path that carried the offending value (e.g. `"name"`).
+    pub field: String,
+    /// The underlying resource-name error.
+    pub source: Error,
+}
+
+#[cfg(feature = "tonic")]
+impl From<FieldError> for tonic::Status {
+    /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details: the inner
+    /// error's `ErrorInfo` (same reason/domain/metadata as `From<Error>`) plus
+    /// a `BadRequest` field violation naming [`field`](FieldError::field) with
+    /// the inner error's display string as the description.
+    fn from(err: FieldError) -> Self {
+        use std::collections::HashMap;
+        use tonic_types::{ErrorDetails, StatusExt};
+
+        let message = err.to_string();
+        let description = err.source.to_string();
+        let (reason, metadata): (&str, HashMap<String, String>) = match &err.source {
+            Error::Empty => ("RESOURCE_NAME_EMPTY", HashMap::new()),
+            Error::EmptySegment { index } => (
+                "RESOURCE_NAME_EMPTY_SEGMENT",
+                HashMap::from([("index".to_owned(), index.to_string())]),
+            ),
+            Error::InvalidDnsName { segment } => (
+                "RESOURCE_NAME_INVALID_SEGMENT",
+                HashMap::from([("segment".to_owned(), segment.clone())]),
+            ),
+            Error::PatternMismatch { pattern } => (
+                "RESOURCE_NAME_PATTERN_MISMATCH",
+                HashMap::from([("pattern".to_owned(), pattern.clone())]),
+            ),
+            Error::InvalidPattern(detail) => (
+                "RESOURCE_NAME_INVALID_PATTERN",
+                HashMap::from([("detail".to_owned(), detail.clone())]),
+            ),
+            Error::VariableInName { segment } => (
+                "RESOURCE_NAME_VARIABLE_IN_NAME",
+                HashMap::from([("segment".to_owned(), segment.clone())]),
+            ),
+            Error::MissingVariable { name } => (
+                "RESOURCE_NAME_MISSING_VARIABLE",
+                HashMap::from([("variable".to_owned(), name.clone())]),
+            ),
+            Error::UnknownVariable { name } => (
+                "RESOURCE_NAME_UNKNOWN_VARIABLE",
+                HashMap::from([("variable".to_owned(), name.clone())]),
+            ),
+            Error::InvalidVariable { name, reason } => (
+                "RESOURCE_NAME_INVALID_VARIABLE",
+                HashMap::from([
+                    ("variable".to_owned(), name.clone()),
+                    ("reason".to_owned(), reason.clone()),
+                ]),
+            ),
+        };
+        let mut details = ErrorDetails::new();
+        details.set_error_info(reason, ERROR_DOMAIN, metadata);
+        details.add_bad_request_violation(&err.field, &description);
+        tonic::Status::with_error_details(tonic::Code::InvalidArgument, message, details)
+    }
+}
+
 #[cfg(all(test, feature = "tonic"))]
 mod tonic_tests {
     use super::*;
@@ -705,6 +778,58 @@ mod tonic_tests {
         // A resource name is an opaque value, not a request field path, so there
         // is no BadRequest.
         assert!(status.get_details_bad_request().is_none());
+    }
+
+    #[test]
+    fn field_error_attaches_bad_request_with_the_field_path() {
+        let status: tonic::Status = FieldError {
+            field: "name".to_owned(),
+            source: Error::PatternMismatch {
+                pattern: "shippers/{shipper}".to_owned(),
+            },
+        }
+        .into();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+        let info = status
+            .get_details_error_info()
+            .expect("an ErrorInfo is always attached (AIP-193)");
+        assert_eq!(info.reason, "RESOURCE_NAME_PATTERN_MISMATCH");
+        assert_eq!(info.domain, ERROR_DOMAIN);
+        assert_eq!(
+            info.metadata.get("pattern").map(String::as_str),
+            Some("shippers/{shipper}"),
+        );
+
+        let bad = status
+            .get_details_bad_request()
+            .expect("a BadRequest field violation is attached (AIP-193)");
+        assert_eq!(bad.field_violations.len(), 1);
+        assert_eq!(bad.field_violations[0].field, "name");
+        assert!(
+            bad.field_violations[0]
+                .description
+                .contains("shippers/{shipper}"),
+            "description names the pattern"
+        );
+    }
+
+    #[test]
+    fn field_error_empty_name_carries_the_field_path() {
+        let status: tonic::Status = FieldError {
+            field: "parent".to_owned(),
+            source: Error::Empty,
+        }
+        .into();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+        let info = status.get_details_error_info().expect("ErrorInfo present");
+        assert_eq!(info.reason, "RESOURCE_NAME_EMPTY");
+
+        let bad = status
+            .get_details_bad_request()
+            .expect("BadRequest present");
+        assert_eq!(bad.field_violations[0].field, "parent");
     }
 }
 
