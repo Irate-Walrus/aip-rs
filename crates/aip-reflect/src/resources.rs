@@ -104,12 +104,22 @@ pub(crate) fn resource_on_message(message: &MessageDescriptor) -> Option<Resourc
 
 /// Whether `message` carries a singular, non-repeated `google.protobuf.Timestamp`
 /// field named `delete_time` — the AIP-164 soft-delete stamp the codegen plugin
-/// keys its `SoftDeletable` emission on. A field of the wrong type (or a repeated
-/// one) is `false`, so a near-miss silently emits no impl rather than failing
-/// generation (ADR-0013's precedent).
+/// keys its `SoftDeletable` emission on. A field of the wrong type, a repeated
+/// one, or one inside a real `oneof` is `false`, so a near-miss silently emits no
+/// impl rather than failing generation (ADR-0013's precedent).
+///
+/// The `oneof` exclusion is what keeps the contract honest: prost generates a
+/// real-`oneof` member as a variant of a separate enum field, not a top-level
+/// `Option`, so the emitted `self.delete_time.is_some()` would not compile. A
+/// proto3 `optional` field is a *synthetic* `oneof` and stays a top-level
+/// `Option`, so it is kept (mirroring how the request-field detector's
+/// `!supports_presence()` drops real oneofs but a message field always supports
+/// presence and so cannot reuse that check).
 fn has_delete_time(message: &MessageDescriptor) -> bool {
     message.get_field_by_name("delete_time").is_some_and(|f| {
-        !f.is_list() && matches!(f.kind(), Kind::Message(m) if m.full_name() == TIMESTAMP_TYPE)
+        !f.is_list()
+            && f.containing_oneof().is_none_or(|o| o.is_synthetic())
+            && matches!(f.kind(), Kind::Message(m) if m.full_name() == TIMESTAMP_TYPE)
     })
 }
 
