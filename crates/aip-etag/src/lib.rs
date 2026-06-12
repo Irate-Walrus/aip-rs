@@ -40,16 +40,17 @@
 //!
 //! # Reflection
 //!
-//! This is a **Reflective primitive** (ADR-0009): it needs a message's
-//! **Descriptor** to find the `etag` field and the `OUTPUT_ONLY` annotations.
-//! Like [`aip_pagination::request_checksum`] — and unlike the field-mask
-//! primitive — it is a pair of *single generic functions* over
-//! [`ReflectMessage`], not a Typed-facade / Dynamic-core split: both only read
-//! the resource (no decode-back, so no `Default` bound), and because
-//! [`DynamicMessage`] itself implements [`ReflectMessage`] a caller holding a
-//! dynamic message (JSON ingestion, a generic gateway) calls them directly.
+//! This is a **Reflective primitive**: it needs a message's **Descriptor** to
+//! find the `etag` field and the `OUTPUT_ONLY` annotations. Like
+//! [`aip_pagination::request_checksum`] — and unlike the field-mask primitive —
+//! it is a pair of *single generic functions* over [`ReflectMessage`], not a
+//! Typed-facade / Dynamic-core split: both only read the resource (no
+//! decode-back, so no `Default` bound), and because [`DynamicMessage`] itself
+//! implements [`ReflectMessage`] a caller holding a dynamic message (JSON
+//! ingestion, a generic gateway) calls them directly.
 //!
 //! See <https://google.aip.dev/154>.
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 use prost::Message as _;
 use prost_reflect::{DynamicMessage, ReflectMessage};
@@ -148,10 +149,11 @@ fn is_well_formed(etag: &str) -> bool {
 }
 
 /// The AIP-193 `ErrorInfo.domain` for every error this crate maps. Reason codes
-/// are unique within this domain. See `docs/adr/0007-aip193-error-details.md`.
+/// are unique within this domain.
 #[cfg(feature = "tonic")]
 const ERROR_DOMAIN: &str = "aip-rs";
 
+#[cfg_attr(docsrs, doc(cfg(feature = "tonic")))]
 #[cfg(feature = "tonic")]
 impl From<Error> for tonic::Status {
     /// Maps to a canonical gRPC code with AIP-193 standard details: an `ErrorInfo`

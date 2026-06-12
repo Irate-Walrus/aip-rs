@@ -2,13 +2,14 @@
 //!
 //! The AST is a native Rust enum (not the CEL proto) — it's filtering's primary
 //! product, so it's built to be walked. Optional CEL-proto interop lives behind
-//! the `cel-proto` feature. See `docs/adr/0003-native-filter-ast.md`.
+//! the `cel-proto` feature.
 //!
 //! Declarations are explicit (an allowlist of filterable identifiers and
 //! functions); the parse and check core is reflection-free, with `enum_ident`
 //! the one reflective hook.
 //!
 //! See <https://google.aip.dev/160>.
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 use std::collections::HashMap;
 
@@ -620,14 +621,16 @@ pub trait FilterRequest {
     fn filter(&self) -> &str;
 }
 
+#[cfg_attr(docsrs, doc(cfg(feature = "cel-proto")))]
 #[cfg(feature = "cel-proto")]
 pub mod cel_proto;
 
 /// The AIP-193 `ErrorInfo.domain` for every error this crate maps. Reason codes
-/// are unique within this domain. See `docs/adr/0007-aip193-error-details.md`.
+/// are unique within this domain.
 #[cfg(feature = "tonic")]
 const ERROR_DOMAIN: &str = "aip-rs";
 
+#[cfg_attr(docsrs, doc(cfg(feature = "tonic")))]
 #[cfg(feature = "tonic")]
 impl From<Error> for tonic::Status {
     /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details: an `ErrorInfo`

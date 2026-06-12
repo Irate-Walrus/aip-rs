@@ -3,9 +3,9 @@
 //! Page tokens are encoded with `serde` + `postcard` + base64url (a 1-byte
 //! version prefix guards against format drift) and are deliberately *not*
 //! wire-compatible with `aip-go`'s gob tokens.
-//! See `docs/adr/0004-page-token-encoding.md`.
 //!
 //! See <https://google.aip.dev/158>.
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
@@ -407,10 +407,11 @@ pub fn request_checksum<M: ReflectMessage>(request: &M) -> u32 {
 }
 
 /// The AIP-193 `ErrorInfo.domain` for every error this crate maps. Reason codes
-/// are unique within this domain. See `docs/adr/0007-aip193-error-details.md`.
+/// are unique within this domain.
 #[cfg(feature = "tonic")]
 const ERROR_DOMAIN: &str = "aip-rs";
 
+#[cfg_attr(docsrs, doc(cfg(feature = "tonic")))]
 #[cfg(feature = "tonic")]
 impl From<Error> for tonic::Status {
     /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details: an `ErrorInfo`

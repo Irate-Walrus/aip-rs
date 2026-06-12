@@ -1,5 +1,6 @@
 //! AIP-155 request identification: validate a `request_id` and name the
 //! idempotency (de-duplication) contract.
+#![cfg_attr(docsrs, feature(doc_cfg))]
 //!
 //! A `request_id` makes a mutating call idempotent: a retry carrying the same
 //! id returns the original result instead of performing the action twice (so a
@@ -75,10 +76,11 @@ impl Replay {
 }
 
 /// The AIP-193 `ErrorInfo.domain` for every error this crate maps. Reason codes
-/// are unique within this domain. See `docs/adr/0007-aip193-error-details.md`.
+/// are unique within this domain.
 #[cfg(feature = "tonic")]
 const ERROR_DOMAIN: &str = "aip-rs";
 
+#[cfg_attr(docsrs, doc(cfg(feature = "tonic")))]
 #[cfg(feature = "tonic")]
 impl From<Error> for tonic::Status {
     /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details: an `ErrorInfo`
@@ -106,6 +108,7 @@ impl From<Error> for tonic::Status {
 /// the `aip-rs` [`domain`](ERROR_DOMAIN), and the offending `request_id` as
 /// `metadata`. AIP-155 does not fix a code for this case; `ALREADY_EXISTS` is
 /// chosen for the collision semantics over a flat `INVALID_ARGUMENT`.
+#[cfg_attr(docsrs, doc(cfg(feature = "tonic")))]
 #[cfg(feature = "tonic")]
 pub fn conflict(request_id: &str) -> tonic::Status {
     use std::collections::HashMap;

@@ -31,6 +31,9 @@ dependencies = [
  "aip-softdelete",
  "aip-sql",
  "aip-validation",
+ "prost-reflect",
+ "prost-types",
+ "tonic",
 ]
 
 [[package]]

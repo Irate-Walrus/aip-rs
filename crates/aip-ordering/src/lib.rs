@@ -5,6 +5,7 @@
 //! `aip-fieldmask` for path resolution.
 //!
 //! See <https://google.aip.dev/132>.
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 use std::str::FromStr;
 
@@ -164,10 +165,11 @@ pub fn parse(request: &impl OrderByRequest) -> Result<OrderBy, Error> {
 }
 
 /// The AIP-193 `ErrorInfo.domain` for every error this crate maps. Reason codes
-/// are unique within this domain. See `docs/adr/0007-aip193-error-details.md`.
+/// are unique within this domain.
 #[cfg(feature = "tonic")]
 const ERROR_DOMAIN: &str = "aip-rs";
 
+#[cfg_attr(docsrs, doc(cfg(feature = "tonic")))]
 #[cfg(feature = "tonic")]
 impl From<Error> for tonic::Status {
     /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details: an `ErrorInfo`
