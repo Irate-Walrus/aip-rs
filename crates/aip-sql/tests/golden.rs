@@ -57,6 +57,7 @@ fn declarations() -> Declarations {
 /// JSON map / list columns behind member access and the has operator.
 fn schema() -> Schema {
     Schema::builder()
+        .column("name", "name")
         .column("display_name", "display_name")
         .column("region", "region")
         .column("size", "size")
@@ -395,33 +396,57 @@ fn order(order_by: &str) -> Vec<Order> {
 #[test]
 fn order_by_renders_multi_field_ascending_and_descending() {
     // A multi-field `order_by` maps each path to its column in priority order; the
-    // implicit and explicit `asc` render `ASC`, `desc` renders `DESC`. An
-    // order-only `Query` is just the `ORDER BY` clause, with no binds.
+    // implicit and explicit `asc` render `ASC`, `desc` renders `DESC`. The
+    // always-on resource-name tie-break trails as `name ASC`, so the order is
+    // total. An order-only `Query` is just the `ORDER BY` clause, with no binds.
     let items = order("display_name, size desc");
-    assert_eq!(items, vec![Order::asc("display_name"), Order::desc("size")]);
+    assert_eq!(
+        items,
+        vec![
+            Order::asc("display_name"),
+            Order::desc("size"),
+            Order::asc("name"),
+        ],
+    );
     let (sql, binds) = Query::new().order_by(items).render(&Sqlite);
-    assert_eq!(sql, "ORDER BY display_name ASC, size DESC");
+    assert_eq!(sql, "ORDER BY display_name ASC, size DESC, name ASC");
     assert!(binds.is_empty());
 }
 
 #[test]
 fn order_by_maps_nested_path_to_its_column() {
-    // A `.`-nested path resolves through the schema to its flattened column.
+    // A `.`-nested path resolves through the schema to its flattened column, then
+    // the resource-name tie-break trails it.
     let items = order("lat_lng.latitude desc");
-    assert_eq!(items, vec![Order::desc("latitude")]);
+    assert_eq!(items, vec![Order::desc("latitude"), Order::asc("name")]);
     assert_eq!(
         Query::new().order_by(items).render(&Sqlite).0,
-        "ORDER BY latitude DESC"
+        "ORDER BY latitude DESC, name ASC"
     );
 }
 
 #[test]
-fn empty_order_by_renders_nothing() {
-    // An empty `order_by` yields no items, so the `Query` emits no `ORDER BY`
-    // clause — here, an otherwise-empty `Query` renders to nothing at all.
+fn empty_order_by_yields_the_resource_name_tie_break() {
+    // An empty `order_by` is not empty output: the always-on tie-break makes it
+    // `name ASC`, so a consumer with no `order_by` still pages in a total, stable
+    // order. This is the contract the example server leans on for `ListShipments`.
     let items = order("");
-    assert!(items.is_empty());
-    assert_eq!(Query::new().order_by(items).render(&Sqlite).0, "");
+    assert_eq!(items, vec![Order::asc("name")]);
+    assert_eq!(
+        Query::new().order_by(items).render(&Sqlite).0,
+        "ORDER BY name ASC"
+    );
+}
+
+#[test]
+fn order_by_on_name_is_not_duplicated_by_the_tie_break() {
+    // When the user already sorts on `name`, the tie-break is skipped — in either
+    // direction — so `name` never appears twice.
+    assert_eq!(order("name desc"), vec![Order::desc("name")]);
+    assert_eq!(
+        order("display_name, name"),
+        vec![Order::asc("display_name"), Order::asc("name")],
+    );
 }
 
 #[test]

@@ -163,6 +163,16 @@ pub struct Declarations {
     idents: HashMap<String, Type>,
     /// Declared functions, keyed by name; each carries its resolvable overloads.
     functions: HashMap<String, Vec<Overload>>,
+    /// The declared **field paths**, in declaration order — the subset of
+    /// [`idents`](Self::idents) that name an addressable field
+    /// (`display_name`, `lat_lng.latitude`, the enum field `state`), *excluding*
+    /// the enum *value* names [`enum_ident`](DeclarationsBuilder::enum_ident)
+    /// also inserts (`ACTIVE`, …). A downstream column derivation
+    /// ([`Schema::for_declarations`](https://docs.rs/aip-sql)) walks these so it
+    /// derives one column per declared field and never a bare value name. Both
+    /// share the same [`Enum`](Type::Enum) type, so only this membership — not
+    /// the type — tells them apart.
+    field_paths: Vec<String>,
 }
 
 impl Declarations {
@@ -201,6 +211,29 @@ impl Declarations {
         self.idents.get(name)
     }
 
+    /// The declared **field paths** and their [`Type`]s, in declaration order.
+    ///
+    /// Yields one entry per addressable field declared by [`ident`] / [`fields`]
+    /// / the field side of [`enum_ident`] — `display_name`, `lat_lng.latitude`,
+    /// the enum field `state` — and *not* the enum *value* names `enum_ident`
+    /// also inserts (`ACTIVE`, …): those are filter literals, not fields, yet
+    /// carry the same [`Enum`](Type::Enum) type as their field, so no type test
+    /// could separate them. This is the single source a column derivation walks
+    /// to map declared fields onto SQL columns without re-listing them by hand.
+    ///
+    /// [`ident`]: DeclarationsBuilder::ident
+    /// [`fields`]: DeclarationsBuilder::fields
+    /// [`enum_ident`]: DeclarationsBuilder::enum_ident
+    pub fn field_paths(&self) -> impl Iterator<Item = (&str, &Type)> {
+        self.field_paths.iter().map(|name| {
+            let ty = self
+                .idents
+                .get(name)
+                .expect("a declared field path always has a type");
+            (name.as_str(), ty)
+        })
+    }
+
     /// Look up a declared function's overloads by name.
     pub(crate) fn lookup_function(&self, name: &str) -> Option<&[Overload]> {
         self.functions.get(name).map(Vec::as_slice)
@@ -212,6 +245,11 @@ impl Declarations {
 pub struct DeclarationsBuilder {
     idents: HashMap<String, Type>,
     functions: HashMap<String, Vec<Overload>>,
+    /// Declared field-path names in declaration order — see
+    /// [`Declarations::field_paths`]. Tracked here so [`ident`](Self::ident)
+    /// records a field while the private value-name insert in
+    /// [`enum_ident`](Self::enum_ident) does not.
+    field_paths: Vec<String>,
     /// The message descriptor [`fields`](Self::fields) resolves paths against,
     /// set by [`Declarations::for_message`]. `None` for the explicit builder.
     descriptor: Option<MessageDescriptor>,
@@ -300,8 +338,31 @@ impl DeclarationsBuilder {
 
     /// Declare a filterable identifier with a type. A repeated name replaces the
     /// earlier declaration.
-    pub fn ident(mut self, name: &str, ty: Type) -> Self {
+    ///
+    /// The `name` is recorded as a declared **field path**
+    /// ([`Declarations::field_paths`]) — it names an addressable field. The enum
+    /// *value* names [`enum_ident`](Self::enum_ident) adds go through a private
+    /// insert that does **not** record them, so a value name never masquerades as
+    /// a field.
+    pub fn ident(self, name: &str, ty: Type) -> Self {
+        self.value_ident(name, ty).record_field_path(name)
+    }
+
+    /// Insert a filterable identifier *without* recording it as a field path —
+    /// the enum value-name carrier for [`enum_ident`](Self::enum_ident). A
+    /// repeated name replaces the earlier declaration, like [`ident`](Self::ident).
+    fn value_ident(mut self, name: &str, ty: Type) -> Self {
         self.idents.insert(name.to_string(), ty);
+        self
+    }
+
+    /// Record `name` as a declared field path, keeping declaration order and not
+    /// duplicating a name already recorded (a re-declaration replaces its type in
+    /// [`idents`](Self::idents) but keeps its original position).
+    fn record_field_path(mut self, name: &str) -> Self {
+        if !self.field_paths.iter().any(|p| p == name) {
+            self.field_paths.push(name.to_string());
+        }
         self
     }
 
@@ -324,7 +385,10 @@ impl DeclarationsBuilder {
             .function(function::EQUALS, comparison.clone())
             .function(function::NOT_EQUALS, comparison);
         for value in descriptor.values() {
-            builder = builder.ident(value.name(), enum_type.clone());
+            // A value name (`ACTIVE`) is a filter literal, not an addressable
+            // field, so it is inserted without recording a field path — even
+            // though it shares the field's `Enum` type.
+            builder = builder.value_ident(value.name(), enum_type.clone());
         }
         builder
     }
@@ -413,6 +477,7 @@ impl DeclarationsBuilder {
         Ok(Declarations {
             idents: self.idents,
             functions: self.functions,
+            field_paths: self.field_paths,
         })
     }
 }
@@ -736,6 +801,44 @@ mod derive_tests {
         .fields(["enum"])
         .build();
         check("enum = ENUM_ONE", &decls).expect("the derived enum overload type-checks");
+    }
+
+    #[test]
+    fn field_paths_are_the_declared_fields_in_order_excluding_enum_values() {
+        // `state` (enum) is a declared field; its value names (`ENUM_ONE`, …) are
+        // filter literals carrying the same `Enum` type, and must NOT surface as
+        // field paths — that is exactly what a column derivation must not list.
+        let decls = derive(syntax_message(), &["string", "int32", "enum"])
+            .expect("scalar + enum fields derive");
+        let paths: Vec<_> = decls.field_paths().map(|(name, _)| name).collect();
+        assert_eq!(paths, vec!["string", "int32", "enum"]);
+        // The value names are still declared idents (so a bare value type-checks)...
+        let enum_ty = Type::Enum("einride.example.syntax.v1.Enum".to_owned());
+        assert_eq!(decls.ident_type("ENUM_ONE"), Some(&enum_ty));
+        // ...but they are not field paths.
+        assert!(decls.field_paths().all(|(name, _)| name != "ENUM_ONE"));
+    }
+
+    #[test]
+    fn field_paths_carry_the_declared_types() {
+        let decls = derive(syntax_message(), &["string", "int32"]).expect("fields derive");
+        let by_name: std::collections::HashMap<_, _> = decls.field_paths().collect();
+        assert_eq!(by_name.get("string"), Some(&&Type::String));
+        assert_eq!(by_name.get("int32"), Some(&&Type::Int));
+    }
+
+    #[test]
+    fn redeclaring_a_field_keeps_one_path_at_its_original_position() {
+        // A repeated `ident` replaces the type but must not duplicate the path
+        // (and keeps declaration order), so a derived column map stays one-per-field.
+        let decls = Declarations::builder()
+            .ident("a", Type::Int)
+            .ident("b", Type::String)
+            .ident("a", Type::Double)
+            .build();
+        let paths: Vec<_> = decls.field_paths().map(|(name, _)| name).collect();
+        assert_eq!(paths, vec!["a", "b"]);
+        assert_eq!(decls.ident_type("a"), Some(&Type::Double));
     }
 
     #[test]
