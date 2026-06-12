@@ -20,11 +20,12 @@ aip-reflect.workspace = true
 aip-resourcename.workspace = true
 
 [dev-dependencies]
-# The traits behind the generated `PageRequest` / `OrderByRequest` impls — the
-# `roundtrip` test compiles the golden fixtures and calls the accessors through
-# them.
+# The traits behind the generated `PageRequest` / `OrderByRequest` /
+# `SoftDeletable` impls — the `roundtrip` test compiles the golden fixtures and
+# calls the accessors through them.
 aip-pagination.workspace = true
 aip-ordering.workspace = true
+aip-softdelete.workspace = true
 # The golden fixtures reference `::aip_resourceid::generate_system` in `mint` /
 # `mint_under`, so the roundtrip test needs the crate in scope.
 aip-resourceid.workspace = true

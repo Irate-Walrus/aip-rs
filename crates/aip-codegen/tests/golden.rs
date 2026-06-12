@@ -35,9 +35,13 @@ fn freight_inputs() -> Vec<GenInput> {
     vec![
         GenInput {
             proto_file: "einride/example/freight/v1/shipper.proto".to_owned(),
+            // The Shipper message carries a `delete_time`, so it earns both a
+            // resource-name wrapper and a `SoftDeletable` impl (ADR-0014).
             resources: vec![ResourceDescriptor {
                 resource_type: "freight-example.einride.tech/Shipper".to_owned(),
                 patterns: vec!["shippers/{shipper}".to_owned()],
+                message_name: Some("Shipper".to_owned()),
+                has_delete_time: true,
             }],
             requests: vec![],
         },
@@ -46,6 +50,8 @@ fn freight_inputs() -> Vec<GenInput> {
             resources: vec![ResourceDescriptor {
                 resource_type: "freight-example.einride.tech/Site".to_owned(),
                 patterns: vec!["shippers/{shipper}/sites/{site}".to_owned()],
+                message_name: Some("Site".to_owned()),
+                has_delete_time: true,
             }],
             requests: vec![],
         },
@@ -130,6 +136,8 @@ fn resource_without_patterns_produces_no_file() {
             resources: vec![ResourceDescriptor {
                 resource_type: "example.com/Thing".to_owned(),
                 patterns: vec![],
+                message_name: Some("Thing".to_owned()),
+                has_delete_time: false,
             }],
             requests: vec![],
         }],
@@ -166,6 +174,8 @@ fn resource_type_without_a_type_name_is_an_error() {
             resources: vec![ResourceDescriptor {
                 resource_type: "no-slash".to_owned(),
                 patterns: vec!["things/{thing}".to_owned()],
+                message_name: Some("Thing".to_owned()),
+                has_delete_time: false,
             }],
             requests: vec![],
         }],
@@ -183,6 +193,8 @@ fn wildcard_pattern_is_rejected() {
             resources: vec![ResourceDescriptor {
                 resource_type: "example.com/Thing".to_owned(),
                 patterns: vec!["things/-".to_owned()],
+                message_name: Some("Thing".to_owned()),
+                has_delete_time: false,
             }],
             requests: vec![],
         }],
@@ -191,6 +203,66 @@ fn wildcard_pattern_is_rejected() {
     .expect_err("a wildcard is not a valid pattern");
     // Surfaced from the runtime `aip_resourcename::Pattern::parse`.
     assert!(err.to_string().contains("wildcard"), "{err}");
+}
+
+/// A resource carrying a `delete_time` earns a `SoftDeletable` impl named on its
+/// owning prost struct (`message_name`), not the wrapper — emission is
+/// resource-anchored (ADR-0014).
+#[test]
+fn soft_deletable_resource_emits_an_impl_on_its_message() {
+    let files = generate(
+        &[GenInput {
+            proto_file: "x/y.proto".to_owned(),
+            resources: vec![ResourceDescriptor {
+                resource_type: "example.com/Thing".to_owned(),
+                patterns: vec!["things/{thing}".to_owned()],
+                message_name: Some("Thing".to_owned()),
+                has_delete_time: true,
+            }],
+            requests: vec![],
+        }],
+        &CratePaths::default(),
+    )
+    .unwrap();
+    let content = &files[0].content;
+    assert!(
+        content.contains("impl ::aip_softdelete::SoftDeletable for Thing {"),
+        "the impl is named on the message struct, not the wrapper:\n{content}",
+    );
+    assert!(
+        content.contains("::aip_softdelete::State::from_deleted(self.delete_time.is_some())"),
+        "the impl reads delete_time presence:\n{content}",
+    );
+}
+
+/// The negative fixture: a resource WITHOUT a `delete_time` field gets its
+/// resource-name wrapper but no `SoftDeletable` impl — a wrong-typed or absent
+/// `delete_time` is a silent no-impl, never an error (ADR-0013's near-miss
+/// precedent, carried into ADR-0014).
+#[test]
+fn resource_without_delete_time_emits_no_soft_deletable() {
+    let files = generate(
+        &[GenInput {
+            proto_file: "x/y.proto".to_owned(),
+            resources: vec![ResourceDescriptor {
+                resource_type: "example.com/Thing".to_owned(),
+                patterns: vec!["things/{thing}".to_owned()],
+                message_name: Some("Thing".to_owned()),
+                has_delete_time: false,
+            }],
+            requests: vec![],
+        }],
+        &CratePaths::default(),
+    )
+    .unwrap();
+    let content = &files[0].content;
+    // The wrapper is still emitted...
+    assert!(content.contains("pub struct ThingResourceName"));
+    // ...but no SoftDeletable impl rides along.
+    assert!(
+        !content.contains("SoftDeletable"),
+        "a resource without delete_time must not earn the impl:\n{content}",
+    );
 }
 
 /// With `aip_crate=aip` the generated code routes references through the
@@ -220,6 +292,19 @@ fn aip_crate_option_rewrites_paths() {
     assert!(
         !shipper.content.contains("::aip_resourcename::"),
         "old per-crate resourcename path still present:\n{}",
+        shipper.content
+    );
+    // The SoftDeletable impl rides in the same file, routed through ::aip::softdelete.
+    assert!(
+        shipper
+            .content
+            .contains("::aip::softdelete::SoftDeletable for Shipper"),
+        "softdelete path not rewritten:\n{}",
+        shipper.content
+    );
+    assert!(
+        !shipper.content.contains("::aip_softdelete::"),
+        "old per-crate softdelete path still present:\n{}",
         shipper.content
     );
 

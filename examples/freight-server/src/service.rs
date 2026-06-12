@@ -133,12 +133,9 @@ impl FreightService for FreightServer {
             // AIP-164: a soft-deleted shipper is hidden unless `show_deleted` was
             // set — a hidden one is `NOT_FOUND`, indistinguishable from a name that
             // never existed. The visibility rule (and its AIP-193 mapping) lives in
-            // `aip::softdelete`; the `delete_time` stamp is the soft-delete state.
-            aip::softdelete::check_visible(
-                aip::softdelete::State::from_deleted(shipper.delete_time.is_some()),
-                req.show_deleted,
-                &name,
-            )?;
+            // `aip::softdelete`; the generated `SoftDeletable` impl reads the
+            // `delete_time` stamp, so the shipper is passed straight in.
+            aip::softdelete::check_visible(&shipper, req.show_deleted, &name)?;
             return Ok(Response::new(shipper));
         }
 
@@ -152,12 +149,10 @@ impl FreightService for FreightServer {
         // discoverable to an unauthorized caller than to an authorized one
         // (AIP-164, AIP-211): both branches treat a hidden shipper as absent.
         let permission = shipper_get_permission();
-        let visible = self.storage.get_shipper(&name).is_some_and(|shipper| {
-            aip::softdelete::is_visible(
-                aip::softdelete::State::from_deleted(shipper.delete_time.is_some()),
-                req.show_deleted,
-            )
-        });
+        let visible = self
+            .storage
+            .get_shipper(&name)
+            .is_some_and(|shipper| aip::softdelete::is_visible(&shipper, req.show_deleted));
         if visible {
             Err(aip::iam::authz::permission_denied(&permission, &name))
         } else {
@@ -191,12 +186,7 @@ impl FreightService for FreightServer {
             .storage
             .list_shippers()
             .into_iter()
-            .filter(|shipper| {
-                aip::softdelete::is_visible(
-                    aip::softdelete::State::from_deleted(shipper.delete_time.is_some()),
-                    req.show_deleted,
-                )
-            })
+            .filter(|shipper| aip::softdelete::is_visible(shipper, req.show_deleted))
             .collect();
         // The visible shippers already live in memory (a post-filter set), so
         // `Page::apply` owns the slice-and-mint: it windows the page out of the
@@ -339,11 +329,7 @@ impl FreightService for FreightServer {
         // hidden — `NOT_FOUND` — since this demo does not implement `allow_missing`;
         // the same `show_deleted = false` visibility rule the Get path applies gives
         // exactly that, so a double delete is rejected rather than re-stamped.
-        aip::softdelete::check_visible(
-            aip::softdelete::State::from_deleted(existing.delete_time.is_some()),
-            false,
-            &req.name,
-        )?;
+        aip::softdelete::check_visible(&existing, false, &req.name)?;
         // AIP-154 freshness check: a Delete can't piggyback the etag on the
         // resource, so it rides on the request. A stale token is `ABORTED`, a
         // malformed one `INVALID_ARGUMENT` (AIP-193); an empty etag makes the delete
@@ -376,10 +362,7 @@ impl FreightService for FreightServer {
             .ok_or_else(|| Status::not_found(format!("shipper `{}` not found", req.name)))?;
         // AIP-164 undelete precondition: the shipper must actually be soft-deleted.
         // Undeleting a live one is `ALREADY_EXISTS` via the crate's AIP-193 mapping.
-        aip::softdelete::check_deleted(
-            aip::softdelete::State::from_deleted(existing.delete_time.is_some()),
-            &req.name,
-        )?;
+        aip::softdelete::check_deleted(&existing, &req.name)?;
         // Clear the deletion stamp and restamp `update_time`; the shipper is live
         // again. The content etag is unchanged (OUTPUT_ONLY fields are excluded), so
         // the token a prior read returned still addresses the recovered shipper.

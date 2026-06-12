@@ -123,3 +123,10 @@ impl From<SiteResourceName> for String {
         name.to_string()
     }
 }
+
+/// AIP-164 soft-delete state, generated from `Site`'s `delete_time` field.
+impl ::aip::softdelete::SoftDeletable for Site {
+    fn soft_delete_state(&self) -> ::aip::softdelete::State {
+        ::aip::softdelete::State::from_deleted(self.delete_time.is_some())
+    }
+}

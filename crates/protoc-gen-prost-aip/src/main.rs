@@ -109,6 +109,9 @@ struct Flags {
     pagination: bool,
     /// Emit `impl OrderByRequest` for requests carrying `order_by`.
     ordering: bool,
+    /// Emit `impl SoftDeletable` for resource messages carrying `delete_time`
+    /// (ADR-0014).
+    softdelete: bool,
     /// Route generated crate references through this umbrella root instead of
     /// per-crate names (e.g. `"aip"` -> `::aip::pagination::PageRequest`).
     aip_crate: Option<String>,
@@ -148,6 +151,7 @@ impl Flags {
             match key {
                 "pagination" => flags.pagination = value,
                 "ordering" => flags.ordering = value,
+                "softdelete" => flags.softdelete = value,
                 _ => return Err(format!("unrecognized parameter key {key:?}")),
             }
         }
@@ -195,9 +199,17 @@ fn generate_response(request: CodeGeneratorRequest) -> Result<Vec<File>, String>
             }
             request.has_filter = false;
         }
+        // Same rule for the resource-anchored `SoftDeletable` bool (ADR-0014):
+        // `softdelete` off zeroes `has_delete_time` so no impl is emitted.
+        let mut resources = resource_descriptors_in_file(&file);
+        if !flags.softdelete {
+            for resource in &mut resources {
+                resource.has_delete_time = false;
+            }
+        }
         inputs.push(GenInput {
             proto_file: name.clone(),
-            resources: resource_descriptors_in_file(&file),
+            resources,
             requests,
         });
     }
@@ -227,6 +239,7 @@ mod tests {
             Flags {
                 pagination: false,
                 ordering: false,
+                softdelete: false,
                 aip_crate: None,
             }
         );
@@ -239,6 +252,7 @@ mod tests {
             Flags {
                 pagination: true,
                 ordering: false,
+                softdelete: false,
                 aip_crate: None,
             }
         );
@@ -247,6 +261,7 @@ mod tests {
             Flags {
                 pagination: false,
                 ordering: false,
+                softdelete: false,
                 aip_crate: None,
             }
         );
@@ -259,6 +274,7 @@ mod tests {
             Flags {
                 pagination: false,
                 ordering: true,
+                softdelete: false,
                 aip_crate: None,
             }
         );
@@ -267,6 +283,29 @@ mod tests {
             Flags {
                 pagination: false,
                 ordering: false,
+                softdelete: false,
+                aip_crate: None,
+            }
+        );
+    }
+
+    #[test]
+    fn softdelete_flag_parses() {
+        assert_eq!(
+            Flags::parse(Some("softdelete=true")).unwrap(),
+            Flags {
+                pagination: false,
+                ordering: false,
+                softdelete: true,
+                aip_crate: None,
+            }
+        );
+        assert_eq!(
+            Flags::parse(Some("softdelete=false")).unwrap(),
+            Flags {
+                pagination: false,
+                ordering: false,
+                softdelete: false,
                 aip_crate: None,
             }
         );
@@ -276,10 +315,11 @@ mod tests {
     #[test]
     fn flags_combine() {
         assert_eq!(
-            Flags::parse(Some("pagination=true,ordering=true")).unwrap(),
+            Flags::parse(Some("pagination=true,ordering=true,softdelete=true")).unwrap(),
             Flags {
                 pagination: true,
                 ordering: true,
+                softdelete: true,
                 aip_crate: None,
             }
         );
@@ -292,6 +332,7 @@ mod tests {
             Flags {
                 pagination: false,
                 ordering: false,
+                softdelete: false,
                 aip_crate: Some("aip".to_owned()),
             }
         );
@@ -301,6 +342,7 @@ mod tests {
             Flags {
                 pagination: true,
                 ordering: true,
+                softdelete: false,
                 aip_crate: Some("aip".to_owned()),
             }
         );
@@ -315,6 +357,7 @@ mod tests {
         assert!(Flags::parse(Some("pagination=yes")).is_err());
         assert!(Flags::parse(Some("pagination")).is_err());
         assert!(Flags::parse(Some("ordering=yes")).is_err());
+        assert!(Flags::parse(Some("softdelete=yes")).is_err());
         // `filtering` is unrecognized until its slice lands.
         assert!(Flags::parse(Some("filtering=true")).is_err());
     }

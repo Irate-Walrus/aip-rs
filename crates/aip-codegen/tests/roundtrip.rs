@@ -29,6 +29,21 @@ mod freight {
         pub order_by: String,
     }
 
+    /// Stands in for prost's `Shipper` resource message — the `SoftDeletable`
+    /// impl in `shipper.aip.rs` reads its `delete_time` presence. prost maps a
+    /// `google.protobuf.Timestamp delete_time` to `Option<_>`, so a unit stand-in
+    /// for the timestamp is enough to exercise `.is_some()`.
+    #[derive(Default)]
+    pub struct Shipper {
+        pub delete_time: Option<()>,
+    }
+
+    /// Stands in for prost's `Site` resource message — also soft-deletable.
+    #[derive(Default)]
+    pub struct Site {
+        pub delete_time: Option<()>,
+    }
+
     include!("golden/einride/example/freight/v1/shipper.aip.rs");
     include!("golden/einride/example/freight/v1/site.aip.rs");
     include!("golden/einride/example/freight/v1/freight_service.aip.rs");
@@ -38,7 +53,10 @@ use std::str::FromStr;
 
 use aip_ordering::OrderByRequest;
 use aip_pagination::PageRequest;
-use freight::{ListShippersRequest, ListSitesRequest, ShipperResourceName, SiteResourceName};
+use aip_softdelete::{check_visible, SoftDeletable, State};
+use freight::{
+    ListShippersRequest, ListSitesRequest, Shipper, ShipperResourceName, Site, SiteResourceName,
+};
 
 #[test]
 fn single_variable_wrapper_round_trips() {
@@ -188,4 +206,26 @@ fn mint_under_copies_parent_variables_and_mints_the_last() {
     // Two mints produce distinct names.
     let site2 = SiteResourceName::mint_under(&parent);
     assert_ne!(site.site(), site2.site());
+}
+
+/// The generated `SoftDeletable` impl reads `delete_time` presence as the
+/// soft-delete state, and the blanket `From<&T>` lets `check_visible` take the
+/// resource directly (the ergonomics issue #134 is about).
+#[test]
+fn soft_deletable_impl_drives_visibility_from_delete_time() {
+    let live = Shipper { delete_time: None };
+    let deleted = Shipper {
+        delete_time: Some(()),
+    };
+    assert_eq!(live.soft_delete_state(), State::Live);
+    assert_eq!(deleted.soft_delete_state(), State::Deleted);
+
+    // No `State::from_deleted(...)` at the call site — the resource converts on
+    // its own, for both resource messages.
+    check_visible(&live, false, "shippers/acme").expect("a live shipper is visible");
+    assert!(check_visible(&deleted, false, "shippers/acme").is_err());
+    check_visible(&deleted, true, "shippers/acme").expect("show_deleted reveals it");
+
+    let live_site = Site { delete_time: None };
+    assert_eq!(live_site.soft_delete_state(), State::Live);
 }

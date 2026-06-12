@@ -42,6 +42,31 @@ fn unknown_package_yields_nothing() {
 }
 
 #[test]
+fn records_owning_message_name_and_delete_time_for_soft_deletable_resources() {
+    let pool = test_fixtures::pool();
+    let resources = resource_descriptors_in_package(&pool, FREIGHT_PACKAGE);
+
+    // Each freight resource carries a `google.protobuf.Timestamp delete_time`, so
+    // it is soft-deletable; its `message_name` is the prost struct the codegen
+    // plugin lands the `SoftDeletable` impl on.
+    for (resource_type, message_name) in [
+        ("freight-example.einride.tech/Shipper", "Shipper"),
+        ("freight-example.einride.tech/Site", "Site"),
+        ("freight-example.einride.tech/Shipment", "Shipment"),
+    ] {
+        let descriptor = resources
+            .iter()
+            .find(|d| d.resource_type == resource_type)
+            .unwrap_or_else(|| panic!("{resource_type} is declared in the freight package"));
+        assert_eq!(descriptor.message_name.as_deref(), Some(message_name));
+        assert!(
+            descriptor.has_delete_time,
+            "{resource_type} carries a Timestamp delete_time",
+        );
+    }
+}
+
+#[test]
 fn enumerates_resource_declared_in_a_single_file() {
     // `shipper.proto` declares exactly the Shipper resource.
     let shipper = test_fixtures::message_descriptor("einride.example.freight.v1.Shipper")

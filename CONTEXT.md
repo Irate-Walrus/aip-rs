@@ -314,6 +314,18 @@ presence over one message, not a `prost_reflect::MessageDescriptor`.
 _Avoid_: descriptor (the reflected message type), method type (a Request
 descriptor is read from field shape, not from the method's identity).
 
+### Soft delete
+
+**Soft-deletable**:
+A resource whose soft-delete state can be read off its own `delete_time` — it
+implements `aip_softdelete::SoftDeletable`, so a handler passes the resource
+itself to the visibility checks (`check_visible(&shipper, …)`) rather than
+restating `State::from_deleted(resource.delete_time.is_some())`. The codegen
+plugin emits the impl for every `google.api.resource`-annotated message carrying a
+`google.protobuf.Timestamp delete_time` (resource-anchored emission, ADR-0014); a
+resource without that field is simply not soft-deletable.
+_Avoid_: deletable, trashable, archivable.
+
 ## Relationships
 
 - An **Order by** is an ordered list of **Ordering fields**.
