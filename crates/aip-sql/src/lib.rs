@@ -1,17 +1,17 @@
 //! aip-sql: transpile an AIP-160 [`Filter`] into a parameterized, dialect-rendered
 //! SQL [`Predicate`].
 //!
-//! The native Filter AST (ADR-0003) is the integration point: [`transpile_filter`]
-//! walks it into a small, composable boolean [`Predicate`] whose logical structure
+//! The native Filter AST is the integration point: [`transpile_filter`] walks it
+//! into a small, composable boolean [`Predicate`] whose logical structure
 //! (`AND`/`OR`/`NOT`) is portable and whose leaves are *spelled* by a [`Dialect`].
 //! A single [`Dialect::render`] pass turns a `Predicate` into `(sql, Vec<Value>)` —
 //! SQL text plus an ordered list of [bound `Value`s](Value) — numbering every
 //! placeholder left-to-right and parenthesizing by precedence.
 //!
-//! The cardinal rule (ADR-0005 / ADR-0008): **parameterize, never interpolate.**
-//! A filter is attacker-controlled, so every literal becomes a bound [`Value`],
-//! never spliced into SQL text. This crate depends on no datastore — the caller
-//! binds the values to whatever driver it uses.
+//! The cardinal rule: **parameterize, never interpolate.** A filter is
+//! attacker-controlled, so every literal becomes a bound [`Value`], never spliced
+//! into SQL text. This crate depends on no datastore — the caller binds the
+//! values to whatever driver it uses.
 //!
 //! [`transpile_filter`] lowers the full AIP-160 operator set the checker
 //! accepts: the comparisons `=` / `!=` / `<` / `<=` / `>` / `>=`, the logical
@@ -20,8 +20,7 @@
 //! (substring, map-key / list-element membership, and timestamp presence — the
 //! per-engine [`Dialect`] leaves). Because [`check`] yields an *untyped*
 //! expression tree, it is handed the [`Declarations`] and a column [`Schema`] to
-//! recover each operand's type and map each identifier to a column (ADR-0008).
-//! See `docs/adr/0008-aip-sql-predicate-dialect.md`.
+//! recover each operand's type and map each identifier to a column.
 //!
 //! [`transpile_order_by`] is the ordering counterpart: it maps an AIP-132
 //! [`OrderBy`](aip_ordering::OrderBy)'s field paths onto SQL `ORDER BY`
@@ -37,6 +36,7 @@
 //!
 //! [`check`]: aip_filtering::check
 //! [`Declarations`]: aip_filtering::Declarations
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod dialect;
 mod order;
@@ -75,10 +75,11 @@ pub enum Error {
 /// The library-internal AIP-193 `ErrorInfo.domain` the user-fault errors this
 /// crate maps are stamped with. It is a sentinel meaning "replace at the serving
 /// boundary": a deploying service installs the `aip-errordomain` layer, which
-/// rewrites it to the service's own domain so clients see one domain (ADR-0007).
+/// rewrites it to the service's own domain so clients see one domain.
 #[cfg(feature = "tonic")]
 const ERROR_DOMAIN: &str = "aip-rs";
 
+#[cfg_attr(docsrs, doc(cfg(feature = "tonic")))]
 #[cfg(feature = "tonic")]
 impl From<Error> for tonic::Status {
     /// Maps to a [`tonic::Status`], encoding user-vs-server fault by variant

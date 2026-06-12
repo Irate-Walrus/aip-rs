@@ -7,14 +7,14 @@
 //! Applying an update mask is presented as a **Typed facade** ([`update`],
 //! generic over [`ReflectMessage`], so a message carries its own descriptor)
 //! layered on a still-public **Dynamic core** ([`update_dynamic`], over
-//! [`DynamicMessage`]) — see
-//! `docs/adr/0009-reflective-typed-message-api.md`.
+//! [`DynamicMessage`]).
 //!
 //! The core is a port of `go.einride.tech/aip/fieldmask`. It departs from the
 //! reference in one place: a source/destination type mismatch returns
 //! [`Error::TypeMismatch`] where aip-go panics.
 //!
 //! See <https://google.aip.dev/161> and <https://google.aip.dev/134>.
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 use prost::Message as _;
 use prost_reflect::{DynamicMessage, FieldDescriptor, Kind, MessageDescriptor, ReflectMessage};
@@ -264,10 +264,11 @@ fn next_message(field: &FieldDescriptor) -> Option<MessageDescriptor> {
 }
 
 /// The AIP-193 `ErrorInfo.domain` for every error this crate maps. Reason codes
-/// are unique within this domain. See `docs/adr/0007-aip193-error-details.md`.
+/// are unique within this domain.
 #[cfg(feature = "tonic")]
 const ERROR_DOMAIN: &str = "aip-rs";
 
+#[cfg_attr(docsrs, doc(cfg(feature = "tonic")))]
 #[cfg(feature = "tonic")]
 impl From<Error> for tonic::Status {
     /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details: an `ErrorInfo`

@@ -16,29 +16,28 @@
 //! - [`request_descriptors_in_file`] — digest each top-level message's
 //!   AIP-standard request fields (`page_token`, `order_by`, …) into a
 //!   [`RequestDescriptor`], driving the codegen plugin's request-trait
-//!   emission (ADR-0013; this one has no aip-go counterpart — Go satisfies
-//!   these interfaces structurally).
-//! - [`validate_resource_references`] (and its [Dynamic core][adr9]
+//!   emission (this one has no aip-go counterpart — Go satisfies these
+//!   interfaces structurally).
+//! - [`validate_resource_references`] (and its Dynamic core
 //!   [`validate_resource_references_dynamic`]) — for every field carrying a
 //!   `google.api.resource_reference`, check the value is a valid name of the
 //!   referenced resource type.
 //!
 //! Like the other reflective primitives this is expressed in the **Typed facade /
-//! Dynamic core** shape ([ADR-0009][adr9]): the headline
-//! [`validate_resource_references`] takes a concrete [`ReflectMessage`]
-//! (`prost_reflect`) type, layered over a public
+//! Dynamic core** shape: the headline [`validate_resource_references`] takes a
+//! concrete [`ReflectMessage`] (`prost_reflect`) type, layered over a public
 //! [`validate_resource_references_dynamic`] that works on a [`DynamicMessage`]
 //! directly — the escape hatch and the crates' test surface.
 //!
 //! Validation failures return a typed [`Error`] that maps, behind the `tonic`
-//! feature, to `INVALID_ARGUMENT` with AIP-193 standard error details (see
-//! [ADR-0007][adr7]).
+//! feature, to `INVALID_ARGUMENT` with AIP-193 standard error details.
 //!
 //! [adr9]: https://github.com/irate-walrus/aip-rs/blob/main/docs/adr/0009-reflective-typed-message-api.md
 //! [adr7]: https://github.com/irate-walrus/aip-rs/blob/main/docs/adr/0007-aip193-error-details.md
 //!
 //! See <https://google.aip.dev/123> (resource types) and
 //! <https://google.aip.dev/124> (resource references).
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod requests;
 mod resource_type;
@@ -78,10 +77,11 @@ pub enum Error {
     },
 }
 
-/// The AIP-193 `ErrorInfo.domain` for every error this crate maps (ADR-0007).
+/// The AIP-193 `ErrorInfo.domain` for every error this crate maps.
 #[cfg(feature = "tonic")]
 const ERROR_DOMAIN: &str = "aip-rs";
 
+#[cfg_attr(docsrs, doc(cfg(feature = "tonic")))]
 #[cfg(feature = "tonic")]
 impl From<Error> for tonic::Status {
     /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details: an `ErrorInfo`

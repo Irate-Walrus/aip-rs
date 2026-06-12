@@ -7,8 +7,7 @@
 //! than one error per round-trip.
 //!
 //! Ported from aip-go's [`validation`] package (`MessageValidator` / `Error`),
-//! extended to satisfy ADR-0007: where aip-go emits only a `BadRequest`, this
-//! crate also attaches the mandatory `ErrorInfo`, whose `domain` and `reason`
+//! extended to also attach the mandatory `ErrorInfo`, whose `domain` and `reason`
 //! identify *who* raised the error. Those are the caller's policy checks, so the
 //! caller supplies the domain (its own service name) and reason — see
 //! [`Validator::new`].
@@ -27,7 +26,8 @@
 //!
 //! Behind the `tonic` feature, [`Error`] converts to an `INVALID_ARGUMENT`
 //! [`tonic::Status`] carrying a `BadRequest` with every violation and the
-//! `ErrorInfo` (see `docs/adr/0007-aip193-error-details.md`).
+//! `ErrorInfo`.
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 use std::fmt;
 
@@ -172,6 +172,7 @@ impl std::error::Error for Error {}
 /// [`Validator`] (see [`Validator::new`]); this crate hard-codes none. The
 /// `tonic` mapping below threads the caller-supplied `domain`/`reason` straight
 /// into the `ErrorInfo`.
+#[cfg_attr(docsrs, doc(cfg(feature = "tonic")))]
 #[cfg(feature = "tonic")]
 impl From<Error> for tonic::Status {
     /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details: a `BadRequest`

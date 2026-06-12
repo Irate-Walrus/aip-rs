@@ -4,9 +4,9 @@
 //!
 //! Unlike `aip-go`'s variadic `Sscan`/`Sprint`, parsing a name against a
 //! [`Pattern`] yields named [`Captures`] (a `regex::Captures`-style API).
-//! See `docs/adr/0002-idiomatic-resourcename-api.md`.
 //!
 //! See <https://google.aip.dev/122>.
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -619,10 +619,11 @@ impl<'a> Scanner<'a> {
 }
 
 /// The AIP-193 `ErrorInfo.domain` for every error this crate maps. Reason codes
-/// are unique within this domain. See `docs/adr/0007-aip193-error-details.md`.
+/// are unique within this domain.
 #[cfg(feature = "tonic")]
 const ERROR_DOMAIN: &str = "aip-rs";
 
+#[cfg_attr(docsrs, doc(cfg(feature = "tonic")))]
 #[cfg(feature = "tonic")]
 impl From<Error> for tonic::Status {
     /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details: an `ErrorInfo`
@@ -695,6 +696,7 @@ pub struct FieldError {
     pub source: Error,
 }
 
+#[cfg_attr(docsrs, doc(cfg(feature = "tonic")))]
 #[cfg(feature = "tonic")]
 impl From<FieldError> for tonic::Status {
     /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details: the inner

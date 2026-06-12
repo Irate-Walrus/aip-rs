@@ -52,6 +52,7 @@
 //! IS NULL` predicate rather than going through this crate.
 //!
 //! See <https://google.aip.dev/164> and <https://google.aip.dev/165>.
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 /// The soft-delete state of a resource: whether its `delete_time` is stamped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,10 +287,11 @@ pub fn purge_result(mode: PurgeMode, matched: &[String]) -> (usize, Vec<String>)
 }
 
 /// The AIP-193 `ErrorInfo.domain` for every error this crate maps. Reason codes
-/// are unique within this domain. See `docs/adr/0007-aip193-error-details.md`.
+/// are unique within this domain.
 #[cfg(feature = "tonic")]
 const ERROR_DOMAIN: &str = "aip-rs";
 
+#[cfg_attr(docsrs, doc(cfg(feature = "tonic")))]
 #[cfg(feature = "tonic")]
 impl From<Error> for tonic::Status {
     /// Maps to a canonical gRPC code with AIP-193 standard details: an `ErrorInfo`

@@ -1,8 +1,8 @@
 //! Conversion between the native AST and `google.api.expr.v1alpha1` CEL protos.
 //!
-//! The native [`Expr`](crate::Expr) enum is filtering's primary product (see
-//! `docs/adr/0003-native-filter-ast.md`); this module is the optional bridge to
-//! CEL tooling that speaks the proto. The mapping is:
+//! The native [`Expr`](crate::Expr) enum is filtering's primary product; this
+//! module is the optional bridge to CEL tooling that speaks the proto. The
+//! mapping is:
 //!
 //! | native                     | CEL proto                            |
 //! |----------------------------|--------------------------------------|

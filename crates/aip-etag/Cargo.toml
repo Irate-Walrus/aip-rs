@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [dependencies]
 thiserror.workspace = true
 # `prost::Message` supplies `encode_to_vec`/`decode`, used to transcode a concrete

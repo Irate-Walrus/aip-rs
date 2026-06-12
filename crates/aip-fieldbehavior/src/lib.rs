@@ -3,7 +3,7 @@
 //!
 //! This is a **Reflective primitive** — it needs a message's **Descriptor** to
 //! read the `google.api.field_behavior` extension off a field. It is expressed
-//! in the **Typed facade / Dynamic core** shape per ADR-0009:
+//! in the **Typed facade / Dynamic core** shape:
 //!
 //! - **Typed facades** (`clear_fields`, `copy_fields`, `validate_required`,
 //!   `validate_required_with_mask`, `validate_immutable_not_changed`) operate on
@@ -19,11 +19,12 @@
 //! type mismatch in `copy_fields_dynamic` is a programmer error and panics. The
 //! validation side is **fallible** and returns a typed [`Error`] that maps,
 //! behind the `tonic` feature, to `INVALID_ARGUMENT` with AIP-193 standard
-//! error details (see `docs/adr/0007-aip193-error-details.md`).
+//! error details.
 //!
 //! This crate ports [`go.einride.tech/aip/fieldbehavior`](https://pkg.go.dev/go.einride.tech/aip/fieldbehavior).
 //!
 //! See <https://google.aip.dev/161> and <https://google.aip.dev/203>.
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 use prost::Message as _;
 use prost_reflect::{DynamicMessage, FieldDescriptor, Kind, ReflectMessage, Value};
@@ -648,11 +649,12 @@ fn has_path_with_prefix(mask: &FieldMask, needle: &str) -> bool {
 /// The library-internal AIP-193 `ErrorInfo.domain` every error this crate maps
 /// is stamped with. It is a sentinel meaning "replace at the serving boundary":
 /// a deploying service installs the `aip-errordomain` layer, which rewrites it
-/// to the service's own domain so clients see one domain (ADR-0007). It is the
-/// only conversion — there is no per-call-site re-stamping.
+/// to the service's own domain so clients see one domain. It is the only
+/// conversion — there is no per-call-site re-stamping.
 #[cfg(feature = "tonic")]
 const ERROR_DOMAIN: &str = "aip-rs";
 
+#[cfg_attr(docsrs, doc(cfg(feature = "tonic")))]
 #[cfg(feature = "tonic")]
 impl From<Error> for tonic::Status {
     /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details under the

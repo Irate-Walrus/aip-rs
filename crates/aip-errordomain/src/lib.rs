@@ -3,8 +3,8 @@
 //! AIP-193's `ErrorInfo.domain` is "typically the registered service name", and
 //! a service must present exactly one domain across its whole error surface. The
 //! aip-rs library cannot know the deploying service, so every error it maps
-//! stamps the library-internal sentinel `aip-rs` (ADR-0007). That sentinel means
-//! "replace me at the boundary" — it must never reach a client.
+//! stamps the library-internal sentinel `aip-rs`. That sentinel means "replace
+//! me at the boundary" — it must never reach a client.
 //!
 //! This crate is that boundary. [`Layer::new`] takes the service's domain and
 //! wraps a tonic server so that, on the way out, the `aip-rs` sentinel in
@@ -21,8 +21,8 @@
 //! ```
 //!
 //! This crate carries no aip-rs `Error` type — it rewrites `google.rpc.Status`
-//! bytes at the transport edge, so it is not the shared error crate ADR-0001
-//! rejected. See `docs/adr/0007-aip193-error-details.md`.
+//! bytes at the transport edge, so it is not the shared error crate that was
+//! rejected.
 
 use std::future::Future;
 use std::pin::Pin;
