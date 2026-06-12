@@ -27,70 +27,57 @@
 //!
 //! # Worked example
 //!
-//! A compact update handler exercising pagination preamble, field-mask
-//! application, etag freshness check, and the `?`-to-`Status` conversion:
+//! A compact update handler exercising pagination, field-mask application,
+//! etag freshness check, and the `?` operator. With the `tonic` feature each
+//! crate's `Error` implements `From<Error> for tonic::Status`, so `?` in a
+//! tonic handler automatically produces the correct gRPC code with AIP-193
+//! `ErrorInfo` + `BadRequest` attached. `M` stands for any generated prost
+//! message implementing `ReflectMessage`:
 //!
 //! ```no_run
-//! # use tonic::{Request, Response, Status};
-//! # use prost_reflect::ReflectMessage as _;
-//! # use aip::pagination::{Page, SizeLimits};
-//! # struct MyResource { name: String, etag: String, display_name: String }
-//! # impl prost_reflect::ReflectMessage for MyResource {
-//! #     fn descriptor(&self) -> prost_reflect::MessageDescriptor { unimplemented!() }
-//! # }
-//! # impl prost::Message for MyResource {
-//! #     fn encode_raw(&self, _: &mut impl prost::bytes::BufMut) {}
-//! #     fn merge_field(&mut self, _: u32, _: prost_reflect::prost::encoding::WireType,
-//! #                   _: &mut impl prost::bytes::Buf, _: prost::encoding::DecodeContext) -> Result<(), prost::DecodeError> { Ok(()) }
-//! #     fn encoded_len(&self) -> usize { 0 }
-//! #     fn clear(&mut self) {}
-//! # }
-//! # #[derive(Default)] struct ListReq { page_size: i32, page_token: String, filter: String }
-//! # impl aip::pagination::PageRequest for ListReq {
-//! #     fn page_size(&self) -> i32 { self.page_size }
-//! #     fn page_token(&self) -> &str { &self.page_token }
-//! #     fn skip(&self) -> i32 { 0 }
-//! # }
-//! # impl prost_reflect::ReflectMessage for ListReq {
-//! #     fn descriptor(&self) -> prost_reflect::MessageDescriptor { unimplemented!() }
-//! # }
-//! # struct UpdateReq { resource: Option<MyResource>, update_mask: Option<prost_types::FieldMask>, etag: String, validate_only: bool }
-//! # fn store_get(_: &str) -> Option<MyResource> { None }
-//! # fn store_put(_: MyResource) {}
-//! # fn now_str() -> String { String::new() }
+//! use std::error::Error;
+//! use prost_reflect::ReflectMessage;
+//! use prost_types::FieldMask;
+//! use aip::pagination::{Page, PageRequest, SizeLimits};
 //!
 //! const PAGE_LIMITS: SizeLimits = SizeLimits { default: 50, max: 1000 };
 //!
-//! // List: pagination preamble (AIP-158) — validates + resolves page size,
-//! // verifies the token's request checksum so mid-pagination changes are caught.
-//! fn list(req: Request<ListReq>) -> Result<Response<Vec<MyResource>>, Status> {
-//!     let req = req.into_inner();
-//!     let page = Page::parse(&req, PAGE_LIMITS)?;          // ? -> INVALID_ARGUMENT
-//!     let all: Vec<MyResource> = vec![/* … */];
+//! // List: pagination preamble (AIP-158).
+//! // `Page::parse` validates the page token, verifies the request checksum
+//! // so a mid-pagination change is caught, and resolves the page size.
+//! // With the `tonic` feature, `?` maps errors to INVALID_ARGUMENT with
+//! // AIP-193 ErrorInfo + BadRequest.
+//! fn list<Req: PageRequest + ReflectMessage, Item: Clone>(
+//!     req: Req,
+//!     all: Vec<Item>,
+//! ) -> Result<(Vec<Item>, String), Box<dyn Error>> {
+//!     let page = Page::parse(&req, PAGE_LIMITS)?;
 //!     let (items, next_page_token) = page.apply(all);
-//!     Ok(Response::new(items))
+//!     Ok((items, next_page_token))
 //! }
 //!
 //! // Update: etag freshness + field-mask apply + validate_only gate (AIP-134/154/163).
-//! fn update(req: Request<UpdateReq>) -> Result<Response<MyResource>, Status> {
-//!     let req = req.into_inner();
-//!     let incoming = req.resource.ok_or_else(|| Status::invalid_argument("resource required"))?;
-//!     let existing = store_get(&incoming.name)
-//!         .ok_or_else(|| Status::not_found(format!("{} not found", incoming.name)))?;
+//! // With `tonic` feature: stale etag -> ABORTED, bad path -> INVALID_ARGUMENT,
+//! // each carrying AIP-193 standard details, all via bare `?`.
+//! fn update<M: ReflectMessage + Default + Clone>(
+//!     incoming: M,
+//!     existing: M,
+//!     etag: &str,
+//!     mask: FieldMask,
+//!     validate_only: bool,
+//!     store_put: impl FnOnce(M),
+//! ) -> Result<M, Box<dyn Error>> {
+//!     // AIP-154: verify the client's etag before any work.
+//!     aip::etag::check(etag, &existing)?;
 //!
-//!     // AIP-154: verify the client's etag before touching the store.
-//!     // A stale etag -> ABORTED; malformed -> INVALID_ARGUMENT.
-//!     aip::etag::check(&incoming.etag, &existing)?;
-//!
-//!     // AIP-134: apply the update mask (validates paths, merges fields).
-//!     let mask = req.update_mask.unwrap_or_default();
-//!     aip::fieldmask::validate(&mask, &MyResource { name: String::new(), etag: String::new(), display_name: String::new() }.descriptor())?;
+//!     // AIP-134: validate mask paths, then merge incoming -> existing.
+//!     aip::fieldmask::validate(&mask, &existing.descriptor())?;
 //!     let mut resource = existing;
 //!     aip::fieldmask::update(&mask, &mut resource, &incoming)?;
 //!
 //!     // AIP-163: skip the store write on validate_only requests.
-//!     aip::preview::commit_unless(req.validate_only, || store_put(resource.clone()));
-//!     Ok(Response::new(resource))
+//!     aip::preview::commit_unless(validate_only, || store_put(resource.clone()));
+//!     Ok(resource)
 //! }
 //! ```
 //!

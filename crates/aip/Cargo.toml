@@ -95,3 +95,8 @@ iam-proto = ["aip-iam?/iam-proto"]
 # `aip::iam::eval`. Opt-in alongside `iam`; pulls the `cel` parser/runtime, so it
 # stays out of `default` like `sql`.
 iam-eval = ["aip-iam?/eval"]
+
+[dev-dependencies]
+prost-reflect = { workspace = true }
+prost-types   = { workspace = true }
+tonic         = { workspace = true }
