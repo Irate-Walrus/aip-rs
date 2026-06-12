@@ -533,7 +533,8 @@ impl FreightService for FreightServer {
         // parent scope and the soft-delete `delete_time IS NULL` through one
         // `Predicate` that owns precedence and placeholder numbering. The
         // SQLite-backed store renders it to a parameterized `WHERE`.
-        let user_filter = parse_filter(&req.filter, &shipment_declarations(), &shipment_schema())?;
+        let schema = shipment_schema();
+        let user_filter = parse_filter(&req.filter, &shipment_declarations(), &schema)?;
         let predicate = scoped_predicate(&req.parent, user_filter);
 
         // `ListShipments` carries no `order_by`, so results are ordered by
@@ -541,8 +542,7 @@ impl FreightService for FreightServer {
         // empty `order_by` transpiles to exactly the `[name ASC]` tie-break, so
         // this leans on the same always-on tie-break `ListSites` does rather than
         // hand-spelling the order.
-        let order =
-            aip::sql::transpile_order_by(&aip::ordering::OrderBy::default(), &shipment_schema())?;
+        let order = aip::sql::transpile_order_by(&aip::ordering::OrderBy::default(), &schema)?;
         // The same overfetch probe as `ListSites`: fetch `fetch_limit()` rows at the
         // unsigned page offset, then `split_overfetch` truncates the probe row and
         // mints the `next_page_token` — no integer casts in the handler.
