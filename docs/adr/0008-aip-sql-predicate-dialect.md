@@ -118,3 +118,56 @@ binds the values to whatever driver it uses.
   soft delete + filter rendering to one fragment with left-to-right placeholder
   numbering. The example's `query_page` builds one `Query` and calls a single
   `render(&Sqlite)`.
+
+## Amendment (issue #156): one source of truth — derive the `Schema`, always tie-break
+
+The original design left a consumer wiring one filterable, sortable resource
+maintaining **three parallel lists that must agree**: the filter `Declarations`
+field set, the `Schema` column map, and a hand-spelled sortable-paths list fed to
+`OrderBy::validate_for_paths`. The freight example needed two drift-guard tests
+(`sortable_site_paths_resolve_on_the_site_descriptor`,
+`sortable_site_paths_map_to_columns_in_the_schema`) purely to hold its own lists
+together — a drift-guard test in consumer code is the API telling us the surface
+is split too fine.
+
+**Decision:** reduce to one declared source plus explicit overrides, and own the
+pagination tie-break inside the transpiler.
+
+- **`Schema::for_declarations(&Declarations)`** derives the column map from the
+  same declarations the filter is checked against. Each declared **field path**
+  becomes a column whose name defaults to the path; the enum *value* names are
+  excluded. `Declarations` grew a `field_paths()` accessor for this, and now
+  tracks which idents are declared field paths — `enum_ident`'s value-name inserts
+  (`ACTIVE`, …) are recorded internally as *not* field paths, since they carry the
+  same `Enum` type as their field and no type test could separate them.
+- **The sortable set is type-driven, derived automatically.** A column is sortable
+  iff its declared `Type` is `String` / `Int` / `Uint` / `Double` / `Bool` /
+  `Timestamp` — the scalars a SQL `ORDER BY` totally orders. An `Enum`, map, list,
+  or `Duration` column is filter-only, so a bare `order_by: state` stays rejected
+  (matching prior freight behavior). No sortable list lives in consumer code.
+- **Two overrides cover what the rule can't.** `SchemaBuilder::column(path, col)`
+  renames a column whose SQL name differs from its declared path (a nested path
+  flattening, `lat_lng.latitude` → `latitude`); `SchemaBuilder::sort_only(path,
+  col)` adds a sortable column with no filter declaration (`update_time`), which is
+  also the escape hatch for making a filter-only column sortable.
+- **Validation wiring** stays the existing two-gate split, fed from the one
+  source: `Schema::sortable_paths()` feeds `OrderBy::validate_for_paths`, so a bad
+  user sort path is still `INVALID_ARGUMENT` (via `aip-ordering`), while a column
+  missing from the `Schema` stays the `UnknownIdentifier` → `INTERNAL` drift
+  signal. `transpile_order_by` is *not* the sortable gate — it maps any schema
+  column to its name; `validate_for_paths` upstream is the gate.
+- **The resource-name tie-break is always-on inside `transpile_order_by`.** It
+  appends a literal `name ASC` (AIP-122 names the resource `name`) so the order is
+  total and stable across offset pages, unless the user's `order_by` already sorts
+  on `name` in either direction. An empty `order_by` therefore transpiles to
+  `[name ASC]`, not an empty `Vec`. This removes the hand-written
+  `order.push(Order::asc("name"))` every stable-pagination consumer appended.
+
+**Consequences.** The `aip-sql` `transpile_order_by` golden/unit tests gain a
+trailing `name ASC` — an intended contract change. The freight example is rewired
+onto `for_declarations` + overrides: `SORTABLE_SITE_PATHS` is deleted, the manual
+tie-break push and `ListShipments`'s `[Order::asc("name")]` literal are gone, and
+the two drift-guard tests — redundant by construction now that the schema *is* the
+derivation — are removed. `Schema::builder()` survives for descriptor-less
+consumers; its hand-built columns default to filterable + sortable, since with no
+declared types there is nothing to drive the sortable rule.

@@ -43,18 +43,6 @@ const PAGE_LIMITS: SizeLimits = SizeLimits {
     max: 1000,
 };
 
-/// The Site field paths that `ListSites` accepts in an AIP-132 `order_by`. Used
-/// as the allow-list for [`OrderBy::validate_for_paths`]; the nested `lat_lng.*`
-/// paths exercise `.`-separated Subfield ordering.
-const SORTABLE_SITE_PATHS: &[&str] = &[
-    "name",
-    "display_name",
-    "create_time",
-    "update_time",
-    "lat_lng.latitude",
-    "lat_lng.longitude",
-];
-
 /// Serves `FreightService` over an in-memory [`Storage`].
 ///
 /// `policies` is the resource-name-keyed IAM [`PolicyStore`] shared with
@@ -403,12 +391,15 @@ impl FreightService for FreightServer {
         let req = request.into_inner();
         ShipperResourceName::parse_field("parent", &req.parent)?;
 
-        // Parse and validate the AIP-132 `order_by` against the allow-list of
-        // sortable Site paths. Bad syntax or an unknown ordering field converts
-        // via the crate's AIP-193 `From<Error> for Status` to `INVALID_ARGUMENT`
-        // with an `ErrorInfo`, plus a `BadRequest` naming the offending field path.
+        // Parse and validate the AIP-132 `order_by` against the sortable paths the
+        // column `Schema` derives — the single sortable source, no separately
+        // maintained list to drift from the schema. Bad syntax or an unknown
+        // ordering field converts via the crate's AIP-193 `From<Error> for Status`
+        // to `INVALID_ARGUMENT` with an `ErrorInfo`, plus a `BadRequest` naming the
+        // offending field path.
+        let schema = site_schema();
         let order_by = aip::ordering::parse(&req)?;
-        order_by.validate_for_paths(SORTABLE_SITE_PATHS)?;
+        order_by.validate_for_paths(&schema.sortable_paths())?;
 
         // Offset pagination (AIP-158). `order_by` is a non-pagination field, so
         // the request checksum `Page::parse` computes covers it: changing it
@@ -423,19 +414,18 @@ impl FreightService for FreightServer {
         // numbering across every composed fragment, so a user `a OR b` can't
         // silently re-associate against the server's `AND`s. The SQLite
         // store renders the whole thing to one parameterized `WHERE`.
-        let user_filter = parse_filter(&req.filter, &site_declarations(), &site_schema())?;
+        let user_filter = parse_filter(&req.filter, &site_declarations(), &schema)?;
         let predicate = scoped_predicate(&req.parent, user_filter);
 
         // Sort and page in SQL. The validated `order_by` transpiles to SQL
         // `ORDER BY` items, mapped through the same column `Schema` the filter
-        // uses; the resource name is appended as a tie-break so the order is total
-        // and stable across pages — equal `order_by` keys fall back to a fixed
-        // name order. Every sortable path is in the allow-list and the schema maps
-        // it, so transpilation can only fail on an allow-list/schema drift, an
-        // internal inconsistency rather than bad input — which `aip-sql`'s
+        // uses; `transpile_order_by` appends the resource-name tie-break itself, so
+        // the order is total and stable across pages — equal `order_by` keys fall
+        // back to a fixed `name` order. Every sortable path is in the allow-list and
+        // the schema maps it, so transpilation can only fail on an allow-list/schema
+        // drift, an internal inconsistency rather than bad input — which `aip-sql`'s
         // `From<Error>` maps to `INTERNAL`, so a bare `?` carries the right fault.
-        let mut order = aip::sql::transpile_order_by(&order_by, &site_schema())?;
-        order.push(aip::sql::Order::asc("name"));
+        let order = aip::sql::transpile_order_by(&order_by, &schema)?;
 
         // Overfetch probe: fetch one row past the page (`page.fetch_limit()`) at the
         // page offset, both unsigned off `Page` — the forged-token clamp and the
@@ -543,12 +533,16 @@ impl FreightService for FreightServer {
         // parent scope and the soft-delete `delete_time IS NULL` through one
         // `Predicate` that owns precedence and placeholder numbering. The
         // SQLite-backed store renders it to a parameterized `WHERE`.
-        let user_filter = parse_filter(&req.filter, &shipment_declarations(), &shipment_schema())?;
+        let schema = shipment_schema();
+        let user_filter = parse_filter(&req.filter, &shipment_declarations(), &schema)?;
         let predicate = scoped_predicate(&req.parent, user_filter);
 
         // `ListShipments` carries no `order_by`, so results are ordered by
-        // resource name — a total, stable page order across the offset pages.
-        let order = [aip::sql::Order::asc("name")];
+        // resource name — a total, stable page order across the offset pages. An
+        // empty `order_by` transpiles to exactly the `[name ASC]` tie-break, so
+        // this leans on the same always-on tie-break `ListSites` does rather than
+        // hand-spelling the order.
+        let order = aip::sql::transpile_order_by(&aip::ordering::OrderBy::default(), &schema)?;
         // The same overfetch probe as `ListSites`: fetch `fetch_limit()` rows at the
         // unsigned page offset, then `split_overfetch` truncates the probe row and
         // mints the `next_page_token` — no integer casts in the handler.
@@ -666,26 +660,27 @@ fn site_declarations() -> aip::filtering::Declarations {
 }
 
 /// Maps the Site identifiers a filter or `order_by` can address onto their SQLite
-/// columns. The nested `lat_lng.latitude` / `lat_lng.longitude`
-/// paths flatten to the `latitude` / `longitude` columns; `annotations` / `tags`
-/// are the JSON map / list columns the has operator queries with `json_each`; the
-/// rest map to identically-named columns in the `sites` table.
+/// columns, *derived* from [`site_declarations`] so the filter allowlist, the
+/// column map, and the sortable-`order_by` allowlist are one source of truth (no
+/// drift between three hand-kept lists). [`Schema::for_declarations`] reads off a
+/// column per declared field (named for the path by default) and marks each
+/// sortable iff its declared type is one a SQL `ORDER BY` totally orders — so the
+/// string `display_name` / `name`, the timestamp `create_time`, and the nested
+/// `lat_lng.latitude` (a double) are sortable, while the enum `state`, the
+/// `annotations` map, and the `tags` list are filter-only (a bare
+/// `order_by: state` stays rejected). Two overrides handle what the rule can't:
 ///
-/// This is the column allowlist for both [`aip::sql::transpile_filter`] and
-/// [`aip::sql::transpile_order_by`], so it must cover every sortable
-/// [`SORTABLE_SITE_PATHS`] entry (the `update_time` / `lat_lng.longitude` columns
-/// are sort-only — they carry no filter [`Declaration`](aip::filtering)).
+/// - the nested `lat_lng.latitude` flattens to the `latitude` column (a rename);
+/// - `update_time` and the flattened `lat_lng.longitude` are
+///   [`sort_only`](aip::sql::SchemaBuilder::sort_only) — pageable but not declared
+///   for filtering.
+///
+/// [`Schema::for_declarations`]: aip::sql::Schema::for_declarations
 fn site_schema() -> aip::sql::Schema {
-    aip::sql::Schema::builder()
-        .column("display_name", "display_name")
-        .column("name", "name")
-        .column("create_time", "create_time")
-        .column("update_time", "update_time")
+    aip::sql::Schema::for_declarations(&site_declarations())
         .column("lat_lng.latitude", "latitude")
-        .column("lat_lng.longitude", "longitude")
-        .column("state", "state")
-        .column("annotations", "annotations")
-        .column("tags", "tags")
+        .sort_only("update_time", "update_time")
+        .sort_only("lat_lng.longitude", "longitude")
         .build()
 }
 
@@ -714,17 +709,14 @@ fn shipment_declarations() -> aip::filtering::Declarations {
 }
 
 /// Maps the Shipment identifiers a filter can address onto their SQLite columns
-/// in the `shipments` table; `annotations` is the JSON map column the has
-/// operator queries with `json_each`. This is the column allowlist for
-/// [`aip::sql::transpile_filter`], paired with [`shipment_declarations`].
+/// in the `shipments` table, *derived* from [`shipment_declarations`] — every
+/// field maps to an identically-named column, so no override is needed.
+/// `annotations` is the JSON map column the has operator queries with `json_each`;
+/// being a map, the type rule leaves it filter-only. `ListShipments` carries no
+/// `order_by`, so the sortable set is unused here; it exists so the filter
+/// allowlist and the column map stay one source of truth.
 fn shipment_schema() -> aip::sql::Schema {
-    aip::sql::Schema::builder()
-        .column("name", "name")
-        .column("origin_site", "origin_site")
-        .column("destination_site", "destination_site")
-        .column("create_time", "create_time")
-        .column("annotations", "annotations")
-        .build()
+    aip::sql::Schema::for_declarations(&shipment_declarations()).build()
 }
 
 /// Parse + type-check an AIP-160 `filter` and transpile it to a parameterized
@@ -1221,38 +1213,6 @@ mod tests {
             .await
             .expect_err("negative page_size is rejected");
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
-    }
-
-    #[test]
-    fn sortable_site_paths_resolve_on_the_site_descriptor() {
-        // `ListSites` gates `order_by` with the curated `validate_for_paths`
-        // allow-list. `validate_for_message` guards the allow-list itself: every
-        // sortable path must be a real `Site` field, so the allow-list can't
-        // silently drift from the proto. The `Site` descriptor comes straight off
-        // the Typed message (ADR-0009), no by-name pool lookup.
-        let site = Site::default().descriptor();
-        let order_by: OrderBy = SORTABLE_SITE_PATHS
-            .join(",")
-            .parse()
-            .expect("the allow-list is valid order_by syntax");
-        order_by
-            .validate_for_message(&site)
-            .expect("every sortable Site path resolves on the Site descriptor");
-    }
-
-    #[test]
-    fn sortable_site_paths_map_to_columns_in_the_schema() {
-        // `transpile_order_by` maps each `order_by` path to a column through
-        // `site_schema`. The schema must cover every sortable path — otherwise an
-        // in-allow-list `order_by` would surface as an `internal` error. This
-        // guards the allow-list against drifting from the column schema the same
-        // way the test above guards it against the proto.
-        let order_by: OrderBy = SORTABLE_SITE_PATHS
-            .join(",")
-            .parse()
-            .expect("the allow-list is valid order_by syntax");
-        aip::sql::transpile_order_by(&order_by, &site_schema())
-            .expect("every sortable Site path maps to a column in the schema");
     }
 
     #[test]
