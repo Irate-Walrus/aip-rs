@@ -44,7 +44,10 @@
 //!
 //! The primitive is value-based: it reasons over a [`State`] derived from whether
 //! a `delete_time` is present, so it pulls in no datastore and no reflection. A
-//! caller holding a typed resource passes `resource.delete_time.is_some()`; a
+//! caller holding a typed resource implements [`SoftDeletable`] once — or has the
+//! codegen plugin emit it — and then passes the resource itself
+//! (`check_visible(&shipper, …)`); the check functions take `impl Into<State>`,
+//! so a bare [`State`] still works for callers that compute it directly. A
 //! SQL-backed list keeps expressing the visibility rule as its own `delete_time
 //! IS NULL` predicate rather than going through this crate.
 //!
@@ -74,6 +77,59 @@ impl State {
     /// Whether the resource is soft-deleted.
     pub fn is_deleted(self) -> bool {
         matches!(self, State::Deleted)
+    }
+}
+
+/// A resource that knows its own soft-delete [`State`] — the call-site sugar
+/// that lets a handler pass the resource itself to [`is_visible`] /
+/// [`check_visible`] / [`check_deleted`] instead of spelling out
+/// `State::from_deleted(resource.delete_time.is_some())` at every visibility
+/// check.
+///
+/// The trait returns this crate's own [`State`], **not** an
+/// `Option<&prost_types::Timestamp>`: that keeps the crate value-based and
+/// dependency-free (no proto, no reflection — see the crate docs and ADR-0005),
+/// and means the one rule "`delete_time` stamped ⇒ `Deleted`" is written once,
+/// in the impl, rather than re-derived at each call site.
+///
+/// A blanket [`From<&T>`](State) turns any `&impl SoftDeletable` into a [`State`],
+/// so the check functions take `impl Into<State>` and a call site needs **no
+/// trait import** — the conversion fires on its own:
+///
+/// ```
+/// use aip_softdelete::{check_visible, SoftDeletable, State};
+///
+/// struct Shipper {
+///     delete_time: Option<()>,
+/// }
+///
+/// impl SoftDeletable for Shipper {
+///     fn soft_delete_state(&self) -> State {
+///         State::from_deleted(self.delete_time.is_some())
+///     }
+/// }
+///
+/// let shipper = Shipper { delete_time: None };
+/// // No `State::from_deleted(...)` at the call site, and no `State` import needed.
+/// check_visible(&shipper, false, "shippers/acme").unwrap();
+/// ```
+///
+/// The codegen plugin emits this impl for every `google.api.resource`-annotated
+/// message carrying a `google.protobuf.Timestamp delete_time` field, so a
+/// consumer hand-writes none (ADR-0014).
+pub trait SoftDeletable {
+    /// The resource's soft-delete [`State`]: [`Deleted`](State::Deleted) when its
+    /// `delete_time` is stamped, [`Live`](State::Live) otherwise.
+    fn soft_delete_state(&self) -> State;
+}
+
+/// Any `&impl SoftDeletable` converts to its [`State`], so a resource reference
+/// is accepted directly wherever a check function takes `impl Into<State>`. A
+/// bare [`State`] still converts through the reflexive `From<State> for State`,
+/// so callers passing a `State` (the crate's own tests) are unaffected.
+impl<T: SoftDeletable> From<&T> for State {
+    fn from(resource: &T) -> State {
+        resource.soft_delete_state()
     }
 }
 
@@ -111,8 +167,12 @@ pub enum Error {
 /// A `List` filters its results on this boolean; a `Get`/`Delete` uses
 /// [`check_visible`], which turns a hidden resource into a [`NOT_FOUND`
 /// error](Error::Deleted) instead.
-pub fn is_visible(state: State, show_deleted: bool) -> bool {
-    show_deleted || !state.is_deleted()
+///
+/// `state` is `impl Into<State>`, so a handler passes either a bare [`State`] or,
+/// via the blanket [`From<&T>`](State), a `&impl `[`SoftDeletable`] resource
+/// directly (e.g. `is_visible(&shipper, show_deleted)`).
+pub fn is_visible(state: impl Into<State>, show_deleted: bool) -> bool {
+    show_deleted || !state.into().is_deleted()
 }
 
 /// AIP-164 read visibility for a `Get`/`Delete`: succeed when the resource is
@@ -126,7 +186,10 @@ pub fn is_visible(state: State, show_deleted: bool) -> bool {
 /// [`Error::Deleted`] when the resource is soft-deleted and `show_deleted` is
 /// false — a hidden resource the caller is not allowed to distinguish from a
 /// never-existing one (`NOT_FOUND` on the wire).
-pub fn check_visible(state: State, show_deleted: bool, name: &str) -> Result<(), Error> {
+///
+/// `state` is `impl Into<State>`: a bare [`State`] or a `&impl `[`SoftDeletable`]
+/// resource (e.g. `check_visible(&shipper, show_deleted, &name)`).
+pub fn check_visible(state: impl Into<State>, show_deleted: bool, name: &str) -> Result<(), Error> {
     if is_visible(state, show_deleted) {
         Ok(())
     } else {
@@ -145,8 +208,11 @@ pub fn check_visible(state: State, show_deleted: bool, name: &str) -> Result<(),
 ///
 /// [`Error::NotDeleted`] when the resource is live — there is nothing to recover,
 /// so the undelete is `ALREADY_EXISTS` on the wire.
-pub fn check_deleted(state: State, name: &str) -> Result<(), Error> {
-    if state.is_deleted() {
+///
+/// `state` is `impl Into<State>`: a bare [`State`] or a `&impl `[`SoftDeletable`]
+/// resource (e.g. `check_deleted(&shipper, &name)`).
+pub fn check_deleted(state: impl Into<State>, name: &str) -> Result<(), Error> {
+    if state.into().is_deleted() {
         Ok(())
     } else {
         Err(Error::NotDeleted {
@@ -275,6 +341,59 @@ mod tests {
         assert_eq!(State::from_deleted(true), State::Deleted);
         assert!(!State::Live.is_deleted());
         assert!(State::Deleted.is_deleted());
+    }
+
+    /// A typed resource standing in for a generated one: `delete_time` presence
+    /// is the soft-delete state, exactly as the codegen impl reads it.
+    struct Shipper {
+        delete_time: Option<()>,
+    }
+
+    impl SoftDeletable for Shipper {
+        fn soft_delete_state(&self) -> State {
+            State::from_deleted(self.delete_time.is_some())
+        }
+    }
+
+    #[test]
+    fn soft_deletable_resource_converts_to_its_state() {
+        // The blanket `From<&T>` reads the trait, so `&resource` is an `Into<State>`.
+        let live = Shipper { delete_time: None };
+        let deleted = Shipper {
+            delete_time: Some(()),
+        };
+        assert_eq!(State::from(&live), State::Live);
+        assert_eq!(State::from(&deleted), State::Deleted);
+    }
+
+    #[test]
+    fn check_functions_accept_the_resource_directly() {
+        // No `State::from_deleted(...)` at the call site: the resource reference
+        // converts on its own (the issue's whole point).
+        let live = Shipper { delete_time: None };
+        let deleted = Shipper {
+            delete_time: Some(()),
+        };
+
+        assert!(is_visible(&live, false));
+        assert!(!is_visible(&deleted, false));
+        assert!(is_visible(&deleted, true));
+
+        assert_eq!(check_visible(&live, false, "shippers/acme"), Ok(()));
+        assert_eq!(
+            check_visible(&deleted, false, "shippers/acme"),
+            Err(Error::Deleted {
+                name: "shippers/acme".to_owned()
+            }),
+        );
+
+        assert_eq!(check_deleted(&deleted, "shippers/acme"), Ok(()));
+        assert_eq!(
+            check_deleted(&live, "shippers/acme"),
+            Err(Error::NotDeleted {
+                name: "shippers/acme".to_owned()
+            }),
+        );
     }
 
     #[test]

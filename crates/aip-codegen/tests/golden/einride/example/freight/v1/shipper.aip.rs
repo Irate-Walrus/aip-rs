@@ -95,3 +95,10 @@ impl From<ShipperResourceName> for String {
         name.to_string()
     }
 }
+
+/// AIP-164 soft-delete state, generated from `Shipper`'s `delete_time` field.
+impl ::aip_softdelete::SoftDeletable for Shipper {
+    fn soft_delete_state(&self) -> ::aip_softdelete::State {
+        ::aip_softdelete::State::from_deleted(self.delete_time.is_some())
+    }
+}

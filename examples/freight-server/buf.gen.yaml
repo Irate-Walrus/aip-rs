@@ -100,6 +100,12 @@ plugins:
       # `order_by` — `ListSitesRequest` alone — gets the impl generated instead
       # of hand-written.
       - ordering=true
+      # Opt in to the resource-anchored `SoftDeletable` impls (ADR-0014): every
+      # `google.api.resource` message carrying a `delete_time` — Shipper, Site,
+      # Shipment — gets the impl generated, so a handler passes the resource
+      # straight to `aip::softdelete::check_visible` instead of spelling out
+      # `State::from_deleted(resource.delete_time.is_some())`.
+      - softdelete=true
       # Route all generated crate references through the `aip` umbrella crate
       # (issue #138): `::aip::pagination::PageRequest` instead of
       # `::aip_pagination::PageRequest`, etc. Removes the need for direct deps

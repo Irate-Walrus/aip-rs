@@ -1,8 +1,9 @@
 //! The generation logic: walk `google.api.resource` descriptors and emit typed
 //! resource-name wrappers layered on the runtime [`aip_resourcename::Pattern`]
-//! API (ADR-0011), and walk **Request descriptors** and emit
-//! `impl aip_pagination::PageRequest` / `impl aip_ordering::OrderByRequest`
-//! keyed on field shape (ADR-0013).
+//! API (ADR-0011) plus an `impl aip_softdelete::SoftDeletable` on each resource
+//! message carrying a `delete_time` (ADR-0014), and walk **Request descriptors**
+//! and emit `impl aip_pagination::PageRequest` /
+//! `impl aip_ordering::OrderByRequest` keyed on field shape (ADR-0013).
 //!
 //! Generated files are `use`-free and fully path-qualified
 //! (`::aip_resourcename::…`, `::aip_pagination::…`), so the consumer mounts
@@ -24,6 +25,13 @@
 //! A multi-segment wrapper also gets a [`parent`] accessor returning the parent
 //! pattern's typed wrapper when that parent pattern is generated in the same
 //! invocation.
+//!
+//! A resource message also earns an `impl SoftDeletable` — reading its
+//! `delete_time` presence as the AIP-164 soft-delete state — iff it carries a
+//! `google.protobuf.Timestamp delete_time` field (resource-anchored emission,
+//! ADR-0014). The bool arrives pre-zeroed by the plugin when the `softdelete`
+//! flag is off, so this generator never sees a flag. The impl is independent of
+//! the wrapper: a patternless soft-deletable resource still earns it.
 //!
 //! A request message qualifies for `PageRequest` iff it has plain `string
 //! page_token` **and** `int32 page_size` fields — the Rust analog of aip-go's
@@ -74,6 +82,9 @@ pub struct CratePaths {
     pub pagination: String,
     /// Module path to `aip-ordering`, e.g. `::aip_ordering` or `::aip::ordering`.
     pub ordering: String,
+    /// Module path to `aip-softdelete`, e.g. `::aip_softdelete` or `::aip::softdelete`.
+    /// Used by the generated `SoftDeletable` impls.
+    pub softdelete: String,
 }
 
 impl Default for CratePaths {
@@ -83,6 +94,7 @@ impl Default for CratePaths {
             resourceid: "::aip_resourceid".to_owned(),
             pagination: "::aip_pagination".to_owned(),
             ordering: "::aip_ordering".to_owned(),
+            softdelete: "::aip_softdelete".to_owned(),
         }
     }
 }
@@ -98,6 +110,7 @@ impl CratePaths {
                 resourceid: format!("::{root}::resourceid"),
                 pagination: format!("::{root}::pagination"),
                 ordering: format!("::{root}::ordering"),
+                softdelete: format!("::{root}::softdelete"),
             },
         }
     }
@@ -204,6 +217,15 @@ fn generate_file(
                 paths,
             )?;
         }
+        // The `SoftDeletable` impl is resource-anchored but pattern-independent:
+        // it keys on the message carrying a `delete_time`, named by its prost
+        // struct (ADR-0014). The bool arrives pre-zeroed when the plugin's
+        // `softdelete` flag is off, so this generator never sees a flag.
+        if resource.has_delete_time {
+            if let Some(message_name) = &resource.message_name {
+                write_soft_deletable(&mut body, message_name, paths);
+            }
+        }
     }
     for request in requests {
         if request.has_page_token && request.has_page_size {
@@ -275,6 +297,33 @@ fn write_order_by_request(out: &mut String, request: &RequestDescriptor, paths: 
     ));
     line("    fn order_by(&self) -> &str {");
     line("        &self.order_by");
+    line("    }");
+    line("}");
+}
+
+/// Append the `SoftDeletable` impl for `message_name`, reading the resource's
+/// `delete_time` presence as its AIP-164 soft-delete state. The prost struct is
+/// named by bare path — the impl lands in the module that holds the generated
+/// message structs (ADR-0013's mount rule, shared by ADR-0014).
+fn write_soft_deletable(out: &mut String, message_name: &str, paths: &CratePaths) {
+    let mut line = |s: &str| {
+        let _ = writeln!(out, "{s}");
+    };
+    let softdelete = &paths.softdelete;
+
+    line("");
+    line(&format!(
+        "/// AIP-164 soft-delete state, generated from `{message_name}`'s `delete_time` field."
+    ));
+    line(&format!(
+        "impl {softdelete}::SoftDeletable for {message_name} {{"
+    ));
+    line(&format!(
+        "    fn soft_delete_state(&self) -> {softdelete}::State {{"
+    ));
+    line(&format!(
+        "        {softdelete}::State::from_deleted(self.delete_time.is_some())"
+    ));
     line("    }");
     line("}");
 }
