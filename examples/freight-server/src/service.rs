@@ -92,11 +92,10 @@ impl FreightServer {
         match self.policies.get(resource) {
             // Unprotected ⇒ public (a demo simplification, not production policy).
             None => true,
-            Some(policy) => policy
-                .bindings
-                .iter()
-                .flat_map(|binding| &binding.members)
-                .any(|member| member_matches(member, caller)),
+            // Coarse membership over the Policy's Bindings, decided by aip::iam's
+            // membership helper (allUsers / allAuthenticatedUsers / exact-member
+            // semantics; #142).
+            Some(policy) => aip::iam::policy::grants(&policy, caller),
         }
     }
 }
@@ -799,20 +798,6 @@ pub(crate) fn caller_member(metadata: &MetadataMap) -> Option<Member> {
         .get(CALLER_METADATA_KEY)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<Member>().ok())
-}
-
-/// Does the stored Policy member string `granted` admit `caller`? `allUsers`
-/// admits anyone (even an absent caller); `allAuthenticatedUsers` admits any
-/// present caller; a typed member admits the exact same **Member**. The grant is
-/// compared against the caller's canonical [`Member`] rendering, so only a
-/// well-formed grant matches (a malformed one was rejected at `SetIamPolicy`).
-/// Shared with `TestIamPermissions`, which matches the caller the same way.
-pub(crate) fn member_matches(granted: &str, caller: Option<&Member>) -> bool {
-    match granted {
-        "allUsers" => true,
-        "allAuthenticatedUsers" => caller.is_some(),
-        granted => caller.is_some_and(|member| member.to_string() == granted),
-    }
 }
 
 /// AIP-155 idempotency pre-check for a create handler.

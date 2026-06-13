@@ -471,11 +471,11 @@ fn reconstruct(conn: &rusqlite::Connection, resource: &str) -> Policy {
     if bindings.is_empty() {
         return Policy::default();
     }
-    let version = if bindings.iter().any(|b| b.condition.is_some()) {
-        3
-    } else {
-        1
-    };
+    // The *conditions ⟹ version 3* invariant read backwards: one library function
+    // owns version recovery (#180), so this store does not hand-roll it and the
+    // recovered `version` always agrees with what `policy::validate` enforces on the
+    // write path.
+    let version = aip::iam::policy::canonical_version(&bindings);
     let mut policy = Policy {
         version,
         bindings,
