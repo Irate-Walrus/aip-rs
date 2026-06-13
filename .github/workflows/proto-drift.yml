@@ -1,0 +1,83 @@
+# buf-generate drift check (issue #85, ADR-0011): the committed generated code is
+# canonical, and this gate proves it.
+#
+# Generated Rust + the descriptor sets are checked in so consumers need no
+# toolchain — only maintainers regenerate. The hazard is that a hand-edit, a
+# `.proto` change without a regen, a `buf.gen.yaml`/`buf.lock` bump, or a change
+# to the local `protoc-gen-prost-aip` plugin leaves the committed output out of
+# sync with what `buf generate` would now emit. This job re-runs every `regen.sh`
+# and fails if anything in the tree moved.
+#
+# It runs on every push/PR rather than behind a paths filter: the freight plugin
+# builds from workspace source, so its output can drift from a change anywhere in
+# its (transitive) dependency tree — `aip-codegen`, `aip-reflect`,
+# `aip-resourcename`, … — not just from proto edits.
+#
+# Reproducibility is pinned on both halves of the generation (ADR-0011): the
+# googleapis schema by digest in each `buf.lock`, and every plugin by version in
+# the `buf.gen.yaml` files — so re-running regen with no source change is a no-op.
+#
+# BSR access: the public `googleapis` module and the community plugins resolve
+# anonymously, but anonymous calls are rate-limited. The buf CLI reads a
+# `BUF_TOKEN` from the environment automatically; add it as a repo secret to lift
+# the limit. Absent the secret the value is empty and buf falls back to anonymous.
+name: proto-drift
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: proto-drift-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Picked up by the buf CLI for BSR auth; empty (anonymous) when the secret is
+  # unset. See the header.
+  BUF_TOKEN: ${{ secrets.BUF_TOKEN }}
+
+jobs:
+  drift:
+    name: buf generate is committed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned buf version: a CLI bump must not be able to move generated output
+      # out from under the drift check (only the digest- and version-pinned
+      # schema + plugins decide it). `github_token` avoids the anonymous GitHub
+      # rate limit when the action downloads the buf release.
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: 1.70.0
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+      # The freight plugin (`protoc-gen-prost-aip`) builds from this workspace, so
+      # its `regen.sh` shells out to `cargo run` mid-generation.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Each script does `buf generate` / `buf build` against the locked digest
+      # and pinned plugins, writing into the committed `src/gen` + descriptor sets.
+      - name: Regenerate aip-proto
+        run: ./regen.sh
+        working-directory: crates/aip-proto
+      - name: Regenerate test-fixtures
+        run: ./regen.sh
+        working-directory: crates/test-fixtures
+      - name: Regenerate freight-server
+        run: ./regen.sh
+        working-directory: examples/freight-server
+
+      # `git status --porcelain` catches modified, added, *and* removed files —
+      # `git diff --exit-code` alone would miss new untracked output.
+      - name: Fail on drift
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::Committed generated code drifts from \`buf generate\`. Run the affected regen.sh and commit the result."
+            git status --porcelain
+            git --no-pager diff
+            exit 1
+          fi
+          echo "Generated code is in sync with buf generate."
