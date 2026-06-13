@@ -8,8 +8,8 @@
 #     once in the workspace by construction (the eight per-message extern_path
 #     mappings the old `build.rs` hand-maintained disappear with it).
 #   * neoeinstein-tonic — the `FreightService` server trait, plus (via the
-#     `proto/imports.proto` anchor and `regen.sh`'s `--include-imports`) the
-#     `google.iam.v1.IAMPolicy` service trait whose request/response messages
+#     `proto/imports.proto` anchor and this plugin's own `include_imports: true`)
+#     the `google.iam.v1.IAMPolicy` service trait whose request/response messages
 #     come from `aip-proto`.
 #   * protoc-gen-prost-aip — the typed resource-name wrappers
 #     (`ShipperResourceName`, …) generated from each `google.api.resource`

@@ -142,24 +142,21 @@ impl Flags {
                 .split_once('=')
                 .ok_or_else(|| format!("invalid parameter {pair:?}: expected `key=value`"))?;
             // `aip_crate` / `reflect_descriptor_pool` take a string value; all
-            // other flags take bool.
-            match key {
-                "aip_crate" | "reflect_descriptor_pool" => {
-                    if value.is_empty() {
-                        return Err(format!(
-                            "invalid parameter {pair:?}: `{key}` value must not be empty"
-                        ));
-                    }
-                    match key {
-                        "aip_crate" => flags.aip_crate = Some(value.to_owned()),
-                        "reflect_descriptor_pool" => {
-                            flags.reflect_descriptor_pool = Some(value.to_owned())
-                        }
-                        _ => unreachable!("outer arm only matches the two keys above"),
-                    }
-                    continue;
+            // other flags take bool. Dispatch the string-valued keys to their
+            // `Option<String>` slot in one match, then share the non-empty check.
+            let string_slot = match key {
+                "aip_crate" => Some(&mut flags.aip_crate),
+                "reflect_descriptor_pool" => Some(&mut flags.reflect_descriptor_pool),
+                _ => None,
+            };
+            if let Some(slot) = string_slot {
+                if value.is_empty() {
+                    return Err(format!(
+                        "invalid parameter {pair:?}: `{key}` value must not be empty"
+                    ));
                 }
-                _ => {}
+                *slot = Some(value.to_owned());
+                continue;
             }
             let value = match value {
                 "true" => true,

@@ -196,7 +196,12 @@ impl GenInput {
         requests: Vec<RequestDescriptor>,
         messages: Vec<ReflectMessageName>,
     ) -> Self {
-        Self { proto_file, resources, requests, messages }
+        Self {
+            proto_file,
+            resources,
+            requests,
+            messages,
+        }
     }
 }
 
@@ -453,10 +458,15 @@ fn snake_module(name: &str) -> String {
     sanitize_keyword(name.to_snake_case())
 }
 
-/// prost-build's identifier keyword handling, ported verbatim so a generated
-/// module name matches the one prost emits: a Rust keyword that can be a raw
-/// identifier becomes `r#kw` (so `type` -> `r#type`); the four that cannot —
-/// `self`, `super`, `extern`, `crate` — take a trailing `_`.
+/// prost-build's identifier keyword handling, ported verbatim from prost-build
+/// 0.14's `sanitize_identifier` (the version `neoeinstein-prost:v0.5.0` builds
+/// on) so a generated module name matches the one prost emits: a Rust keyword
+/// that can be a raw identifier becomes `r#kw` (so `type` -> `r#type`, `gen` ->
+/// `r#gen`); the ones that cannot — `self`, `super`, `extern`, `crate`, `Self`,
+/// `_` — take a trailing `_`; a numeric-leading name is prefixed with `_`. The
+/// caller has already snake-cased (lowercased) the name, so the `Self` and
+/// numeric arms never fire on a real proto identifier — they are kept only so
+/// this stays a faithful copy that won't drift from prost.
 fn sanitize_keyword(mut ident: String) -> String {
     match ident.as_str() {
         // 2015 strict keywords.
@@ -470,9 +480,13 @@ fn sanitize_keyword(mut ident: String) -> String {
         | "abstract" | "become" | "box" | "do" | "final" | "macro" | "override" | "priv"
         | "typeof" | "unsized" | "virtual" | "yield"
         // 2018 reserved keywords.
-        | "async" | "await" | "try" => ident.insert_str(0, "r#"),
+        | "async" | "await" | "try"
+        // 2024 reserved keywords.
+        | "gen" => ident.insert_str(0, "r#"),
         // These keywords cannot be raw identifiers, so prost suffixes them.
-        "self" | "super" | "extern" | "crate" => ident.push('_'),
+        "_" | "self" | "super" | "Self" | "extern" | "crate" => ident.push('_'),
+        // A numeric-leading identifier is invalid, so prost prefixes it.
+        _ if ident.starts_with(|c: char| c.is_numeric()) => ident.insert(0, '_'),
         _ => {}
     }
     ident
@@ -890,7 +904,6 @@ const RUSTFMT_MAX_WIDTH: usize = 100;
 /// whole line would still fit within [`RUSTFMT_MAX_WIDTH`].
 const RUSTFMT_ARRAY_WIDTH: usize = 60;
 
-
 /// `PascalCase` -> `SCREAMING_SNAKE_CASE` for the per-wrapper `LazyLock` const
 /// name (`ShipperResourceName` -> `SHIPPER_RESOURCE_NAME`). The struct names are
 /// ASCII `PascalCase`, so this only needs to split before each interior capital.
@@ -955,6 +968,8 @@ mod tests {
     fn snake_module_sanitizes_keywords() {
         assert_eq!(snake_module("Type"), "r#type");
         assert_eq!(snake_module("Match"), "r#match");
+        // `gen` is a 2024 reserved keyword prost raw-escapes (prost-build 0.14).
+        assert_eq!(snake_module("Gen"), "r#gen");
         assert_eq!(snake_module("Self"), "self_");
         assert_eq!(snake_module("Super"), "super_");
         assert_eq!(snake_module("Crate"), "crate_");

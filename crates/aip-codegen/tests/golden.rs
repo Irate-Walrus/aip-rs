@@ -157,8 +157,7 @@ fn reflect_messages_match_golden() {
             path: vec!["Type".to_owned(), "AbstractType".to_owned()],
         },
     ];
-    let paths =
-        CratePaths::default().with_descriptor_pool("crate::DESCRIPTOR_POOL".to_owned());
+    let paths = CratePaths::default().with_descriptor_pool("crate::DESCRIPTOR_POOL".to_owned());
 
     let files = generate(
         &[GenInput::new(
