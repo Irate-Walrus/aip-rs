@@ -162,18 +162,16 @@ relevant ADR in [`docs/adr/`](docs/adr) and use the terminology from
 
 ### Releasing
 
-Releases are automated with [release-plz](https://release-plz.dev). Merging
-conventional-commit changes to `main` keeps an open release PR with the version
-bumps and changelog entries; merging that PR cuts a GitHub release + git tag per
-crate and (for `protoc-gen-prost-aip`) attaches the prebuilt plugin binaries. An
-MSRV job pins the floor.
+Releasing is **paused** while the API stabilises — everything stays at `0.0.1`,
+with no automatic version bumps or releases. The MSRV job and the rest of CI run
+as normal.
 
-Releases are **git-only for now** — release-plz is configured with `publish =
-false`, so nothing is pushed to crates.io. The `aip` and `aip-filtering` names
-are already owned by unrelated crates there; enabling crates.io publishing means
-renaming those two and adding a token, as documented in
-[`release-plz.toml`](release-plz.toml) and
-[`.github/workflows/release-plz.yml`](.github/workflows/release-plz.yml).
+The machinery is in place and dormant: the [release-plz](https://release-plz.dev)
+workflow ([`.github/workflows/release-plz.yml`](.github/workflows/release-plz.yml))
+is `workflow_dispatch`-only, and [`release-plz.toml`](release-plz.toml) is set to
+git-only (`publish = false`). To re-enable, restore the `push` trigger; to publish
+to crates.io later, the `aip` and `aip-filtering` names (owned by unrelated crates
+there) must be renamed and a token added, as documented in those two files.
 
 ## Credits
 

@@ -1,5 +1,9 @@
-# Release management (issue #100), GIT-ONLY for now. Two halves, both on push to
-# `main`:
+# Release management (issue #100). PAUSED while the API stabilises in 0.0.x —
+# everything stays at 0.0.1, no automatic version bumps or releases. The trigger
+# below is `workflow_dispatch` only, so this never runs on push. Re-enable by
+# restoring the `push: branches: [main]` trigger (see the commented block).
+#
+# When live (GIT-ONLY mode), two halves run on push to `main`:
 #
 #   * release-pr — opens/refreshes a "release" PR carrying the version bumps and
 #     changelog entries for everything that changed since the last release.
@@ -9,7 +13,7 @@
 #     because the `aip` / `aip-filtering` names are owned by others there. See
 #     that file for how to turn crates.io publishing on.
 #
-# Repo secrets:
+# Repo secrets (when live):
 #   * CARGO_REGISTRY_TOKEN — unused while `publish = false`; wired and ready for
 #     when crates.io publishing is enabled.
 #   * RELEASE_PLZ_TOKEN    — optional PAT or GitHub App token. Use one if you want
@@ -20,8 +24,11 @@
 name: release-plz
 
 on:
-  push:
-    branches: [main]
+  # PAUSED: manual-only while stabilising in 0.0.x. To re-enable automatic
+  # releasing, uncomment the `push` trigger below.
+  workflow_dispatch:
+  # push:
+  #   branches: [main]
 
 permissions:
   contents: write
