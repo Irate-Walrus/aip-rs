@@ -3,7 +3,10 @@
 //! API (ADR-0011) plus an `impl aip_softdelete::SoftDeletable` on each resource
 //! message carrying a `delete_time` (ADR-0014), and walk **Request descriptors**
 //! and emit `impl aip_pagination::PageRequest` /
-//! `impl aip_ordering::OrderByRequest` keyed on field shape (ADR-0013).
+//! `impl aip_ordering::OrderByRequest` keyed on field shape (ADR-0013), and —
+//! when reflection is on — an `impl ::prost_reflect::ReflectMessage` for *every*
+//! message of the file (nested included, map-entries excluded), resolving each
+//! one's descriptor from the consumer's pool (ADR-0009).
 //!
 //! Generated files are `use`-free and fully path-qualified
 //! (`::aip_resourcename::…`, `::aip_pagination::…`), so the consumer mounts
@@ -69,7 +72,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use aip_reflect::{RequestDescriptor, ResourceDescriptor, ResourceType};
+use aip_reflect::{ReflectMessageName, RequestDescriptor, ResourceDescriptor, ResourceType};
 use aip_resourcename::{Pattern, Scanner};
 
 use crate::Error;
@@ -94,6 +97,14 @@ pub struct CratePaths {
     /// Module path to `aip-softdelete`, e.g. `::aip_softdelete` or `::aip::softdelete`.
     /// Used by the generated `SoftDeletable` impls.
     pub softdelete: String,
+    /// Path to the consumer's `prost_reflect::DescriptorPool`, e.g.
+    /// `crate::DESCRIPTOR_POOL` or `crate::proto::DESCRIPTOR_POOL`, that the
+    /// generated `ReflectMessage` impls resolve each message's descriptor from
+    /// (ADR-0009). `None` when reflection is off; required (non-`None`) whenever a
+    /// [`GenInput`] carries [`messages`](GenInput::messages), an invariant the
+    /// plugin enforces. Not a crate root, so [`from_aip_crate`](Self::from_aip_crate)
+    /// leaves it `None` for the caller to set.
+    pub descriptor_pool: Option<String>,
 }
 
 impl Default for CratePaths {
@@ -104,6 +115,7 @@ impl Default for CratePaths {
             pagination: "::aip_pagination".to_owned(),
             ordering: "::aip_ordering".to_owned(),
             softdelete: "::aip_softdelete".to_owned(),
+            descriptor_pool: None,
         }
     }
 }
@@ -120,6 +132,9 @@ impl CratePaths {
                 pagination: format!("::{root}::pagination"),
                 ordering: format!("::{root}::ordering"),
                 softdelete: format!("::{root}::softdelete"),
+                // Orthogonal to the umbrella root and consumer-specific; the
+                // caller sets it from the `reflect_descriptor_pool` opt.
+                descriptor_pool: None,
             },
         }
     }
@@ -152,14 +167,23 @@ pub struct GenInput {
     /// presence bool already zeroed by the plugin when its flag is off
     /// (ADR-0013).
     pub requests: Vec<RequestDescriptor>,
+    /// Every message in the file (nested included, map-entries excluded) that
+    /// earns a `prost_reflect::ReflectMessage` impl (ADR-0009). The plugin
+    /// populates this only when its `reflect` flag is on (empty otherwise), so
+    /// the generator never sees a flag — the same zeroing rule the other
+    /// emissions use (ADR-0013). A non-empty list requires
+    /// [`CratePaths::descriptor_pool`] to be set.
+    pub messages: Vec<ReflectMessageName>,
 }
 
-/// Generate typed resource-name wrappers and request-trait impls, one output
-/// [`GenFile`] per input file whose body carries at least one of either.
+/// Generate typed resource-name wrappers, request-trait impls, and
+/// `ReflectMessage` impls, one output [`GenFile`] per input file whose body
+/// carries at least one of them.
 ///
 /// A resource with no patterns contributes nothing, as does a request without
-/// the pagination field shape; a file contributing neither produces no file at
-/// all (matching aip-go).
+/// the pagination field shape; with reflection off a file carries only its
+/// wrappers/request-impls, so a file contributing none of the three produces no
+/// file at all (matching aip-go).
 pub fn generate(inputs: &[GenInput], paths: &CratePaths) -> Result<Vec<GenFile>, Error> {
     // A `pattern -> <Type>ResourceName` index over every resource in the whole
     // invocation, so a multi-segment wrapper can resolve its parent pattern to
@@ -171,6 +195,7 @@ pub fn generate(inputs: &[GenInput], paths: &CratePaths) -> Result<Vec<GenFile>,
         if let Some(content) = generate_file(
             &input.resources,
             &input.requests,
+            &input.messages,
             &wrappers_by_pattern,
             paths,
         )? {
@@ -204,14 +229,15 @@ fn output_path(proto_file: &str) -> String {
     format!("{stem}.aip.rs")
 }
 
-/// Generate the body of one file's resource-name wrappers and request-trait
-/// impls, or `None` if it would be empty.
+/// Generate the body of one file's resource-name wrappers, request-trait impls,
+/// and `ReflectMessage` impls, or `None` if it would be empty.
 ///
 /// `wrappers_by_pattern` is the whole-invocation `pattern -> struct name` index
 /// used to resolve a multi-segment wrapper's [`parent`](https://google.aip.dev/122).
 fn generate_file(
     resources: &[ResourceDescriptor],
     requests: &[RequestDescriptor],
+    messages: &[ReflectMessageName],
     wrappers_by_pattern: &BTreeMap<String, String>,
     paths: &CratePaths,
 ) -> Result<Option<String>, Error> {
@@ -243,6 +269,13 @@ fn generate_file(
         if request.has_order_by {
             write_order_by_request(&mut body, request, paths);
         }
+    }
+    // The `ReflectMessage` impls come last and cover *every* message (ADR-0009),
+    // so a message that is also a resource/request earns this in addition to its
+    // wrapper/trait impls. The list is empty when the plugin's `reflect` flag is
+    // off, so this loop simply does nothing then.
+    for message in messages {
+        write_reflect_message(&mut body, message, paths);
     }
     if body.is_empty() {
         return Ok(None);
@@ -335,6 +368,106 @@ fn write_soft_deletable(out: &mut String, message_name: &str, paths: &CratePaths
     ));
     line("    }");
     line("}");
+}
+
+/// Append the `prost_reflect::ReflectMessage` impl for `message`, resolving its
+/// descriptor from the consumer's pool by proto name (ADR-0009). The prost
+/// struct is named by Rust path — bare for a top-level message, module-qualified
+/// for a nested one — landing in the module that holds the generated structs
+/// (ADR-0013's mount rule). `::prost_reflect` is hard-coded: it is a third-party
+/// crate the consumer already depends on, not one routed through the `aip`
+/// umbrella.
+fn write_reflect_message(out: &mut String, message: &ReflectMessageName, paths: &CratePaths) {
+    let mut line = |s: &str| {
+        let _ = writeln!(out, "{s}");
+    };
+    // Invariant: a non-empty `messages` list means the plugin set the pool path
+    // (it errors otherwise). The generator never has to handle the missing case.
+    let pool = paths
+        .descriptor_pool
+        .as_deref()
+        .expect("descriptor_pool is set whenever reflect messages are emitted");
+    let rust_path = rust_path(&message.path);
+    let fqn = &message.full_name;
+
+    line("");
+    line("/// Reflection wiring (ADR-0009): resolves this message's descriptor from the pool.");
+    line(&format!(
+        "impl ::prost_reflect::ReflectMessage for {rust_path} {{"
+    ));
+    line("    fn descriptor(&self) -> ::prost_reflect::MessageDescriptor {");
+    // The pool lookup is a method chain. rustfmt keeps it on one line only while
+    // the chain (from the receiver, no indent) fits `chain_width`; past that it
+    // breaks one call per line. Emit whichever form rustfmt would, since nothing
+    // re-formats the committed output.
+    let chain =
+        format!("{pool}.get_message_by_name(\"{fqn}\").expect(\"descriptor pool contains {fqn}\")");
+    if chain.len() <= RUSTFMT_CHAIN_WIDTH {
+        line(&format!("        {chain}"));
+    } else {
+        line(&format!("        {pool}"));
+        line(&format!("            .get_message_by_name(\"{fqn}\")"));
+        line(&format!(
+            "            .expect(\"descriptor pool contains {fqn}\")"
+        ));
+    }
+    line("    }");
+    line("}");
+}
+
+/// The Rust path naming `path`'s prost struct, within the module the generated
+/// file is mounted in: the leaf message name verbatim, each parent message name
+/// snake-cased into its prost module (`["Decl", "FunctionDecl", "Overload"]` ->
+/// `decl::function_decl::Overload`; `["Shipper"]` -> `Shipper`).
+fn rust_path(path: &[String]) -> String {
+    let (leaf, parents) = path
+        .split_last()
+        .expect("a message path holds at least its own name");
+    let mut segments: Vec<String> = parents.iter().map(|p| snake_module(p)).collect();
+    segments.push(leaf.clone());
+    segments.join("::")
+}
+
+/// `PascalCase` message name -> the prost module name nesting it: `snake_case`,
+/// then prost-build's keyword sanitization. Like [`screaming_snake`] this splits
+/// only before each interior ASCII capital — correct for the AIP/google message
+/// names in scope (escaping exotic, non-`PascalCase`/acronym names is deferred
+/// with the rest, #82; a wrong path is a loud compile error in the consumer, not
+/// a silent bug).
+fn snake_module(pascal: &str) -> String {
+    let mut snake = String::new();
+    for (i, c) in pascal.char_indices() {
+        if i > 0 && c.is_ascii_uppercase() {
+            snake.push('_');
+        }
+        snake.push(c.to_ascii_lowercase());
+    }
+    sanitize_keyword(snake)
+}
+
+/// prost-build's identifier keyword handling, ported verbatim so a generated
+/// module name matches the one prost emits: a Rust keyword that can be a raw
+/// identifier becomes `r#kw` (so `type` -> `r#type`); the four that cannot —
+/// `self`, `super`, `extern`, `crate` — take a trailing `_`.
+fn sanitize_keyword(mut ident: String) -> String {
+    match ident.as_str() {
+        // 2015 strict keywords.
+        "as" | "break" | "const" | "continue" | "else" | "enum" | "false" | "fn" | "for" | "if"
+        | "impl" | "in" | "let" | "loop" | "match" | "mod" | "move" | "mut" | "pub" | "ref"
+        | "return" | "static" | "struct" | "trait" | "true" | "type" | "unsafe" | "use"
+        | "where" | "while"
+        // 2018 strict keywords.
+        | "dyn"
+        // 2015 reserved keywords.
+        | "abstract" | "become" | "box" | "do" | "final" | "macro" | "override" | "priv"
+        | "typeof" | "unsized" | "virtual" | "yield"
+        // 2018 reserved keywords.
+        | "async" | "await" | "try" => ident.insert_str(0, "r#"),
+        // These keywords cannot be raw identifiers, so prost suffixes them.
+        "self" | "super" | "extern" | "crate" => ident.push('_'),
+        _ => {}
+    }
+    ident
 }
 
 /// The `<Type>ResourceName` struct name for `resource_type`, or an error if the
@@ -749,6 +882,12 @@ const RUSTFMT_MAX_WIDTH: usize = 100;
 /// whole line would still fit within [`RUSTFMT_MAX_WIDTH`].
 const RUSTFMT_ARRAY_WIDTH: usize = 60;
 
+/// rustfmt's default `chain_width` (also 60% of `max_width`): a method-call chain
+/// wider than this — measured from the receiver, no indent — breaks to one call
+/// per line even when the whole line would still fit within [`RUSTFMT_MAX_WIDTH`].
+/// Governs the `ReflectMessage` impl's pool lookup.
+const RUSTFMT_CHAIN_WIDTH: usize = 60;
+
 /// `PascalCase` -> `SCREAMING_SNAKE_CASE` for the per-wrapper `LazyLock` const
 /// name (`ShipperResourceName` -> `SHIPPER_RESOURCE_NAME`). The struct names are
 /// ASCII `PascalCase`, so this only needs to split before each interior capital.
@@ -789,4 +928,51 @@ fn pattern_variables(pattern: &str) -> Result<Vec<String>, Error> {
         }
     }
     Ok(variables)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{rust_path, snake_module};
+
+    #[test]
+    fn snake_module_splits_pascal_case() {
+        assert_eq!(snake_module("MethodSettings"), "method_settings");
+        assert_eq!(snake_module("FunctionDecl"), "function_decl");
+        assert_eq!(snake_module("CreateStruct"), "create_struct");
+        assert_eq!(snake_module("Expr"), "expr");
+    }
+
+    /// A message-name module that is a Rust keyword must match prost: `r#kw` for
+    /// the raw-able keywords (the common `Type` case), a trailing `_` for the
+    /// four that cannot be raw identifiers.
+    #[test]
+    fn snake_module_sanitizes_keywords() {
+        assert_eq!(snake_module("Type"), "r#type");
+        assert_eq!(snake_module("Match"), "r#match");
+        assert_eq!(snake_module("Self"), "self_");
+        assert_eq!(snake_module("Super"), "super_");
+        assert_eq!(snake_module("Crate"), "crate_");
+    }
+
+    #[test]
+    fn rust_path_snakes_parents_and_keeps_the_leaf() {
+        assert_eq!(rust_path(&["Shipper".to_owned()]), "Shipper");
+        assert_eq!(
+            rust_path(&["Outer".to_owned(), "Inner".to_owned()]),
+            "outer::Inner"
+        );
+        assert_eq!(
+            rust_path(&[
+                "Decl".to_owned(),
+                "FunctionDecl".to_owned(),
+                "Overload".to_owned()
+            ]),
+            "decl::function_decl::Overload"
+        );
+        // Keyword parent, verbatim leaf.
+        assert_eq!(
+            rust_path(&["Type".to_owned(), "AbstractType".to_owned()]),
+            "r#type::AbstractType"
+        );
+    }
 }

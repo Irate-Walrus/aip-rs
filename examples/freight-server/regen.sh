@@ -24,7 +24,12 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 rm -rf src/gen
-buf generate --include-imports
+# No global --include-imports: it forces imports on for *every* plugin, which
+# would make protoc-gen-prost-aip emit `impl ReflectMessage` for the extern_path'd
+# `google.*` messages (whose structs live in aip-proto, not here). Instead each
+# plugin opts in via `include_imports` in buf.gen.yaml — only neoeinstein-tonic
+# needs it, for the imported `google.iam.v1.IAMPolicy` service trait.
+buf generate
 
 # extern_path'd packages (and the anchor) leave behind comment-only
 # "@generated" placeholder files; drop every generated file with no code line

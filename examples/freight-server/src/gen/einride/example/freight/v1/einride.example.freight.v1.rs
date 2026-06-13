@@ -3,9 +3,6 @@
 /// A shipment represents transportation of goods between an origin
 /// [site][einride.example.freight.v1.Site] and a destination
 /// [site][einride.example.freight.v1.Site].
-#[derive(::prost_reflect::ReflectMessage)]
-#[prost_reflect(descriptor_pool = "crate::proto::DESCRIPTOR_POOL")]
-#[prost_reflect(message_name = "einride.example.freight.v1.Shipment")]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Shipment {
     /// The resource name of the shipment.
@@ -53,9 +50,6 @@ pub struct Shipment {
     pub external_reference_id: ::prost::alloc::string::String,
 }
 /// A shipment line item.
-#[derive(::prost_reflect::ReflectMessage)]
-#[prost_reflect(descriptor_pool = "crate::proto::DESCRIPTOR_POOL")]
-#[prost_reflect(message_name = "einride.example.freight.v1.LineItem")]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct LineItem {
     /// The title of the line item.
@@ -75,9 +69,6 @@ pub struct LineItem {
     pub external_reference_id: ::prost::alloc::string::String,
 }
 /// A shipper is a supplier or owner of goods to be transported.
-#[derive(::prost_reflect::ReflectMessage)]
-#[prost_reflect(descriptor_pool = "crate::proto::DESCRIPTOR_POOL")]
-#[prost_reflect(message_name = "einride.example.freight.v1.Shipper")]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Shipper {
     /// The resource name of the shipper.
@@ -107,9 +98,6 @@ pub struct Shipper {
 }
 /// A site is a node in a [shipper][einride.example.freight.v1.Shipper]'s
 /// transport network.
-#[derive(::prost_reflect::ReflectMessage)]
-#[prost_reflect(descriptor_pool = "crate::proto::DESCRIPTOR_POOL")]
-#[prost_reflect(message_name = "einride.example.freight.v1.Site")]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Site {
     /// The resource name of the site.
@@ -148,8 +136,6 @@ pub struct Site {
 /// Nested message and enum types in `Site`.
 pub mod site {
     /// The operational state of a [site][einride.example.freight.v1.Site].
-    #[derive(::prost_reflect::ReflectMessage)]
-    #[prost_reflect(descriptor_pool = "crate::proto::DESCRIPTOR_POOL")]
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
     #[repr(i32)]
     pub enum State {
@@ -184,9 +170,6 @@ pub mod site {
     }
 }
 /// Request message for FreightService.GetShipper.
-#[derive(::prost_reflect::ReflectMessage)]
-#[prost_reflect(descriptor_pool = "crate::proto::DESCRIPTOR_POOL")]
-#[prost_reflect(message_name = "einride.example.freight.v1.GetShipperRequest")]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetShipperRequest {
     /// The resource name of the shipper to retrieve.
@@ -199,9 +182,6 @@ pub struct GetShipperRequest {
     pub show_deleted: bool,
 }
 /// Request message for FreightService.ListShippers.
-#[derive(::prost_reflect::ReflectMessage)]
-#[prost_reflect(descriptor_pool = "crate::proto::DESCRIPTOR_POOL")]
-#[prost_reflect(message_name = "einride.example.freight.v1.ListShippersRequest")]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ListShippersRequest {
     /// Requested page size. Server may return fewer shippers than requested.
@@ -220,9 +200,6 @@ pub struct ListShippersRequest {
     pub show_deleted: bool,
 }
 /// Response message for FreightService.ListShippers.
-#[derive(::prost_reflect::ReflectMessage)]
-#[prost_reflect(descriptor_pool = "crate::proto::DESCRIPTOR_POOL")]
-#[prost_reflect(message_name = "einride.example.freight.v1.ListShippersResponse")]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListShippersResponse {
     /// The list of shippers.
@@ -236,9 +213,6 @@ pub struct ListShippersResponse {
     pub next_page_token: ::prost::alloc::string::String,
 }
 /// Request message for FreightService.CreateShipper.
-#[derive(::prost_reflect::ReflectMessage)]
-#[prost_reflect(descriptor_pool = "crate::proto::DESCRIPTOR_POOL")]
-#[prost_reflect(message_name = "einride.example.freight.v1.CreateShipperRequest")]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreateShipperRequest {
     /// The shipper to create.
@@ -257,9 +231,6 @@ pub struct CreateShipperRequest {
     pub validate_only: bool,
 }
 /// Request message for FreightService.UpdateShipper.
-#[derive(::prost_reflect::ReflectMessage)]
-#[prost_reflect(descriptor_pool = "crate::proto::DESCRIPTOR_POOL")]
-#[prost_reflect(message_name = "einride.example.freight.v1.UpdateShipperRequest")]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct UpdateShipperRequest {
     /// The shipper to update with. The name must match or be empty.
@@ -278,9 +249,6 @@ pub struct UpdateShipperRequest {
     pub validate_only: bool,
 }
 /// Request message for FreightService.DeleteShipper.
-#[derive(::prost_reflect::ReflectMessage)]
-#[prost_reflect(descriptor_pool = "crate::proto::DESCRIPTOR_POOL")]
-#[prost_reflect(message_name = "einride.example.freight.v1.DeleteShipperRequest")]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeleteShipperRequest {
     /// The resource name of the shipper to delete.
@@ -295,9 +263,6 @@ pub struct DeleteShipperRequest {
     pub etag: ::prost::alloc::string::String,
 }
 /// Request message for FreightService.UndeleteShipper.
-#[derive(::prost_reflect::ReflectMessage)]
-#[prost_reflect(descriptor_pool = "crate::proto::DESCRIPTOR_POOL")]
-#[prost_reflect(message_name = "einride.example.freight.v1.UndeleteShipperRequest")]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct UndeleteShipperRequest {
     /// The resource name of the shipper to undelete.
@@ -306,9 +271,6 @@ pub struct UndeleteShipperRequest {
     pub name: ::prost::alloc::string::String,
 }
 /// Request message for FreightService.GetSite.
-#[derive(::prost_reflect::ReflectMessage)]
-#[prost_reflect(descriptor_pool = "crate::proto::DESCRIPTOR_POOL")]
-#[prost_reflect(message_name = "einride.example.freight.v1.GetSiteRequest")]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetSiteRequest {
     /// The resource name of the site to retrieve.
@@ -317,9 +279,6 @@ pub struct GetSiteRequest {
     pub name: ::prost::alloc::string::String,
 }
 /// Request message for FreightService.ListSites.
-#[derive(::prost_reflect::ReflectMessage)]
-#[prost_reflect(descriptor_pool = "crate::proto::DESCRIPTOR_POOL")]
-#[prost_reflect(message_name = "einride.example.freight.v1.ListSitesRequest")]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ListSitesRequest {
     /// The resource name of the parent, which owns this collection of sites.
@@ -358,9 +317,6 @@ pub struct ListSitesRequest {
     pub filter: ::prost::alloc::string::String,
 }
 /// Response message for FreightService.ListSites.
-#[derive(::prost_reflect::ReflectMessage)]
-#[prost_reflect(descriptor_pool = "crate::proto::DESCRIPTOR_POOL")]
-#[prost_reflect(message_name = "einride.example.freight.v1.ListSitesResponse")]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListSitesResponse {
     /// The list of sites.
@@ -374,9 +330,6 @@ pub struct ListSitesResponse {
     pub next_page_token: ::prost::alloc::string::String,
 }
 /// Request message for FreightService.CreateSite.
-#[derive(::prost_reflect::ReflectMessage)]
-#[prost_reflect(descriptor_pool = "crate::proto::DESCRIPTOR_POOL")]
-#[prost_reflect(message_name = "einride.example.freight.v1.CreateSiteRequest")]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CreateSiteRequest {
     /// The resource name of the parent shipper for which this site will be created.
@@ -399,9 +352,6 @@ pub struct CreateSiteRequest {
     pub validate_only: bool,
 }
 /// Request message for FreightService.UpdateSite.
-#[derive(::prost_reflect::ReflectMessage)]
-#[prost_reflect(descriptor_pool = "crate::proto::DESCRIPTOR_POOL")]
-#[prost_reflect(message_name = "einride.example.freight.v1.UpdateSiteRequest")]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct UpdateSiteRequest {
     /// The site to update with. The name must match or be empty.
@@ -414,9 +364,6 @@ pub struct UpdateSiteRequest {
     pub update_mask: ::core::option::Option<::prost_types::FieldMask>,
 }
 /// Request message for FreightService.DeleteSite.
-#[derive(::prost_reflect::ReflectMessage)]
-#[prost_reflect(descriptor_pool = "crate::proto::DESCRIPTOR_POOL")]
-#[prost_reflect(message_name = "einride.example.freight.v1.DeleteSiteRequest")]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeleteSiteRequest {
     /// The resource name of the site to delete.
@@ -425,9 +372,6 @@ pub struct DeleteSiteRequest {
     pub name: ::prost::alloc::string::String,
 }
 /// Request message for FreightService.BatchGetSites.
-#[derive(::prost_reflect::ReflectMessage)]
-#[prost_reflect(descriptor_pool = "crate::proto::DESCRIPTOR_POOL")]
-#[prost_reflect(message_name = "einride.example.freight.v1.BatchGetSitesRequest")]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct BatchGetSitesRequest {
     /// The parent resource shared by all sites being retrieved.
@@ -443,9 +387,6 @@ pub struct BatchGetSitesRequest {
     pub names: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 /// Response message for FreightService.BatchGetSites.
-#[derive(::prost_reflect::ReflectMessage)]
-#[prost_reflect(descriptor_pool = "crate::proto::DESCRIPTOR_POOL")]
-#[prost_reflect(message_name = "einride.example.freight.v1.BatchGetSitesResponse")]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct BatchGetSitesResponse {
     /// Sites requested.
@@ -453,9 +394,6 @@ pub struct BatchGetSitesResponse {
     pub sites: ::prost::alloc::vec::Vec<Site>,
 }
 /// Request message for FreightService.GetShipment.
-#[derive(::prost_reflect::ReflectMessage)]
-#[prost_reflect(descriptor_pool = "crate::proto::DESCRIPTOR_POOL")]
-#[prost_reflect(message_name = "einride.example.freight.v1.GetShipmentRequest")]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetShipmentRequest {
     /// The resource name of the shipment to retrieve.
@@ -464,9 +402,6 @@ pub struct GetShipmentRequest {
     pub name: ::prost::alloc::string::String,
 }
 /// Request message for FreightService.ListShipments.
-#[derive(::prost_reflect::ReflectMessage)]
-#[prost_reflect(descriptor_pool = "crate::proto::DESCRIPTOR_POOL")]
-#[prost_reflect(message_name = "einride.example.freight.v1.ListShipmentsRequest")]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ListShipmentsRequest {
     /// The resource name of the parent, which owns this collection of shipments.
@@ -491,9 +426,6 @@ pub struct ListShipmentsRequest {
     pub filter: ::prost::alloc::string::String,
 }
 /// Response message for FreightService.ListShipments.
-#[derive(::prost_reflect::ReflectMessage)]
-#[prost_reflect(descriptor_pool = "crate::proto::DESCRIPTOR_POOL")]
-#[prost_reflect(message_name = "einride.example.freight.v1.ListShipmentsResponse")]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListShipmentsResponse {
     /// The list of shipments.
@@ -507,9 +439,6 @@ pub struct ListShipmentsResponse {
     pub next_page_token: ::prost::alloc::string::String,
 }
 /// Request message for FreightService.CreateShipment.
-#[derive(::prost_reflect::ReflectMessage)]
-#[prost_reflect(descriptor_pool = "crate::proto::DESCRIPTOR_POOL")]
-#[prost_reflect(message_name = "einride.example.freight.v1.CreateShipmentRequest")]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CreateShipmentRequest {
     /// The resource name of the parent shipper for which this shipment will be created.
@@ -532,9 +461,6 @@ pub struct CreateShipmentRequest {
     pub validate_only: bool,
 }
 /// Request message for FreightService.UpdateShipment.
-#[derive(::prost_reflect::ReflectMessage)]
-#[prost_reflect(descriptor_pool = "crate::proto::DESCRIPTOR_POOL")]
-#[prost_reflect(message_name = "einride.example.freight.v1.UpdateShipmentRequest")]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct UpdateShipmentRequest {
     /// The shipment to update with. The name must match or be empty.
@@ -547,9 +473,6 @@ pub struct UpdateShipmentRequest {
     pub update_mask: ::core::option::Option<::prost_types::FieldMask>,
 }
 /// Request message for FreightService.DeleteShipment.
-#[derive(::prost_reflect::ReflectMessage)]
-#[prost_reflect(descriptor_pool = "crate::proto::DESCRIPTOR_POOL")]
-#[prost_reflect(message_name = "einride.example.freight.v1.DeleteShipmentRequest")]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeleteShipmentRequest {
     /// The resource name of the shipment to delete.

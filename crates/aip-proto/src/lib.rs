@@ -57,7 +57,8 @@ use prost_reflect::DescriptorPool;
 static FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("descriptor_set.binpb");
 
 /// The shared [`DescriptorPool`] every generated message reflects against
-/// (referenced by the `ReflectMessage` derive as `crate::DESCRIPTOR_POOL`).
+/// (the generated `ReflectMessage` impls resolve descriptors from
+/// `crate::DESCRIPTOR_POOL`; issue #191).
 ///
 /// Decoded once from `FILE_DESCRIPTOR_SET`. Cheaply cloned (reference-counted
 /// internally); the pool is self-contained per ADR-0009's per-crate footnote.
@@ -82,12 +83,25 @@ pub mod google {
     pub mod api {
         #[cfg(feature = "api")]
         include!("gen/google/api/google.api.rs");
+        // The `ReflectMessage` impls for `google.api`, one `.aip.rs` per source
+        // proto (prost groups the package into one file; protoc-gen-prost-aip
+        // emits per file), mounted alongside the structs they impl on (#191).
+        #[cfg(feature = "api")]
+        include!("gen/google/api/client.aip.rs");
+        #[cfg(feature = "api")]
+        include!("gen/google/api/http.aip.rs");
+        #[cfg(feature = "api")]
+        include!("gen/google/api/resource.aip.rs");
 
         /// `google.api.expr.v1alpha1`: the CEL checked/abstract syntax trees.
         #[cfg(feature = "cel")]
         pub mod expr {
             pub mod v1alpha1 {
                 include!("gen/google/api/expr/v1alpha1/google.api.expr.v1alpha1.rs");
+                // `ReflectMessage` impls, incl. the deeply-nested CEL types
+                // (`r#type::AbstractType`, `decl::function_decl::Overload`) (#191).
+                include!("gen/google/api/expr/v1alpha1/checked.aip.rs");
+                include!("gen/google/api/expr/v1alpha1/syntax.aip.rs");
             }
         }
     }
@@ -97,6 +111,10 @@ pub mod google {
     pub mod r#type {
         // prost escapes the `type` keyword in the generated file name, too.
         include!("gen/google/r#type/google.type.rs");
+        // protoc-gen-prost-aip does not escape the output dir, so its
+        // `ReflectMessage` impls sit under `google/type/` (#191).
+        include!("gen/google/type/expr.aip.rs");
+        include!("gen/google/type/latlng.aip.rs");
     }
 
     /// `google.iam.v1`: the Policy structure (ADR-0010) plus the IAMPolicy
@@ -105,6 +123,11 @@ pub mod google {
     pub mod iam {
         pub mod v1 {
             include!("gen/google/iam/v1/google.iam.v1.rs");
+            // `ReflectMessage` impls for the Policy + IAMPolicy request/response
+            // messages (#191).
+            include!("gen/google/iam/v1/iam_policy.aip.rs");
+            include!("gen/google/iam/v1/options.aip.rs");
+            include!("gen/google/iam/v1/policy.aip.rs");
         }
     }
 }

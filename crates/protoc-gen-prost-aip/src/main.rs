@@ -30,7 +30,9 @@ use std::io::{Read as _, Write as _};
 use std::process::ExitCode;
 
 use aip_codegen::{generate, CratePaths, GenInput};
-use aip_reflect::{request_descriptors_in_file, resource_descriptors_in_file};
+use aip_reflect::{
+    reflect_messages_in_file, request_descriptors_in_file, resource_descriptors_in_file,
+};
 use prost::Message as _;
 use prost_reflect::DescriptorPool;
 use prost_types::compiler::{
@@ -115,6 +117,16 @@ struct Flags {
     /// Route generated crate references through this umbrella root instead of
     /// per-crate names (e.g. `"aip"` -> `::aip::pagination::PageRequest`).
     aip_crate: Option<String>,
+    /// Emit `impl ::prost_reflect::ReflectMessage` for every message in each
+    /// generated file (ADR-0009). Requires [`reflect_descriptor_pool`].
+    ///
+    /// [`reflect_descriptor_pool`]: Self::reflect_descriptor_pool
+    reflect: bool,
+    /// Path to the consumer's `prost_reflect::DescriptorPool` the generated
+    /// `ReflectMessage` impls resolve descriptors from (e.g.
+    /// `crate::DESCRIPTOR_POOL`). Required when [`reflect`](Self::reflect) is on;
+    /// the two in-repo consumers disagree on the path, so there is no default.
+    reflect_descriptor_pool: Option<String>,
 }
 
 impl Flags {
@@ -129,15 +141,22 @@ impl Flags {
             let (key, value) = pair
                 .split_once('=')
                 .ok_or_else(|| format!("invalid parameter {pair:?}: expected `key=value`"))?;
-            // `aip_crate` takes a string value; all other flags take bool.
-            if key == "aip_crate" {
-                if value.is_empty() {
-                    return Err(format!(
-                        "invalid parameter {pair:?}: `aip_crate` value must not be empty"
-                    ));
+            // `aip_crate` / `reflect_descriptor_pool` take a string value; all
+            // other flags take bool.
+            match key {
+                "aip_crate" | "reflect_descriptor_pool" => {
+                    if value.is_empty() {
+                        return Err(format!(
+                            "invalid parameter {pair:?}: `{key}` value must not be empty"
+                        ));
+                    }
+                    match key {
+                        "aip_crate" => flags.aip_crate = Some(value.to_owned()),
+                        _ => flags.reflect_descriptor_pool = Some(value.to_owned()),
+                    }
+                    continue;
                 }
-                flags.aip_crate = Some(value.to_owned());
-                continue;
+                _ => {}
             }
             let value = match value {
                 "true" => true,
@@ -152,8 +171,19 @@ impl Flags {
                 "pagination" => flags.pagination = value,
                 "ordering" => flags.ordering = value,
                 "softdelete" => flags.softdelete = value,
+                "reflect" => flags.reflect = value,
                 _ => return Err(format!("unrecognized parameter key {key:?}")),
             }
+        }
+        // `reflect` needs a pool to resolve descriptors from; the consumers
+        // disagree on the path, so there is no default — a missing one is an
+        // error, not a silent wrong guess (ADR-0013's spirit). A pool set without
+        // `reflect` is harmless and ignored.
+        if flags.reflect && flags.reflect_descriptor_pool.is_none() {
+            return Err(
+                "`reflect=true` requires `reflect_descriptor_pool=<path to a DescriptorPool>`"
+                    .to_owned(),
+            );
         }
         Ok(flags)
     }
@@ -207,14 +237,27 @@ fn generate_response(request: CodeGeneratorRequest) -> Result<Vec<File>, String>
                 resource.has_delete_time = false;
             }
         }
+        // Reflection is all-or-nothing per message, so there is no presence bool
+        // to zero: the plugin simply withholds the message list when `reflect`
+        // is off, and the generator emits nothing (ADR-0013's zeroing rule).
+        let messages = if flags.reflect {
+            reflect_messages_in_file(&file)
+        } else {
+            Vec::new()
+        };
         inputs.push(GenInput {
             proto_file: name.clone(),
             resources,
             requests,
+            messages,
         });
     }
 
-    let paths = CratePaths::from_aip_crate(flags.aip_crate.as_deref());
+    let mut paths = CratePaths::from_aip_crate(flags.aip_crate.as_deref());
+    // `reflect_descriptor_pool` is orthogonal to the umbrella root, so it is set
+    // here rather than through `from_aip_crate`. Parsing guarantees it is present
+    // whenever `reflect` populated any `messages` above.
+    paths.descriptor_pool = flags.reflect_descriptor_pool.clone();
     let files = generate(&inputs, &paths).map_err(|e| e.to_string())?;
     Ok(files
         .into_iter()
@@ -241,6 +284,8 @@ mod tests {
                 ordering: false,
                 softdelete: false,
                 aip_crate: None,
+                reflect: false,
+                reflect_descriptor_pool: None,
             }
         );
     }
@@ -254,6 +299,8 @@ mod tests {
                 ordering: false,
                 softdelete: false,
                 aip_crate: None,
+                reflect: false,
+                reflect_descriptor_pool: None,
             }
         );
         assert_eq!(
@@ -263,6 +310,8 @@ mod tests {
                 ordering: false,
                 softdelete: false,
                 aip_crate: None,
+                reflect: false,
+                reflect_descriptor_pool: None,
             }
         );
     }
@@ -276,6 +325,8 @@ mod tests {
                 ordering: true,
                 softdelete: false,
                 aip_crate: None,
+                reflect: false,
+                reflect_descriptor_pool: None,
             }
         );
         assert_eq!(
@@ -285,6 +336,8 @@ mod tests {
                 ordering: false,
                 softdelete: false,
                 aip_crate: None,
+                reflect: false,
+                reflect_descriptor_pool: None,
             }
         );
     }
@@ -298,6 +351,8 @@ mod tests {
                 ordering: false,
                 softdelete: true,
                 aip_crate: None,
+                reflect: false,
+                reflect_descriptor_pool: None,
             }
         );
         assert_eq!(
@@ -307,6 +362,8 @@ mod tests {
                 ordering: false,
                 softdelete: false,
                 aip_crate: None,
+                reflect: false,
+                reflect_descriptor_pool: None,
             }
         );
     }
@@ -321,6 +378,8 @@ mod tests {
                 ordering: true,
                 softdelete: true,
                 aip_crate: None,
+                reflect: false,
+                reflect_descriptor_pool: None,
             }
         );
     }
@@ -334,6 +393,8 @@ mod tests {
                 ordering: false,
                 softdelete: false,
                 aip_crate: Some("aip".to_owned()),
+                reflect: false,
+                reflect_descriptor_pool: None,
             }
         );
         // Combines with bool flags.
@@ -344,10 +405,53 @@ mod tests {
                 ordering: true,
                 softdelete: false,
                 aip_crate: Some("aip".to_owned()),
+                reflect: false,
+                reflect_descriptor_pool: None,
             }
         );
         // Empty value is an error.
         assert!(Flags::parse(Some("aip_crate=")).is_err());
+    }
+
+    /// `reflect` needs a pool path: on with one parses, on without one errors,
+    /// and an empty path errors (like `aip_crate`).
+    #[test]
+    fn reflect_flag_parses_and_requires_a_pool() {
+        assert_eq!(
+            Flags::parse(Some(
+                "reflect=true,reflect_descriptor_pool=crate::DESCRIPTOR_POOL"
+            ))
+            .unwrap(),
+            Flags {
+                pagination: false,
+                ordering: false,
+                softdelete: false,
+                aip_crate: None,
+                reflect: true,
+                reflect_descriptor_pool: Some("crate::DESCRIPTOR_POOL".to_owned()),
+            }
+        );
+        // On without a pool is an error — no silent wrong default.
+        assert!(Flags::parse(Some("reflect=true")).is_err());
+        // Empty pool value is an error.
+        assert!(Flags::parse(Some("reflect=true,reflect_descriptor_pool=")).is_err());
+    }
+
+    /// A pool path set while `reflect` is off is harmless and ignored, not an
+    /// error — it is redundant config, not a typo.
+    #[test]
+    fn reflect_pool_without_reflect_is_ignored() {
+        assert_eq!(
+            Flags::parse(Some("reflect_descriptor_pool=crate::DESCRIPTOR_POOL")).unwrap(),
+            Flags {
+                pagination: false,
+                ordering: false,
+                softdelete: false,
+                aip_crate: None,
+                reflect: false,
+                reflect_descriptor_pool: Some("crate::DESCRIPTOR_POOL".to_owned()),
+            }
+        );
     }
 
     /// A typo must fail the generation, not silently disable emission.
@@ -358,6 +462,7 @@ mod tests {
         assert!(Flags::parse(Some("pagination")).is_err());
         assert!(Flags::parse(Some("ordering=yes")).is_err());
         assert!(Flags::parse(Some("softdelete=yes")).is_err());
+        assert!(Flags::parse(Some("reflect=yes")).is_err());
         // `filtering` is unrecognized until its slice lands.
         assert!(Flags::parse(Some("filtering=true")).is_err());
     }

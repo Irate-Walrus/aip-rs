@@ -11,8 +11,34 @@
 
 use std::path::Path;
 
-use aip_codegen::{generate, CratePaths, GenInput};
-use aip_reflect::{RequestDescriptor, ResourceDescriptor};
+use aip_codegen::{generate, CratePaths, GenFile, GenInput};
+use aip_reflect::{ReflectMessageName, RequestDescriptor, ResourceDescriptor};
+
+/// Compare each generated file against its committed golden, or rewrite them all
+/// under `BLESS=1`. Shared by the freight and reflect golden tests.
+fn assert_matches_golden(files: &[GenFile]) {
+    let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
+    let bless = std::env::var_os("BLESS").is_some();
+    for file in files {
+        let path = golden_dir.join(&file.path);
+        if bless {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &file.content).unwrap();
+            continue;
+        }
+        let expected = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!(
+                "read golden {} ({e}); run with BLESS=1 to create it",
+                path.display()
+            )
+        });
+        assert_eq!(
+            file.content, expected,
+            "generated {} drifted from golden; run BLESS=1 to update",
+            file.path,
+        );
+    }
+}
 
 /// A pagination-shaped [`RequestDescriptor`], with or without the `skip` field.
 fn page_request(message_name: &str, has_skip: bool) -> RequestDescriptor {
@@ -44,6 +70,7 @@ fn freight_inputs() -> Vec<GenInput> {
                 has_delete_time: true,
             }],
             requests: vec![],
+            messages: vec![],
         },
         GenInput {
             proto_file: "einride/example/freight/v1/site.proto".to_owned(),
@@ -54,6 +81,7 @@ fn freight_inputs() -> Vec<GenInput> {
                 has_delete_time: true,
             }],
             requests: vec![],
+            messages: vec![],
         },
         GenInput {
             proto_file: "einride/example/freight/v1/freight_service.proto".to_owned(),
@@ -76,6 +104,7 @@ fn freight_inputs() -> Vec<GenInput> {
                     has_filter: false,
                 },
             ],
+            messages: vec![],
         },
     ]
 }
@@ -89,29 +118,62 @@ fn freight_resources_match_golden() {
         3,
         "one output file per contributing proto file"
     );
+    // The freight golden inputs carry no `messages`, so these fixtures stay
+    // reflect-free and `roundtrip.rs` can keep compiling them (a `ReflectMessage`
+    // impl would need `prost_reflect`, a real pool, and `Self: prost::Message`).
+    assert_matches_golden(&files);
+}
 
-    let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
-    let bless = std::env::var_os("BLESS").is_some();
+/// The `ReflectMessage` emission, golden-tested on its own (these fixtures are
+/// **not** compiled by `roundtrip.rs`): a top-level message, a two- and
+/// three-segment nested message, and a keyword-parent (`Type` -> `r#type`). The
+/// pool lookup always breaks across lines here because the standardized `expect`
+/// message pushes the chain past `chain_width` — so this also pins that form.
+#[test]
+fn reflect_messages_match_golden() {
+    let messages = vec![
+        // Top-level: impl on the bare struct name.
+        ReflectMessageName {
+            full_name: "reflect.example.v1.Widget".to_owned(),
+            path: vec!["Widget".to_owned()],
+        },
+        // Two-segment nested: parent snake-cased into a module.
+        ReflectMessageName {
+            full_name: "reflect.example.v1.Outer.Inner".to_owned(),
+            path: vec!["Outer".to_owned(), "Inner".to_owned()],
+        },
+        // Three-segment nested: both parents become modules.
+        ReflectMessageName {
+            full_name: "reflect.example.v1.Decl.FunctionDecl.Overload".to_owned(),
+            path: vec![
+                "Decl".to_owned(),
+                "FunctionDecl".to_owned(),
+                "Overload".to_owned(),
+            ],
+        },
+        // Keyword parent: `Type` is a Rust keyword, so the module is `r#type`.
+        ReflectMessageName {
+            full_name: "reflect.example.v1.Type.AbstractType".to_owned(),
+            path: vec!["Type".to_owned(), "AbstractType".to_owned()],
+        },
+    ];
+    let paths = CratePaths {
+        descriptor_pool: Some("crate::DESCRIPTOR_POOL".to_owned()),
+        ..CratePaths::default()
+    };
 
-    for file in &files {
-        let path = golden_dir.join(&file.path);
-        if bless {
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(&path, &file.content).unwrap();
-            continue;
-        }
-        let expected = std::fs::read_to_string(&path).unwrap_or_else(|e| {
-            panic!(
-                "read golden {} ({e}); run with BLESS=1 to create it",
-                path.display()
-            )
-        });
-        assert_eq!(
-            file.content, expected,
-            "generated {} drifted from golden; run BLESS=1 to update",
-            file.path,
-        );
-    }
+    let files = generate(
+        &[GenInput {
+            proto_file: "reflect/example/v1/messages.proto".to_owned(),
+            resources: vec![],
+            requests: vec![],
+            messages,
+        }],
+        &paths,
+    )
+    .expect("reflect input generates");
+    assert_eq!(files.len(), 1, "one reflect-only output file");
+    assert_matches_golden(&files);
 }
 
 #[test]
@@ -140,6 +202,7 @@ fn resource_without_patterns_produces_no_file() {
                 has_delete_time: false,
             }],
             requests: vec![],
+            messages: vec![],
         }],
         &CratePaths::default(),
     )
@@ -159,6 +222,7 @@ fn request_without_the_pagination_shape_produces_no_file() {
             proto_file: "x/y.proto".to_owned(),
             resources: vec![],
             requests: vec![token_only],
+            messages: vec![],
         }],
         &CratePaths::default(),
     )
@@ -178,6 +242,7 @@ fn resource_type_without_a_type_name_is_an_error() {
                 has_delete_time: false,
             }],
             requests: vec![],
+            messages: vec![],
         }],
         &CratePaths::default(),
     )
@@ -197,6 +262,7 @@ fn wildcard_pattern_is_rejected() {
                 has_delete_time: false,
             }],
             requests: vec![],
+            messages: vec![],
         }],
         &CratePaths::default(),
     )
@@ -220,6 +286,7 @@ fn soft_deletable_resource_emits_an_impl_on_its_message() {
                 has_delete_time: true,
             }],
             requests: vec![],
+            messages: vec![],
         }],
         &CratePaths::default(),
     )
@@ -251,6 +318,7 @@ fn resource_without_delete_time_emits_no_soft_deletable() {
                 has_delete_time: false,
             }],
             requests: vec![],
+            messages: vec![],
         }],
         &CratePaths::default(),
     )
