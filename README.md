@@ -13,8 +13,8 @@ and friends — ported from [`einride/aip-go`](https://github.com/einride/aip-go
 > review. Evaluate the code to your own standards before depending on it.
 
 > [!NOTE]
-> Not yet published to crates.io. Depend on it via git for now (see
-> [Installation](#installation)).
+> Not published to crates.io. Depend on it via git for now (see
+> [Installation](#installation)) or better yet, not at all.
 
 ## Overview
 
