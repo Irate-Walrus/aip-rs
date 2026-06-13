@@ -99,3 +99,28 @@ umbrella as `aip::iam`; then the Policy structural ops with
 - `freight-server` gains an `IAMPolicy` service and a resource-name-keyed
   policy store, with `TestIamPermissions` deciding *through* the `iam-eval`
   adapter — demonstrating execution as an opt-in layer over the core.
+
+## Amendment (#157): static **Permission** literals, and why `authz` stays typed
+
+A known-good **Permission** literal (every consumer naming a permission for an
+AIP-211 denial holds one) should not pay a runtime parse plus `.expect`.
+`Permission::from_static(&'static str)` is a `const fn` that validates the
+literal and panics on a malformed one — compile-time when bound to a `const`,
+mirroring `http::HeaderValue::from_static`. Inner repr becomes
+`Cow<'static, str>`: `from_static` borrows (no alloc), `FromStr` owns; both run
+the *same* `const fn` byte-level validator so the format rules cannot diverge,
+and `Eq`/`Hash` over the `str` make a const-built value interchangeable with a
+parsed one. Private change — no public API break.
+
+**The `aip::iam::authz` denial helpers keep taking `&Permission`, not `&str`.**
+The typed value is the *proof of validity*: a helper that accepted `&str` would
+either re-validate on every denial (the cost `from_static` removes) or trust an
+unchecked string straight into the wire `ErrorInfo` — leaking a malformed
+permission into a client-facing AIP-211 error. `from_static` makes the typed
+value free to construct, so there is no ergonomic reason to weaken the helper
+signatures.
+
+**Role is not given `from_static`.** No consumer constructs a **Role**
+statically, and its enum shape (predefined / organization / project forms) needs
+roughly 3× the const code — const segment-carving on top of `Cow` fields. Left
+out until demand appears, per scope discipline.
