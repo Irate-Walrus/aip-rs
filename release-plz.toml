@@ -9,15 +9,20 @@
 #
 # All crates share one version via `[workspace.package] version` (every member is
 # `version.workspace = true`), so release-plz versions them as a set.
+#
+# Versioning policy: stay in 0.0.x while the API is unstable. release-plz is
+# semver-aware for the 0.0.z range — a breaking change, a `feat`, and a `fix` all
+# bump only the patch (0.0.1 -> 0.0.2), so it never leaves 0.0.x on its own.
+# Moving to 0.1.0 is a deliberate, manual bump of `[workspace.package] version`.
 
 [workspace]
 # Gate every release on cargo-semver-checks against the last published version:
 # a breaking change without the matching version bump fails the release PR rather
-# than shipping silently. release-plz proposes the correct bump (for 0.x, a
-# breaking change moves the minor: 0.1 -> 0.2).
+# than shipping silently. release-plz proposes the correct bump (in 0.0.x every
+# change is a patch bump: 0.0.1 -> 0.0.2).
 semver_check = true
 # One GitHub release + git tag per crate. The default tag is
-# `{{ package }}-v{{ version }}` (e.g. `protoc-gen-prost-aip-v0.1.0`); the
+# `{{ package }}-v{{ version }}` (e.g. `protoc-gen-prost-aip-v0.0.1`); the
 # plugin-binary workflow keys off the `protoc-gen-prost-aip-v*` tag.
 git_release_enable = true
 git_tag_enable = true
