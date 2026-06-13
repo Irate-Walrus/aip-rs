@@ -118,6 +118,22 @@ impl ::std::str::FromStr for ShipmentResourceName {
     }
 }
 
+impl TryFrom<&str> for ShipmentResourceName {
+    type Error = ::aip::resourcename::Error;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        Self::parse(s)
+    }
+}
+
+impl TryFrom<String> for ShipmentResourceName {
+    type Error = ::aip::resourcename::Error;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Self::parse(&s)
+    }
+}
+
 impl From<ShipmentResourceName> for String {
     fn from(name: ShipmentResourceName) -> Self {
         name.to_string()

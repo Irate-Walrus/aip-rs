@@ -84,7 +84,7 @@ mod tests {
     use prost_reflect::ReflectMessage;
 
     use super::einride::example::freight::v1::{
-        BatchGetSitesRequest, ListShippersRequest, Shipment, Shipper,
+        BatchGetSitesRequest, ListShippersRequest, Shipment, Shipper, ShipperResourceName,
     };
 
     /// ADR-0009 smoke check: a generated freight type is a **Typed message** — it
@@ -138,6 +138,31 @@ mod tests {
         assert!(
             aip::reflect::validate_resource_references(&bad).is_err(),
             "origin_site does not name a Site",
+        );
+    }
+
+    /// aip #170: generated wrappers carry `TryFrom<&str>` / `TryFrom<String>`
+    /// paired with `FromStr`, so a raw **Resource name** string converts into a
+    /// typed wrapper via `.try_into()` — borrowed and owned both work, and a
+    /// non-matching name is rejected through the same path (same error as parse).
+    #[test]
+    fn resource_name_string_converts_via_try_into() {
+        // Borrowed form: `&str -> ShipperResourceName`.
+        let borrowed: ShipperResourceName =
+            "shippers/acme".try_into().expect("a valid shipper name");
+        assert_eq!(borrowed.shipper(), "acme");
+
+        // Owned form: `String -> ShipperResourceName`, same value.
+        let owned: ShipperResourceName = String::from("shippers/acme")
+            .try_into()
+            .expect("a valid shipper name");
+        assert_eq!(owned, borrowed);
+
+        // Wrong shape — a Site name is not a Shipper — rejected through TryFrom.
+        let rejected: Result<ShipperResourceName, _> = "shippers/1/sites/1".try_into();
+        assert!(
+            rejected.is_err(),
+            "a Site name does not match the Shipper pattern"
         );
     }
 }

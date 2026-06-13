@@ -17,7 +17,9 @@
 //! Result<Self, Error>` constructor (each variable checked with
 //! [`aip_resourcename::validate_variable`]). Because construction validates every
 //! variable, the wrapper formats infallibly: it implements [`Display`], plus
-//! [`FromStr`] (delegating to `parse`) and `From<Self> for String`. The compiled
+//! [`FromStr`] (delegating to `parse`), the matching `TryFrom<&str>` /
+//! `TryFrom<String>` (same `Error`, for `.try_into()` and generic bounds), and
+//! `From<Self> for String`. The compiled
 //! [`Pattern`] is built once per wrapper in a `LazyLock`, shared by `parse` and
 //! `Display`. The generator does **not** reimplement the runtime; the emitted
 //! code calls into it.
@@ -611,6 +613,27 @@ fn write_resource_name(
     line("");
     line("    fn from_str(s: &str) -> Result<Self, Self::Err> {");
     line("        Self::parse(s)");
+    line("    }");
+    line("}");
+
+    // `TryFrom<&str>` / `TryFrom<String>` — std pairs these with `FromStr` so
+    // call sites can `.try_into()` and generic `T: TryFrom<&str>` bounds bind.
+    // Both delegate to `parse`, carrying the same `Error` as `FromStr`.
+    line("");
+    line(&format!("impl TryFrom<&str> for {struct_name} {{"));
+    line(&format!("    type Error = {rn}::Error;"));
+    line("");
+    line("    fn try_from(s: &str) -> Result<Self, Self::Error> {");
+    line("        Self::parse(s)");
+    line("    }");
+    line("}");
+
+    line("");
+    line(&format!("impl TryFrom<String> for {struct_name} {{"));
+    line(&format!("    type Error = {rn}::Error;"));
+    line("");
+    line("    fn try_from(s: String) -> Result<Self, Self::Error> {");
+    line("        Self::parse(&s)");
     line("    }");
     line("}");
 

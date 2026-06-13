@@ -90,6 +90,22 @@ impl ::std::str::FromStr for ShipperResourceName {
     }
 }
 
+impl TryFrom<&str> for ShipperResourceName {
+    type Error = ::aip_resourcename::Error;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        Self::parse(s)
+    }
+}
+
+impl TryFrom<String> for ShipperResourceName {
+    type Error = ::aip_resourcename::Error;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Self::parse(&s)
+    }
+}
+
 impl From<ShipperResourceName> for String {
     fn from(name: ShipperResourceName) -> Self {
         name.to_string()
