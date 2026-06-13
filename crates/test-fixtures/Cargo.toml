@@ -12,6 +12,7 @@ name = "test-fixtures"
 description = "Test-only fixtures: einride example protos via buf into a shared DescriptorPool, with JSON -> DynamicMessage helpers"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true

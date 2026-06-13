@@ -3,6 +3,7 @@ name = "aip-requestid"
 description = "AIP-155 request_id validation and the idempotency contract"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true

@@ -14,6 +14,7 @@ name = "aip-errordomain"
 description = "Tonic boundary layer that stamps one AIP-193 ErrorInfo.domain per service"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true

@@ -3,6 +3,7 @@ name = "protoc-gen-prost-aip"
 description = "buf/protoc plugin: emits typed resource-name wrappers from google.api.resource annotations (the protoc-gen-go-aip analog). A thin stdin -> aip-codegen::generate -> stdout shim."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true

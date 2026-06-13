@@ -3,6 +3,7 @@ name = "aip-ordering"
 description = "AIP-132 order_by parsing and validation"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true

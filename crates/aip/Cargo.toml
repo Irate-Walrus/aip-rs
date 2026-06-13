@@ -3,6 +3,7 @@ name = "aip"
 description = "Rust SDK for Google's API Improvement Proposals (AIP)"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
