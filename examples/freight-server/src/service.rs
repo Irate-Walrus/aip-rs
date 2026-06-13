@@ -35,6 +35,12 @@ use crate::storage::{PolicyStore, Storage};
 /// segment (ADR-0011); a test guards the two against drifting apart.
 const SHIPPERS_COLLECTION: &str = "shippers";
 
+/// The AIP-211 permission `GetShipper` checks (`freight.shippers.get`) — the
+/// `Permission` named in a denial's non-leaking message and `IAM_*` `ErrorInfo`.
+/// `from_static` validates the literal at compile time, so no runtime parse-and-expect
+/// (aip #157).
+const SHIPPER_GET_PERMISSION: Permission = Permission::from_static("freight.shippers.get");
+
 /// The AIP-158 page-size policy passed to [`Page::parse`]: the default the server
 /// picks when a request leaves `page_size` unset, and the cap that stops a client
 /// pulling the whole store in one request (the server may return fewer than asked).
@@ -138,7 +144,6 @@ impl FreightService for FreightServer {
         // authorized branch applies keeps a soft-deleted shipper no more
         // discoverable to an unauthorized caller than to an authorized one
         // (AIP-164, AIP-211): both branches treat a hidden shipper as absent.
-        let permission = shipper_get_permission();
         // A malformed name parses to nothing — it was never in the store, so it is
         // not visible (the same answer the old raw-string lookup gave).
         let visible = ShipperResourceName::parse(&name)
@@ -146,11 +151,14 @@ impl FreightService for FreightServer {
             .and_then(|resource| self.storage.get_shipper(&resource))
             .is_some_and(|shipper| aip::softdelete::is_visible(&shipper, req.show_deleted));
         if visible {
-            Err(aip::iam::authz::permission_denied(&permission, &name))
+            Err(aip::iam::authz::permission_denied(
+                &SHIPPER_GET_PERMISSION,
+                &name,
+            ))
         } else {
             let parent_read = self.authorized(caller.as_ref(), SHIPPERS_COLLECTION);
             Err(aip::iam::authz::not_found_via_parent(
-                &permission,
+                &SHIPPER_GET_PERMISSION,
                 &name,
                 parent_read,
             ))
@@ -799,14 +807,6 @@ pub(crate) fn member_matches(granted: &str, caller: Option<&Member>) -> bool {
         "allAuthenticatedUsers" => caller.is_some(),
         granted => caller.is_some_and(|member| member.to_string() == granted),
     }
-}
-
-/// The AIP-211 permission `GetShipper` checks (`freight.shippers.get`) — the
-/// `Permission` named in a denial's non-leaking message and `IAM_*` `ErrorInfo`.
-fn shipper_get_permission() -> Permission {
-    "freight.shippers.get"
-        .parse()
-        .expect("a static freight.shippers.get permission is well-formed")
 }
 
 /// AIP-155 idempotency pre-check for a create handler.
