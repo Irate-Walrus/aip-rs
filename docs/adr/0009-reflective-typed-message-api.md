@@ -41,9 +41,45 @@ remains the low-level escape hatch and the crates' test surface (JSON → a
 ## The build requirement
 
 A **Typed message** carries its **Descriptor** only if generated to do so, so
-consumers must generate with descriptor embedding + `ReflectMessage` derives
-(originally `prost-reflect-build` over the `protox`-built `FileDescriptorSet`;
-since ADR-0011, the buf pipeline). No `protoc` is reintroduced.
+consumers must generate with descriptor embedding + a `ReflectMessage` impl per
+message (originally `prost-reflect-build` over the `protox`-built
+`FileDescriptorSet`; since ADR-0011, the buf pipeline). No `protoc` is
+reintroduced.
+
+### Emitting the `ReflectMessage` impls (issue #191)
+
+The impls were first wired by `prost_reflect`'s **derive**, which forces
+`#[prost_reflect(message_name = "<fqn>")]` as a compile-time literal on every
+message. `protoc-gen-prost`'s `type_attribute` opt cannot interpolate the FQN, so
+each consumer's `buf.gen.yaml` hand-listed one attribute line per message — 66 in
+`aip-proto`, growing with every schema bump, and past the BSR remote-execution
+param limit at scale. We instead **emit the impl directly** from
+`protoc-gen-prost-aip` (the same `.aip.rs` mechanism as the resource-name
+wrappers, `PageRequest`, and `SoftDeletable`): with `reflect=true` it writes an
+`impl ::prost_reflect::ReflectMessage` for every generated message, resolving the
+descriptor from a configurable `reflect_descriptor_pool` at runtime. The plugin
+already receives every message's FQN, so the list is no longer hand-maintained.
+
+Key points of the emission:
+
+- **Every message, nested included** — the walk recurses and skips only the
+  synthetic map-entry messages (no generated struct). A nested proto message
+  `pkg.A.B.C` is named by its prost Rust path `a::b::C`, snake-casing the parent
+  modules with prost-build's exact keyword rule (`Type` -> `r#type`).
+- **`reflect_descriptor_pool` is required when `reflect=true`** — the two in-repo
+  consumers disagree on the path (`crate::DESCRIPTOR_POOL` vs
+  `crate::proto::DESCRIPTOR_POOL`), so there is no default; a missing one fails
+  generation rather than guessing.
+- **Completeness stays compiler-enforced** — a wrong Rust path or a missing impl
+  is a build error in the consumer (the property the derive's required
+  `message_name` gave), not silent drift.
+- **`prost_reflect` is named directly** (`::prost_reflect`), not routed through
+  the `aip` umbrella: it is a third-party crate the consumer already depends on.
+- **Scope is the consumer's own packages.** The plugin generates for whatever is
+  in `file_to_generate`, so a consumer that extern-paths shared packages (e.g.
+  freight's `google.*` onto `aip-proto`) must keep those out of the aip plugin's
+  inputs — done with per-plugin `include_imports: false` so it never emits an
+  impl for a type whose struct lives in another crate.
 
 ## Considered Options
 
@@ -58,6 +94,16 @@ since ADR-0011, the buf pipeline). No `protoc` is reintroduced.
   the reflective crates could no longer test through JSON → `DynamicMessage`
   (needs generated types in tests, against ADR-0006) and JSON/gateway callers
   lose any entry point. Rejected in favor of layering.
+
+For the impl-emission (issue #191):
+
+- **Keep the prost derive + hand-listed `message_name`** — no plugin change, but
+  the list is hand-maintained, grows with the schema, and overflows the BSR
+  remote-execution param limit. Rejected for the plugin emission above.
+- **`prost-reflect-build` in a `build.rs`** — generates the impls from the
+  `FileDescriptorSet` at build time, but reintroduces a codegen `build.rs` and a
+  proto toolchain at consumer build, which ADR-0011 deliberately removed (the
+  output is committed). Rejected.
 
 ## Consequences
 

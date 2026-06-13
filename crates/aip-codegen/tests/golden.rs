@@ -11,89 +11,15 @@
 
 use std::path::Path;
 
-use aip_codegen::{generate, CratePaths, GenInput};
-use aip_reflect::{RequestDescriptor, ResourceDescriptor};
+use aip_codegen::{generate, CratePaths, GenFile, GenInput};
+use aip_reflect::{ReflectMessageName, RequestDescriptor, ResourceDescriptor};
 
-/// A pagination-shaped [`RequestDescriptor`], with or without the `skip` field.
-fn page_request(message_name: &str, has_skip: bool) -> RequestDescriptor {
-    RequestDescriptor {
-        message_name: message_name.to_owned(),
-        has_page_token: true,
-        has_page_size: true,
-        has_skip,
-        has_order_by: false,
-        has_filter: false,
-    }
-}
-
-/// The freight inputs, mirroring `examples/freight-server`: `shipper.proto`
-/// (one variable) and `site.proto` (a parent + child variable) declare the
-/// resources, and `freight_service.proto` — no resources at all — carries the
-/// paginated List requests (`ListSitesRequest` with `skip` and `order_by`,
-/// `ListShippersRequest` without either).
-fn freight_inputs() -> Vec<GenInput> {
-    vec![
-        GenInput {
-            proto_file: "einride/example/freight/v1/shipper.proto".to_owned(),
-            // The Shipper message carries a `delete_time`, so it earns both a
-            // resource-name wrapper and a `SoftDeletable` impl (ADR-0014).
-            resources: vec![ResourceDescriptor {
-                resource_type: "freight-example.einride.tech/Shipper".to_owned(),
-                patterns: vec!["shippers/{shipper}".to_owned()],
-                message_name: Some("Shipper".to_owned()),
-                has_delete_time: true,
-            }],
-            requests: vec![],
-        },
-        GenInput {
-            proto_file: "einride/example/freight/v1/site.proto".to_owned(),
-            resources: vec![ResourceDescriptor {
-                resource_type: "freight-example.einride.tech/Site".to_owned(),
-                patterns: vec!["shippers/{shipper}/sites/{site}".to_owned()],
-                message_name: Some("Site".to_owned()),
-                has_delete_time: true,
-            }],
-            requests: vec![],
-        },
-        GenInput {
-            proto_file: "einride/example/freight/v1/freight_service.proto".to_owned(),
-            resources: vec![],
-            requests: vec![
-                page_request("ListShippersRequest", false),
-                // `ListSites` honors an AIP-132 `order_by`, so it earns both the
-                // `PageRequest` (with `skip`) and `OrderByRequest` impls.
-                RequestDescriptor {
-                    has_order_by: true,
-                    ..page_request("ListSitesRequest", true)
-                },
-                // A non-paginated request contributes nothing.
-                RequestDescriptor {
-                    message_name: "GetShipperRequest".to_owned(),
-                    has_page_token: false,
-                    has_page_size: false,
-                    has_skip: false,
-                    has_order_by: false,
-                    has_filter: false,
-                },
-            ],
-        },
-    ]
-}
-
-#[test]
-fn freight_resources_match_golden() {
-    let files =
-        generate(&freight_inputs(), &CratePaths::default()).expect("freight inputs generate");
-    assert_eq!(
-        files.len(),
-        3,
-        "one output file per contributing proto file"
-    );
-
+/// Compare each generated file against its committed golden, or rewrite them all
+/// under `BLESS=1`. Shared by the freight and reflect golden tests.
+fn assert_matches_golden(files: &[GenFile]) {
     let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
     let bless = std::env::var_os("BLESS").is_some();
-
-    for file in &files {
+    for file in files {
         let path = golden_dir.join(&file.path);
         if bless {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -114,6 +40,139 @@ fn freight_resources_match_golden() {
     }
 }
 
+/// A pagination-shaped [`RequestDescriptor`], with or without the `skip` field.
+fn page_request(message_name: &str, has_skip: bool) -> RequestDescriptor {
+    RequestDescriptor {
+        message_name: message_name.to_owned(),
+        has_page_token: true,
+        has_page_size: true,
+        has_skip,
+        has_order_by: false,
+        has_filter: false,
+    }
+}
+
+/// The freight inputs, mirroring `examples/freight-server`: `shipper.proto`
+/// (one variable) and `site.proto` (a parent + child variable) declare the
+/// resources, and `freight_service.proto` — no resources at all — carries the
+/// paginated List requests (`ListSitesRequest` with `skip` and `order_by`,
+/// `ListShippersRequest` without either).
+fn freight_inputs() -> Vec<GenInput> {
+    vec![
+        // The Shipper message carries a `delete_time`, so it earns both a
+        // resource-name wrapper and a `SoftDeletable` impl (ADR-0014).
+        GenInput::new(
+            "einride/example/freight/v1/shipper.proto".to_owned(),
+            vec![ResourceDescriptor {
+                resource_type: "freight-example.einride.tech/Shipper".to_owned(),
+                patterns: vec!["shippers/{shipper}".to_owned()],
+                message_name: Some("Shipper".to_owned()),
+                has_delete_time: true,
+            }],
+            vec![],
+            vec![],
+        ),
+        GenInput::new(
+            "einride/example/freight/v1/site.proto".to_owned(),
+            vec![ResourceDescriptor {
+                resource_type: "freight-example.einride.tech/Site".to_owned(),
+                patterns: vec!["shippers/{shipper}/sites/{site}".to_owned()],
+                message_name: Some("Site".to_owned()),
+                has_delete_time: true,
+            }],
+            vec![],
+            vec![],
+        ),
+        GenInput::new(
+            "einride/example/freight/v1/freight_service.proto".to_owned(),
+            vec![],
+            vec![
+                page_request("ListShippersRequest", false),
+                // `ListSites` honors an AIP-132 `order_by`, so it earns both the
+                // `PageRequest` (with `skip`) and `OrderByRequest` impls.
+                RequestDescriptor {
+                    has_order_by: true,
+                    ..page_request("ListSitesRequest", true)
+                },
+                // A non-paginated request contributes nothing.
+                RequestDescriptor {
+                    message_name: "GetShipperRequest".to_owned(),
+                    has_page_token: false,
+                    has_page_size: false,
+                    has_skip: false,
+                    has_order_by: false,
+                    has_filter: false,
+                },
+            ],
+            vec![],
+        ),
+    ]
+}
+
+#[test]
+fn freight_resources_match_golden() {
+    let files =
+        generate(&freight_inputs(), &CratePaths::default()).expect("freight inputs generate");
+    assert_eq!(
+        files.len(),
+        3,
+        "one output file per contributing proto file"
+    );
+    // The freight golden inputs carry no `messages`, so these fixtures stay
+    // reflect-free and `roundtrip.rs` can keep compiling them (a `ReflectMessage`
+    // impl would need `prost_reflect`, a real pool, and `Self: prost::Message`).
+    assert_matches_golden(&files);
+}
+
+/// The `ReflectMessage` emission, golden-tested on its own (these fixtures are
+/// **not** compiled by `roundtrip.rs`): a top-level message, a two- and
+/// three-segment nested message, and a keyword-parent (`Type` -> `r#type`). The
+/// pool lookup always breaks across lines here because the standardized `expect`
+/// message pushes the chain past `chain_width` — so this also pins that form.
+#[test]
+fn reflect_messages_match_golden() {
+    let messages = vec![
+        // Top-level: impl on the bare struct name.
+        ReflectMessageName {
+            full_name: "reflect.example.v1.Widget".to_owned(),
+            path: vec!["Widget".to_owned()],
+        },
+        // Two-segment nested: parent snake-cased into a module.
+        ReflectMessageName {
+            full_name: "reflect.example.v1.Outer.Inner".to_owned(),
+            path: vec!["Outer".to_owned(), "Inner".to_owned()],
+        },
+        // Three-segment nested: both parents become modules.
+        ReflectMessageName {
+            full_name: "reflect.example.v1.Decl.FunctionDecl.Overload".to_owned(),
+            path: vec![
+                "Decl".to_owned(),
+                "FunctionDecl".to_owned(),
+                "Overload".to_owned(),
+            ],
+        },
+        // Keyword parent: `Type` is a Rust keyword, so the module is `r#type`.
+        ReflectMessageName {
+            full_name: "reflect.example.v1.Type.AbstractType".to_owned(),
+            path: vec!["Type".to_owned(), "AbstractType".to_owned()],
+        },
+    ];
+    let paths = CratePaths::default().with_descriptor_pool("crate::DESCRIPTOR_POOL".to_owned());
+
+    let files = generate(
+        &[GenInput::new(
+            "reflect/example/v1/messages.proto".to_owned(),
+            vec![],
+            vec![],
+            messages,
+        )],
+        &paths,
+    )
+    .expect("reflect input generates");
+    assert_eq!(files.len(), 1, "one reflect-only output file");
+    assert_matches_golden(&files);
+}
+
 #[test]
 fn output_path_swaps_proto_for_aip_rs() {
     let files = generate(&freight_inputs(), &CratePaths::default()).unwrap();
@@ -131,16 +190,17 @@ fn output_path_swaps_proto_for_aip_rs() {
 #[test]
 fn resource_without_patterns_produces_no_file() {
     let files = generate(
-        &[GenInput {
-            proto_file: "x/y.proto".to_owned(),
-            resources: vec![ResourceDescriptor {
+        &[GenInput::new(
+            "x/y.proto".to_owned(),
+            vec![ResourceDescriptor {
                 resource_type: "example.com/Thing".to_owned(),
                 patterns: vec![],
                 message_name: Some("Thing".to_owned()),
                 has_delete_time: false,
             }],
-            requests: vec![],
-        }],
+            vec![],
+            vec![],
+        )],
         &CratePaths::default(),
     )
     .unwrap();
@@ -155,11 +215,12 @@ fn request_without_the_pagination_shape_produces_no_file() {
     let mut token_only = page_request("ListThingsRequest", false);
     token_only.has_page_size = false;
     let files = generate(
-        &[GenInput {
-            proto_file: "x/y.proto".to_owned(),
-            resources: vec![],
-            requests: vec![token_only],
-        }],
+        &[GenInput::new(
+            "x/y.proto".to_owned(),
+            vec![],
+            vec![token_only],
+            vec![],
+        )],
         &CratePaths::default(),
     )
     .unwrap();
@@ -169,16 +230,17 @@ fn request_without_the_pagination_shape_produces_no_file() {
 #[test]
 fn resource_type_without_a_type_name_is_an_error() {
     let err = generate(
-        &[GenInput {
-            proto_file: "x/y.proto".to_owned(),
-            resources: vec![ResourceDescriptor {
+        &[GenInput::new(
+            "x/y.proto".to_owned(),
+            vec![ResourceDescriptor {
                 resource_type: "no-slash".to_owned(),
                 patterns: vec!["things/{thing}".to_owned()],
                 message_name: Some("Thing".to_owned()),
                 has_delete_time: false,
             }],
-            requests: vec![],
-        }],
+            vec![],
+            vec![],
+        )],
         &CratePaths::default(),
     )
     .expect_err("a type with no `service/Type` form cannot name a struct");
@@ -188,16 +250,17 @@ fn resource_type_without_a_type_name_is_an_error() {
 #[test]
 fn wildcard_pattern_is_rejected() {
     let err = generate(
-        &[GenInput {
-            proto_file: "x/y.proto".to_owned(),
-            resources: vec![ResourceDescriptor {
+        &[GenInput::new(
+            "x/y.proto".to_owned(),
+            vec![ResourceDescriptor {
                 resource_type: "example.com/Thing".to_owned(),
                 patterns: vec!["things/-".to_owned()],
                 message_name: Some("Thing".to_owned()),
                 has_delete_time: false,
             }],
-            requests: vec![],
-        }],
+            vec![],
+            vec![],
+        )],
         &CratePaths::default(),
     )
     .expect_err("a wildcard is not a valid pattern");
@@ -211,16 +274,17 @@ fn wildcard_pattern_is_rejected() {
 #[test]
 fn soft_deletable_resource_emits_an_impl_on_its_message() {
     let files = generate(
-        &[GenInput {
-            proto_file: "x/y.proto".to_owned(),
-            resources: vec![ResourceDescriptor {
+        &[GenInput::new(
+            "x/y.proto".to_owned(),
+            vec![ResourceDescriptor {
                 resource_type: "example.com/Thing".to_owned(),
                 patterns: vec!["things/{thing}".to_owned()],
                 message_name: Some("Thing".to_owned()),
                 has_delete_time: true,
             }],
-            requests: vec![],
-        }],
+            vec![],
+            vec![],
+        )],
         &CratePaths::default(),
     )
     .unwrap();
@@ -242,16 +306,17 @@ fn soft_deletable_resource_emits_an_impl_on_its_message() {
 #[test]
 fn resource_without_delete_time_emits_no_soft_deletable() {
     let files = generate(
-        &[GenInput {
-            proto_file: "x/y.proto".to_owned(),
-            resources: vec![ResourceDescriptor {
+        &[GenInput::new(
+            "x/y.proto".to_owned(),
+            vec![ResourceDescriptor {
                 resource_type: "example.com/Thing".to_owned(),
                 patterns: vec!["things/{thing}".to_owned()],
                 message_name: Some("Thing".to_owned()),
                 has_delete_time: false,
             }],
-            requests: vec![],
-        }],
+            vec![],
+            vec![],
+        )],
         &CratePaths::default(),
     )
     .unwrap();

@@ -43,3 +43,192 @@ impl ::aip::pagination::PageRequest for ListShipmentsRequest {
         self.page_size
     }
 }
+
+/// Reflection wiring (ADR-0009): resolves this message's descriptor from the pool.
+impl ::prost_reflect::ReflectMessage for GetShipperRequest {
+    fn descriptor(&self) -> ::prost_reflect::MessageDescriptor {
+        crate::proto::DESCRIPTOR_POOL
+            .get_message_by_name("einride.example.freight.v1.GetShipperRequest")
+            .expect("descriptor pool contains einride.example.freight.v1.GetShipperRequest")
+    }
+}
+
+/// Reflection wiring (ADR-0009): resolves this message's descriptor from the pool.
+impl ::prost_reflect::ReflectMessage for ListShippersRequest {
+    fn descriptor(&self) -> ::prost_reflect::MessageDescriptor {
+        crate::proto::DESCRIPTOR_POOL
+            .get_message_by_name("einride.example.freight.v1.ListShippersRequest")
+            .expect("descriptor pool contains einride.example.freight.v1.ListShippersRequest")
+    }
+}
+
+/// Reflection wiring (ADR-0009): resolves this message's descriptor from the pool.
+impl ::prost_reflect::ReflectMessage for ListShippersResponse {
+    fn descriptor(&self) -> ::prost_reflect::MessageDescriptor {
+        crate::proto::DESCRIPTOR_POOL
+            .get_message_by_name("einride.example.freight.v1.ListShippersResponse")
+            .expect("descriptor pool contains einride.example.freight.v1.ListShippersResponse")
+    }
+}
+
+/// Reflection wiring (ADR-0009): resolves this message's descriptor from the pool.
+impl ::prost_reflect::ReflectMessage for CreateShipperRequest {
+    fn descriptor(&self) -> ::prost_reflect::MessageDescriptor {
+        crate::proto::DESCRIPTOR_POOL
+            .get_message_by_name("einride.example.freight.v1.CreateShipperRequest")
+            .expect("descriptor pool contains einride.example.freight.v1.CreateShipperRequest")
+    }
+}
+
+/// Reflection wiring (ADR-0009): resolves this message's descriptor from the pool.
+impl ::prost_reflect::ReflectMessage for UpdateShipperRequest {
+    fn descriptor(&self) -> ::prost_reflect::MessageDescriptor {
+        crate::proto::DESCRIPTOR_POOL
+            .get_message_by_name("einride.example.freight.v1.UpdateShipperRequest")
+            .expect("descriptor pool contains einride.example.freight.v1.UpdateShipperRequest")
+    }
+}
+
+/// Reflection wiring (ADR-0009): resolves this message's descriptor from the pool.
+impl ::prost_reflect::ReflectMessage for DeleteShipperRequest {
+    fn descriptor(&self) -> ::prost_reflect::MessageDescriptor {
+        crate::proto::DESCRIPTOR_POOL
+            .get_message_by_name("einride.example.freight.v1.DeleteShipperRequest")
+            .expect("descriptor pool contains einride.example.freight.v1.DeleteShipperRequest")
+    }
+}
+
+/// Reflection wiring (ADR-0009): resolves this message's descriptor from the pool.
+impl ::prost_reflect::ReflectMessage for UndeleteShipperRequest {
+    fn descriptor(&self) -> ::prost_reflect::MessageDescriptor {
+        crate::proto::DESCRIPTOR_POOL
+            .get_message_by_name("einride.example.freight.v1.UndeleteShipperRequest")
+            .expect("descriptor pool contains einride.example.freight.v1.UndeleteShipperRequest")
+    }
+}
+
+/// Reflection wiring (ADR-0009): resolves this message's descriptor from the pool.
+impl ::prost_reflect::ReflectMessage for GetSiteRequest {
+    fn descriptor(&self) -> ::prost_reflect::MessageDescriptor {
+        crate::proto::DESCRIPTOR_POOL
+            .get_message_by_name("einride.example.freight.v1.GetSiteRequest")
+            .expect("descriptor pool contains einride.example.freight.v1.GetSiteRequest")
+    }
+}
+
+/// Reflection wiring (ADR-0009): resolves this message's descriptor from the pool.
+impl ::prost_reflect::ReflectMessage for ListSitesRequest {
+    fn descriptor(&self) -> ::prost_reflect::MessageDescriptor {
+        crate::proto::DESCRIPTOR_POOL
+            .get_message_by_name("einride.example.freight.v1.ListSitesRequest")
+            .expect("descriptor pool contains einride.example.freight.v1.ListSitesRequest")
+    }
+}
+
+/// Reflection wiring (ADR-0009): resolves this message's descriptor from the pool.
+impl ::prost_reflect::ReflectMessage for ListSitesResponse {
+    fn descriptor(&self) -> ::prost_reflect::MessageDescriptor {
+        crate::proto::DESCRIPTOR_POOL
+            .get_message_by_name("einride.example.freight.v1.ListSitesResponse")
+            .expect("descriptor pool contains einride.example.freight.v1.ListSitesResponse")
+    }
+}
+
+/// Reflection wiring (ADR-0009): resolves this message's descriptor from the pool.
+impl ::prost_reflect::ReflectMessage for CreateSiteRequest {
+    fn descriptor(&self) -> ::prost_reflect::MessageDescriptor {
+        crate::proto::DESCRIPTOR_POOL
+            .get_message_by_name("einride.example.freight.v1.CreateSiteRequest")
+            .expect("descriptor pool contains einride.example.freight.v1.CreateSiteRequest")
+    }
+}
+
+/// Reflection wiring (ADR-0009): resolves this message's descriptor from the pool.
+impl ::prost_reflect::ReflectMessage for UpdateSiteRequest {
+    fn descriptor(&self) -> ::prost_reflect::MessageDescriptor {
+        crate::proto::DESCRIPTOR_POOL
+            .get_message_by_name("einride.example.freight.v1.UpdateSiteRequest")
+            .expect("descriptor pool contains einride.example.freight.v1.UpdateSiteRequest")
+    }
+}
+
+/// Reflection wiring (ADR-0009): resolves this message's descriptor from the pool.
+impl ::prost_reflect::ReflectMessage for DeleteSiteRequest {
+    fn descriptor(&self) -> ::prost_reflect::MessageDescriptor {
+        crate::proto::DESCRIPTOR_POOL
+            .get_message_by_name("einride.example.freight.v1.DeleteSiteRequest")
+            .expect("descriptor pool contains einride.example.freight.v1.DeleteSiteRequest")
+    }
+}
+
+/// Reflection wiring (ADR-0009): resolves this message's descriptor from the pool.
+impl ::prost_reflect::ReflectMessage for BatchGetSitesRequest {
+    fn descriptor(&self) -> ::prost_reflect::MessageDescriptor {
+        crate::proto::DESCRIPTOR_POOL
+            .get_message_by_name("einride.example.freight.v1.BatchGetSitesRequest")
+            .expect("descriptor pool contains einride.example.freight.v1.BatchGetSitesRequest")
+    }
+}
+
+/// Reflection wiring (ADR-0009): resolves this message's descriptor from the pool.
+impl ::prost_reflect::ReflectMessage for BatchGetSitesResponse {
+    fn descriptor(&self) -> ::prost_reflect::MessageDescriptor {
+        crate::proto::DESCRIPTOR_POOL
+            .get_message_by_name("einride.example.freight.v1.BatchGetSitesResponse")
+            .expect("descriptor pool contains einride.example.freight.v1.BatchGetSitesResponse")
+    }
+}
+
+/// Reflection wiring (ADR-0009): resolves this message's descriptor from the pool.
+impl ::prost_reflect::ReflectMessage for GetShipmentRequest {
+    fn descriptor(&self) -> ::prost_reflect::MessageDescriptor {
+        crate::proto::DESCRIPTOR_POOL
+            .get_message_by_name("einride.example.freight.v1.GetShipmentRequest")
+            .expect("descriptor pool contains einride.example.freight.v1.GetShipmentRequest")
+    }
+}
+
+/// Reflection wiring (ADR-0009): resolves this message's descriptor from the pool.
+impl ::prost_reflect::ReflectMessage for ListShipmentsRequest {
+    fn descriptor(&self) -> ::prost_reflect::MessageDescriptor {
+        crate::proto::DESCRIPTOR_POOL
+            .get_message_by_name("einride.example.freight.v1.ListShipmentsRequest")
+            .expect("descriptor pool contains einride.example.freight.v1.ListShipmentsRequest")
+    }
+}
+
+/// Reflection wiring (ADR-0009): resolves this message's descriptor from the pool.
+impl ::prost_reflect::ReflectMessage for ListShipmentsResponse {
+    fn descriptor(&self) -> ::prost_reflect::MessageDescriptor {
+        crate::proto::DESCRIPTOR_POOL
+            .get_message_by_name("einride.example.freight.v1.ListShipmentsResponse")
+            .expect("descriptor pool contains einride.example.freight.v1.ListShipmentsResponse")
+    }
+}
+
+/// Reflection wiring (ADR-0009): resolves this message's descriptor from the pool.
+impl ::prost_reflect::ReflectMessage for CreateShipmentRequest {
+    fn descriptor(&self) -> ::prost_reflect::MessageDescriptor {
+        crate::proto::DESCRIPTOR_POOL
+            .get_message_by_name("einride.example.freight.v1.CreateShipmentRequest")
+            .expect("descriptor pool contains einride.example.freight.v1.CreateShipmentRequest")
+    }
+}
+
+/// Reflection wiring (ADR-0009): resolves this message's descriptor from the pool.
+impl ::prost_reflect::ReflectMessage for UpdateShipmentRequest {
+    fn descriptor(&self) -> ::prost_reflect::MessageDescriptor {
+        crate::proto::DESCRIPTOR_POOL
+            .get_message_by_name("einride.example.freight.v1.UpdateShipmentRequest")
+            .expect("descriptor pool contains einride.example.freight.v1.UpdateShipmentRequest")
+    }
+}
+
+/// Reflection wiring (ADR-0009): resolves this message's descriptor from the pool.
+impl ::prost_reflect::ReflectMessage for DeleteShipmentRequest {
+    fn descriptor(&self) -> ::prost_reflect::MessageDescriptor {
+        crate::proto::DESCRIPTOR_POOL
+            .get_message_by_name("einride.example.freight.v1.DeleteShipmentRequest")
+            .expect("descriptor pool contains einride.example.freight.v1.DeleteShipmentRequest")
+    }
+}

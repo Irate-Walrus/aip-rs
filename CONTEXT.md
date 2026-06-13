@@ -283,9 +283,12 @@ _Avoid_: dynamic operation, introspective primitive.
 
 **Typed message**:
 A concrete generated prost message that carries its own **Descriptor** because it
-implements `prost_reflect::ReflectMessage`. Every **Reflective primitive**'s
-**Typed facade** is expressed over typed messages, so a caller never builds or
-threads a descriptor pool, nor touches a **Dynamic message**.
+implements `prost_reflect::ReflectMessage`. The codegen plugin emits that impl for
+every generated message (nested included; issue #191), resolving the descriptor
+from the crate's pool — so the impl is plugin-emitted code, not a hand-written or
+derived one. Every **Reflective primitive**'s **Typed facade** is expressed over
+typed messages, so a caller never builds or threads a descriptor pool, nor touches
+a **Dynamic message**.
 _Avoid_: concrete message (only when contrasting), native message.
 
 **Dynamic message**:

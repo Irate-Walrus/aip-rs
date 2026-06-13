@@ -17,6 +17,9 @@
 //!   [`RequestDescriptor`], driving the codegen plugin's request-trait
 //!   emission (this one has no aip-go counterpart — Go satisfies these
 //!   interfaces structurally).
+//! - [`reflect_messages_in_file`] — enumerate every message (nested included,
+//!   map-entries excluded) as a [`ReflectMessageName`], driving the codegen
+//!   plugin's `prost_reflect::ReflectMessage` emission (ADR-0009).
 //! - [`validate_resource_references`] (and its Dynamic core
 //!   [`validate_resource_references_dynamic`]) — for every field carrying a
 //!   `google.api.resource_reference`, check the value is a valid name of the
@@ -54,11 +57,13 @@
 //! ```
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+mod messages;
 mod requests;
 mod resource_type;
 mod resources;
 mod validate;
 
+pub use messages::{reflect_messages_in_file, ReflectMessageName};
 pub use requests::{request_descriptors_in_file, RequestDescriptor};
 pub use resource_type::ResourceType;
 pub use resources::{

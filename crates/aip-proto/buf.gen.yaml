@@ -1,93 +1,41 @@
 # buf generate template for aip-proto (ADR-0011).
 #
-# neoeinstein-prost emits the prost structs. Reflection wiring (ADR-0009) is added
-# as prost type attributes rather than a build.rs: every message derives
-# `prost_reflect::ReflectMessage` against the crate-local `DESCRIPTOR_POOL`, and
-# each one is given its fully-qualified `message_name` (the derive requires it
-# explicitly — it does not infer it from the prost path).
+# Two plugins, both emitting into the committed `src/gen`:
 #
-# The `message_name` lines below enumerate every generated message. They are the
-# one hand-maintained part of this file, but completeness is compiler-enforced: a
-# message left without its `message_name` fails to derive `ReflectMessage`
-# ("missing required argument 'message_name'"), so a googleapis digest bump that
-# adds messages breaks the build loudly rather than drifting silently. Regenerate
-# the list after a digest bump (from this directory):
+#   * neoeinstein-prost — the prost structs for the vendored `google.*` packages.
+#   * protoc-gen-prost-aip — the workspace's own plugin (run from source), here
+#     only for its `reflect=true` emission.
 #
-#   ../../scripts/buf-message-names.py --skip aip.proto
+# Reflection wiring (ADR-0009) is emitted by protoc-gen-prost-aip: with
+# `reflect=true` it writes an `impl ::prost_reflect::ReflectMessage` for every
+# generated message (nested included), resolving each one's descriptor from
+# `crate::DESCRIPTOR_POOL` at runtime. This replaces the old per-message
+# `#[prost_reflect(message_name = "…")]` type attributes the prost derive
+# required — the plugin already knows every message's fully-qualified name, so
+# the list is no longer hand-maintained (issue #191). Completeness stays
+# compiler-enforced the same way: a missing or mis-named impl is a build error,
+# not silent drift.
 #
 # Comments are disabled: the googleapis docs carry ```-fenced JSON/CEL examples
 # that rustdoc would otherwise run as doctests (matches aip-iam / aip-filtering).
 #
-# The plugin is version-pinned for the same reason buf.lock digest-pins the
-# schema: regen.sh's reproducibility claim (and ADR-0011's CI drift check) holds
-# only if both halves of the generation are pinned.
+# The remote plugin is version-pinned for the same reason buf.lock digest-pins
+# the schema: regen.sh's reproducibility claim (and ADR-0011's CI drift check)
+# holds only if both halves are pinned. The local plugin is run from source, so
+# it always matches the checked-out generator.
 version: v2
 plugins:
   - remote: buf.build/community/neoeinstein-prost:v0.5.0
     out: src/gen
     opt:
       - disable_comments=.
-      - 'type_attribute=.=#[derive(::prost_reflect::ReflectMessage)]'
-      - 'type_attribute=.=#[prost_reflect(descriptor_pool = "crate::DESCRIPTOR_POOL")]'
-      - 'type_attribute=google.api.BatchingConfigProto=#[prost_reflect(message_name = "google.api.BatchingConfigProto")]'
-      - 'type_attribute=google.api.BatchingDescriptorProto=#[prost_reflect(message_name = "google.api.BatchingDescriptorProto")]'
-      - 'type_attribute=google.api.BatchingSettingsProto=#[prost_reflect(message_name = "google.api.BatchingSettingsProto")]'
-      - 'type_attribute=google.api.ClientLibrarySettings=#[prost_reflect(message_name = "google.api.ClientLibrarySettings")]'
-      - 'type_attribute=google.api.CommonLanguageSettings=#[prost_reflect(message_name = "google.api.CommonLanguageSettings")]'
-      - 'type_attribute=google.api.CppSettings=#[prost_reflect(message_name = "google.api.CppSettings")]'
-      - 'type_attribute=google.api.CustomHttpPattern=#[prost_reflect(message_name = "google.api.CustomHttpPattern")]'
-      - 'type_attribute=google.api.DotnetSettings=#[prost_reflect(message_name = "google.api.DotnetSettings")]'
-      - 'type_attribute=google.api.GoSettings=#[prost_reflect(message_name = "google.api.GoSettings")]'
-      - 'type_attribute=google.api.Http=#[prost_reflect(message_name = "google.api.Http")]'
-      - 'type_attribute=google.api.HttpRule=#[prost_reflect(message_name = "google.api.HttpRule")]'
-      - 'type_attribute=google.api.JavaSettings=#[prost_reflect(message_name = "google.api.JavaSettings")]'
-      - 'type_attribute=google.api.MethodSettings=#[prost_reflect(message_name = "google.api.MethodSettings")]'
-      - 'type_attribute=google.api.MethodSettings.LongRunning=#[prost_reflect(message_name = "google.api.MethodSettings.LongRunning")]'
-      - 'type_attribute=google.api.NodeSettings=#[prost_reflect(message_name = "google.api.NodeSettings")]'
-      - 'type_attribute=google.api.PhpSettings=#[prost_reflect(message_name = "google.api.PhpSettings")]'
-      - 'type_attribute=google.api.Publishing=#[prost_reflect(message_name = "google.api.Publishing")]'
-      - 'type_attribute=google.api.PythonSettings=#[prost_reflect(message_name = "google.api.PythonSettings")]'
-      - 'type_attribute=google.api.PythonSettings.ExperimentalFeatures=#[prost_reflect(message_name = "google.api.PythonSettings.ExperimentalFeatures")]'
-      - 'type_attribute=google.api.ResourceDescriptor=#[prost_reflect(message_name = "google.api.ResourceDescriptor")]'
-      - 'type_attribute=google.api.ResourceReference=#[prost_reflect(message_name = "google.api.ResourceReference")]'
-      - 'type_attribute=google.api.RubySettings=#[prost_reflect(message_name = "google.api.RubySettings")]'
-      - 'type_attribute=google.api.SelectiveGapicGeneration=#[prost_reflect(message_name = "google.api.SelectiveGapicGeneration")]'
-      - 'type_attribute=google.api.expr.v1alpha1.CheckedExpr=#[prost_reflect(message_name = "google.api.expr.v1alpha1.CheckedExpr")]'
-      - 'type_attribute=google.api.expr.v1alpha1.Constant=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Constant")]'
-      - 'type_attribute=google.api.expr.v1alpha1.Decl=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Decl")]'
-      - 'type_attribute=google.api.expr.v1alpha1.Decl.FunctionDecl=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Decl.FunctionDecl")]'
-      - 'type_attribute=google.api.expr.v1alpha1.Decl.FunctionDecl.Overload=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Decl.FunctionDecl.Overload")]'
-      - 'type_attribute=google.api.expr.v1alpha1.Decl.IdentDecl=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Decl.IdentDecl")]'
-      - 'type_attribute=google.api.expr.v1alpha1.Expr=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Expr")]'
-      - 'type_attribute=google.api.expr.v1alpha1.Expr.Call=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Expr.Call")]'
-      - 'type_attribute=google.api.expr.v1alpha1.Expr.Comprehension=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Expr.Comprehension")]'
-      - 'type_attribute=google.api.expr.v1alpha1.Expr.CreateList=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Expr.CreateList")]'
-      - 'type_attribute=google.api.expr.v1alpha1.Expr.CreateStruct=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Expr.CreateStruct")]'
-      - 'type_attribute=google.api.expr.v1alpha1.Expr.CreateStruct.Entry=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Expr.CreateStruct.Entry")]'
-      - 'type_attribute=google.api.expr.v1alpha1.Expr.Ident=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Expr.Ident")]'
-      - 'type_attribute=google.api.expr.v1alpha1.Expr.Select=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Expr.Select")]'
-      - 'type_attribute=google.api.expr.v1alpha1.ParsedExpr=#[prost_reflect(message_name = "google.api.expr.v1alpha1.ParsedExpr")]'
-      - 'type_attribute=google.api.expr.v1alpha1.Reference=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Reference")]'
-      - 'type_attribute=google.api.expr.v1alpha1.SourceInfo=#[prost_reflect(message_name = "google.api.expr.v1alpha1.SourceInfo")]'
-      - 'type_attribute=google.api.expr.v1alpha1.SourceInfo.Extension=#[prost_reflect(message_name = "google.api.expr.v1alpha1.SourceInfo.Extension")]'
-      - 'type_attribute=google.api.expr.v1alpha1.SourceInfo.Extension.Version=#[prost_reflect(message_name = "google.api.expr.v1alpha1.SourceInfo.Extension.Version")]'
-      - 'type_attribute=google.api.expr.v1alpha1.SourcePosition=#[prost_reflect(message_name = "google.api.expr.v1alpha1.SourcePosition")]'
-      - 'type_attribute=google.api.expr.v1alpha1.Type=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Type")]'
-      - 'type_attribute=google.api.expr.v1alpha1.Type.AbstractType=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Type.AbstractType")]'
-      - 'type_attribute=google.api.expr.v1alpha1.Type.FunctionType=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Type.FunctionType")]'
-      - 'type_attribute=google.api.expr.v1alpha1.Type.ListType=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Type.ListType")]'
-      - 'type_attribute=google.api.expr.v1alpha1.Type.MapType=#[prost_reflect(message_name = "google.api.expr.v1alpha1.Type.MapType")]'
-      - 'type_attribute=google.iam.v1.AuditConfig=#[prost_reflect(message_name = "google.iam.v1.AuditConfig")]'
-      - 'type_attribute=google.iam.v1.AuditConfigDelta=#[prost_reflect(message_name = "google.iam.v1.AuditConfigDelta")]'
-      - 'type_attribute=google.iam.v1.AuditLogConfig=#[prost_reflect(message_name = "google.iam.v1.AuditLogConfig")]'
-      - 'type_attribute=google.iam.v1.Binding=#[prost_reflect(message_name = "google.iam.v1.Binding")]'
-      - 'type_attribute=google.iam.v1.BindingDelta=#[prost_reflect(message_name = "google.iam.v1.BindingDelta")]'
-      - 'type_attribute=google.iam.v1.GetIamPolicyRequest=#[prost_reflect(message_name = "google.iam.v1.GetIamPolicyRequest")]'
-      - 'type_attribute=google.iam.v1.GetPolicyOptions=#[prost_reflect(message_name = "google.iam.v1.GetPolicyOptions")]'
-      - 'type_attribute=google.iam.v1.Policy=#[prost_reflect(message_name = "google.iam.v1.Policy")]'
-      - 'type_attribute=google.iam.v1.PolicyDelta=#[prost_reflect(message_name = "google.iam.v1.PolicyDelta")]'
-      - 'type_attribute=google.iam.v1.SetIamPolicyRequest=#[prost_reflect(message_name = "google.iam.v1.SetIamPolicyRequest")]'
-      - 'type_attribute=google.iam.v1.TestIamPermissionsRequest=#[prost_reflect(message_name = "google.iam.v1.TestIamPermissionsRequest")]'
-      - 'type_attribute=google.iam.v1.TestIamPermissionsResponse=#[prost_reflect(message_name = "google.iam.v1.TestIamPermissionsResponse")]'
-      - 'type_attribute=google.type.Expr=#[prost_reflect(message_name = "google.type.Expr")]'
-      - 'type_attribute=google.type.LatLng=#[prost_reflect(message_name = "google.type.LatLng")]'
+  # The workspace's own AIP plugin (ADR-0011), run from source. aip-proto owns
+  # the `google.*` types, so this follows regen.sh's `--include-imports` and
+  # reflects every generated message (the `aip.proto` import anchor has none).
+  - local: ["cargo", "run", "--quiet", "--package", "protoc-gen-prost-aip"]
+    out: src/gen
+    opt:
+      # Emit `impl ::prost_reflect::ReflectMessage` for every generated message
+      # (ADR-0009, issue #191), resolving each descriptor from the crate pool.
+      - reflect=true
+      - reflect_descriptor_pool=crate::DESCRIPTOR_POOL

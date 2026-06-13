@@ -10,6 +10,7 @@ authors.workspace = true
 
 [dependencies]
 thiserror.workspace = true
+heck.workspace = true
 # `ResourceType` splits a resource type into service name + type; the type names
 # the generated wrapper struct (`Shipper` -> `ShipperResourceName`).
 aip-reflect.workspace = true

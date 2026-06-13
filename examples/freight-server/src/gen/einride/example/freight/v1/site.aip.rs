@@ -173,3 +173,12 @@ impl ::aip::softdelete::SoftDeletable for Site {
         ::aip::softdelete::State::from_deleted(self.delete_time.is_some())
     }
 }
+
+/// Reflection wiring (ADR-0009): resolves this message's descriptor from the pool.
+impl ::prost_reflect::ReflectMessage for Site {
+    fn descriptor(&self) -> ::prost_reflect::MessageDescriptor {
+        crate::proto::DESCRIPTOR_POOL
+            .get_message_by_name("einride.example.freight.v1.Site")
+            .expect("descriptor pool contains einride.example.freight.v1.Site")
+    }
+}

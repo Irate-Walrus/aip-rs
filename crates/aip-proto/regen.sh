@@ -19,8 +19,9 @@
 # Bumping the pinned digest is a *separate*, deliberate step — `buf dep update`
 # rewrites buf.lock to the latest googleapis commit — kept out of this script so
 # the drift check stays reproducible (it would otherwise report drift the moment
-# googleapis publishes anything). After a bump, re-run this script and refresh
-# the buf.gen.yaml `message_name` list (see that file's header).
+# googleapis publishes anything). After a bump, just re-run this script: the
+# `ReflectMessage` impls are emitted by protoc-gen-prost-aip from the schema, so
+# there is no hand-maintained message list to refresh (issue #191).
 #
 # The empty `aip.proto` anchor package (proto/imports.proto) generates a
 # comment-only placeholder — it exists only to pull the googleapis imports into

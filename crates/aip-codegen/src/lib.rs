@@ -72,4 +72,11 @@ pub enum Error {
     /// could not parse it at runtime.
     #[error(transparent)]
     Pattern(#[from] aip_resourcename::Error),
+
+    /// [`generate`](crate::generate) was called with a [`GenInput`] whose
+    /// [`messages`](GenInput::messages) list is non-empty but
+    /// [`CratePaths::descriptor_pool`] is `None`. Set the pool path before
+    /// calling `generate()` with reflect messages.
+    #[error("CratePaths::descriptor_pool must be set when GenInput::messages is non-empty")]
+    MissingDescriptorPool,
 }

@@ -8,21 +8,20 @@
 #     once in the workspace by construction (the eight per-message extern_path
 #     mappings the old `build.rs` hand-maintained disappear with it).
 #   * neoeinstein-tonic — the `FreightService` server trait, plus (via the
-#     `proto/imports.proto` anchor and `regen.sh`'s `--include-imports`) the
-#     `google.iam.v1.IAMPolicy` service trait whose request/response messages
+#     `proto/imports.proto` anchor and this plugin's own `include_imports: true`)
+#     the `google.iam.v1.IAMPolicy` service trait whose request/response messages
 #     come from `aip-proto`.
 #   * protoc-gen-prost-aip — the typed resource-name wrappers
 #     (`ShipperResourceName`, …) generated from each `google.api.resource`
-#     annotation (the protoc-gen-go-aip analog), built from this workspace.
+#     annotation (the protoc-gen-go-aip analog), built from this workspace, plus
+#     the `prost_reflect::ReflectMessage` impls (see below).
 #
-# Reflection wiring (ADR-0009) rides as prost type attributes, exactly as in
-# `aip-proto`: every generated message derives `prost_reflect::ReflectMessage`
-# against the crate's `DESCRIPTOR_POOL`, with its fully-qualified `message_name`
-# enumerated below (the derive requires it explicitly). The list is
-# hand-maintained but compiler-enforced — a message left without its
-# `message_name` fails to derive — and is regenerated with (from this directory):
-#
-#   ../../scripts/buf-message-names.py --only einride.
+# Reflection wiring (ADR-0009) is emitted by protoc-gen-prost-aip: with
+# `reflect=true` it writes an `impl ReflectMessage` for every generated message,
+# resolving each one's descriptor from `reflect_descriptor_pool` at runtime. This
+# replaces the old per-message `#[prost_reflect(message_name = "…")]` type
+# attributes the prost derive required — the plugin already knows every message's
+# fully-qualified name, so the list is no longer hand-maintained (issue #191).
 #
 # The plugins are version-pinned for the same reason buf.lock digest-pins the
 # schema: regen.sh's reproducibility claim (and ADR-0011's CI drift check) holds
@@ -45,35 +44,12 @@ plugins:
       - extern_path=.google.rpc=::tonic_types
       - extern_path=.google.iam.v1=::aip_proto::google::iam::v1
       - extern_path=.google.type=::aip_proto::google::type
-      - 'type_attribute=.=#[derive(::prost_reflect::ReflectMessage)]'
-      - 'type_attribute=.=#[prost_reflect(descriptor_pool = "crate::proto::DESCRIPTOR_POOL")]'
-      - 'type_attribute=einride.example.freight.v1.BatchGetSitesRequest=#[prost_reflect(message_name = "einride.example.freight.v1.BatchGetSitesRequest")]'
-      - 'type_attribute=einride.example.freight.v1.BatchGetSitesResponse=#[prost_reflect(message_name = "einride.example.freight.v1.BatchGetSitesResponse")]'
-      - 'type_attribute=einride.example.freight.v1.CreateShipmentRequest=#[prost_reflect(message_name = "einride.example.freight.v1.CreateShipmentRequest")]'
-      - 'type_attribute=einride.example.freight.v1.CreateShipperRequest=#[prost_reflect(message_name = "einride.example.freight.v1.CreateShipperRequest")]'
-      - 'type_attribute=einride.example.freight.v1.CreateSiteRequest=#[prost_reflect(message_name = "einride.example.freight.v1.CreateSiteRequest")]'
-      - 'type_attribute=einride.example.freight.v1.DeleteShipmentRequest=#[prost_reflect(message_name = "einride.example.freight.v1.DeleteShipmentRequest")]'
-      - 'type_attribute=einride.example.freight.v1.DeleteShipperRequest=#[prost_reflect(message_name = "einride.example.freight.v1.DeleteShipperRequest")]'
-      - 'type_attribute=einride.example.freight.v1.DeleteSiteRequest=#[prost_reflect(message_name = "einride.example.freight.v1.DeleteSiteRequest")]'
-      - 'type_attribute=einride.example.freight.v1.GetShipmentRequest=#[prost_reflect(message_name = "einride.example.freight.v1.GetShipmentRequest")]'
-      - 'type_attribute=einride.example.freight.v1.GetShipperRequest=#[prost_reflect(message_name = "einride.example.freight.v1.GetShipperRequest")]'
-      - 'type_attribute=einride.example.freight.v1.GetSiteRequest=#[prost_reflect(message_name = "einride.example.freight.v1.GetSiteRequest")]'
-      - 'type_attribute=einride.example.freight.v1.LineItem=#[prost_reflect(message_name = "einride.example.freight.v1.LineItem")]'
-      - 'type_attribute=einride.example.freight.v1.ListShipmentsRequest=#[prost_reflect(message_name = "einride.example.freight.v1.ListShipmentsRequest")]'
-      - 'type_attribute=einride.example.freight.v1.ListShipmentsResponse=#[prost_reflect(message_name = "einride.example.freight.v1.ListShipmentsResponse")]'
-      - 'type_attribute=einride.example.freight.v1.ListShippersRequest=#[prost_reflect(message_name = "einride.example.freight.v1.ListShippersRequest")]'
-      - 'type_attribute=einride.example.freight.v1.ListShippersResponse=#[prost_reflect(message_name = "einride.example.freight.v1.ListShippersResponse")]'
-      - 'type_attribute=einride.example.freight.v1.ListSitesRequest=#[prost_reflect(message_name = "einride.example.freight.v1.ListSitesRequest")]'
-      - 'type_attribute=einride.example.freight.v1.ListSitesResponse=#[prost_reflect(message_name = "einride.example.freight.v1.ListSitesResponse")]'
-      - 'type_attribute=einride.example.freight.v1.Shipment=#[prost_reflect(message_name = "einride.example.freight.v1.Shipment")]'
-      - 'type_attribute=einride.example.freight.v1.Shipper=#[prost_reflect(message_name = "einride.example.freight.v1.Shipper")]'
-      - 'type_attribute=einride.example.freight.v1.Site=#[prost_reflect(message_name = "einride.example.freight.v1.Site")]'
-      - 'type_attribute=einride.example.freight.v1.UndeleteShipperRequest=#[prost_reflect(message_name = "einride.example.freight.v1.UndeleteShipperRequest")]'
-      - 'type_attribute=einride.example.freight.v1.UpdateShipmentRequest=#[prost_reflect(message_name = "einride.example.freight.v1.UpdateShipmentRequest")]'
-      - 'type_attribute=einride.example.freight.v1.UpdateShipperRequest=#[prost_reflect(message_name = "einride.example.freight.v1.UpdateShipperRequest")]'
-      - 'type_attribute=einride.example.freight.v1.UpdateSiteRequest=#[prost_reflect(message_name = "einride.example.freight.v1.UpdateSiteRequest")]'
   - remote: buf.build/community/neoeinstein-tonic:v0.5.0
     out: src/gen
+    # The only plugin that needs imports: the `google.iam.v1.IAMPolicy` service
+    # trait comes from an imported file (via the `proto/imports.proto` anchor).
+    # prost and protoc-gen-prost-aip generate for the freight target protos only.
+    include_imports: true
     opt:
       # Server-only, as before: we implement the services, we don't call them.
       - no_client=true
@@ -91,6 +67,11 @@ plugins:
   # code always matches the checked-out generator.
   - local: ["cargo", "run", "--quiet", "--package", "protoc-gen-prost-aip"]
     out: src/gen
+    # Generate only for the freight target protos, NOT the extern_path'd imports
+    # (the default, made explicit): `reflect=true` would otherwise emit
+    # `impl ReflectMessage` for the `google.*` messages, whose structs live in
+    # `aip-proto` (extern), not here.
+    include_imports: false
     opt:
       # Opt in to the field-shape-keyed `PageRequest` impls (ADR-0013): every
       # request with `page_token` + `page_size` — the three freight List
@@ -111,3 +92,10 @@ plugins:
       # `::aip_pagination::PageRequest`, etc. Removes the need for direct deps
       # on `aip-pagination`, `aip-ordering`, `aip-resourcename` in Cargo.toml.
       - aip_crate=aip
+      # Emit `impl ::prost_reflect::ReflectMessage` for every generated message
+      # (ADR-0009, issue #191), resolving each descriptor from the crate's pool —
+      # replacing the per-message `message_name` type attributes the prost derive
+      # used to require. `aip_crate` does not route this: `prost_reflect` is a
+      # third-party crate the example depends on directly.
+      - reflect=true
+      - reflect_descriptor_pool=crate::proto::DESCRIPTOR_POOL

@@ -46,6 +46,7 @@ dependencies = [
  "aip-resourceid",
  "aip-resourcename",
  "aip-softdelete",
+ "heck",
  "thiserror 2.0.18",
 ]
 
