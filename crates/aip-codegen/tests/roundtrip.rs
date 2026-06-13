@@ -73,6 +73,22 @@ fn single_variable_wrapper_round_trips() {
     assert_eq!(String::from(name.clone()), "shippers/acme");
 }
 
+/// The wrapper stores the canonical name, so `as_str` / `AsRef<str>` borrow it
+/// without re-formatting, and `From<_> for String` and `Display` agree with it.
+#[test]
+fn as_str_borrows_the_stored_canonical_name() {
+    let name = SiteResourceName::new("acme", "dock-1").expect("valid site variables");
+    assert_eq!(name.as_str(), "shippers/acme/sites/dock-1");
+    // `AsRef<str>` exposes the same slice — drops the wrapper into `AsRef` APIs.
+    let as_ref: &str = name.as_ref();
+    assert_eq!(as_ref, "shippers/acme/sites/dock-1");
+    // Display and `From<_> for String` reuse the same stored name.
+    assert_eq!(name.to_string(), name.as_str());
+    assert_eq!(String::from(name.clone()), "shippers/acme/sites/dock-1");
+    // `as_str` borrows — calling it twice yields the same pointer (no re-format).
+    assert!(std::ptr::eq(name.as_str(), name.as_str()));
+}
+
 #[test]
 fn validated_new_rejects_an_invalid_variable() {
     let name = ShipperResourceName::new("acme").expect("a single-segment id is valid");
@@ -192,7 +208,7 @@ fn mint_returns_a_valid_shipper_name() {
     let b = ShipperResourceName::mint();
     // Two minted names are distinct (UUIDs) and both parse correctly.
     assert_ne!(a.to_string(), b.to_string());
-    assert!(ShipperResourceName::parse(&a.to_string()).is_ok());
+    assert!(ShipperResourceName::parse(a.as_str()).is_ok());
 }
 
 #[test]

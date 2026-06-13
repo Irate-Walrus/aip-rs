@@ -7,6 +7,8 @@
 pub struct ShipmentResourceName {
     shipper: String,
     shipment: String,
+    /// canonical resource name. built once. backs as_str + Display.
+    name: String,
 }
 
 /// The compiled `shippers/{shipper}/shipments/{shipment}` pattern, parsed once.
@@ -23,6 +25,19 @@ impl ShipmentResourceName {
     /// The resource name pattern, `shippers/{shipper}/shipments/{shipment}`.
     pub const PATTERN: &'static str = "shippers/{shipper}/shipments/{shipment}";
 
+    /// Build from already-validated variables, formatting the canonical
+    /// resource name once and storing it. Private: callers go through the
+    /// validating/parsing constructors that guarantee the variables hold.
+    fn from_parts(shipper: String, shipment: String) -> Self {
+        let name = SHIPMENT_RESOURCE_NAME_PATTERN
+            .format([
+                ("shipper", shipper.as_str()),
+                ("shipment", shipment.as_str()),
+            ])
+            .expect("a validated resource name formats");
+        Self { shipper, shipment, name }
+    }
+
     /// Construct the resource name from its variables, validating each
     /// as a single resource-name segment (non-empty, no `/`).
     pub fn new(
@@ -33,7 +48,7 @@ impl ShipmentResourceName {
         let shipment = shipment.into();
         ::aip::resourcename::validate_variable("shipper", &shipper)?;
         ::aip::resourcename::validate_variable("shipment", &shipment)?;
-        Ok(Self { shipper, shipment })
+        Ok(Self::from_parts(shipper, shipment))
     }
 
     /// The `{shipper}` variable.
@@ -46,6 +61,11 @@ impl ShipmentResourceName {
         &self.shipment
     }
 
+    /// The canonical resource name as a string slice — no allocation.
+    pub fn as_str(&self) -> &str {
+        &self.name
+    }
+
     /// Parse a resource name string into its typed variables.
     pub fn parse(name: &str) -> Result<Self, ::aip::resourcename::Error> {
         let Some(captures) = SHIPMENT_RESOURCE_NAME_PATTERN.match_name(name) else {
@@ -53,20 +73,19 @@ impl ShipmentResourceName {
                 pattern: Self::PATTERN.to_owned(),
             });
         };
-        Ok(Self {
-            shipper: captures
-                .get("shipper")
-                .ok_or_else(|| ::aip::resourcename::Error::MissingVariable {
-                    name: "shipper".to_owned(),
-                })?
-                .to_owned(),
-            shipment: captures
-                .get("shipment")
-                .ok_or_else(|| ::aip::resourcename::Error::MissingVariable {
-                    name: "shipment".to_owned(),
-                })?
-                .to_owned(),
-        })
+        let shipper = captures
+            .get("shipper")
+            .ok_or_else(|| ::aip::resourcename::Error::MissingVariable {
+                name: "shipper".to_owned(),
+            })?
+            .to_owned();
+        let shipment = captures
+            .get("shipment")
+            .ok_or_else(|| ::aip::resourcename::Error::MissingVariable {
+                name: "shipment".to_owned(),
+            })?
+            .to_owned();
+        Ok(Self::from_parts(shipper, shipment))
     }
 
     /// Parse `value` from request field `field`, wrapping any error with
@@ -89,24 +108,19 @@ impl ShipmentResourceName {
     /// Mint a resource name under `parent` with a system-assigned ID (AIP-148).
     /// A UUIDv4 is always a valid segment, so this is infallible.
     pub fn mint_under(parent: &ShipperResourceName) -> Self {
-        Self {
-            shipper: parent.shipper().to_owned(),
-            shipment: ::aip::resourceid::generate_system(),
-        }
+        Self::from_parts(parent.shipper().to_owned(), ::aip::resourceid::generate_system())
     }
 }
 
 impl ::std::fmt::Display for ShipmentResourceName {
     fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        // Construction validated each variable, so formatting is infallible.
-        f.write_str(
-            &SHIPMENT_RESOURCE_NAME_PATTERN
-                .format([
-                    ("shipper", self.shipper.as_str()),
-                    ("shipment", self.shipment.as_str()),
-                ])
-                .expect("a validated resource name formats"),
-        )
+        f.write_str(&self.name)
+    }
+}
+
+impl AsRef<str> for ShipmentResourceName {
+    fn as_ref(&self) -> &str {
+        &self.name
     }
 }
 
@@ -136,7 +150,7 @@ impl TryFrom<String> for ShipmentResourceName {
 
 impl From<ShipmentResourceName> for String {
     fn from(name: ShipmentResourceName) -> Self {
-        name.to_string()
+        name.name
     }
 }
 

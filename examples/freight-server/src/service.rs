@@ -113,17 +113,19 @@ impl FreightService for FreightServer {
         if self.authorized(caller.as_ref(), &name) {
             // Authorized: a missing shipper is an honest `NOT_FOUND` (the caller is
             // allowed to know), and a malformed name is the usual `INVALID_ARGUMENT`.
-            ShipperResourceName::parse_field("name", &name)?;
+            // Keep the typed name `parse_field` returns and address storage through
+            // its `as_str()` view (issue #168) rather than re-using the raw String.
+            let resource = ShipperResourceName::parse_field("name", &name)?;
             let shipper = self
                 .storage
-                .get_shipper(&name)
+                .get_shipper(resource.as_str())
                 .ok_or_else(|| Status::not_found(format!("shipper `{name}` not found")))?;
             // AIP-164: a soft-deleted shipper is hidden unless `show_deleted` was
             // set — a hidden one is `NOT_FOUND`, indistinguishable from a name that
             // never existed. The visibility rule (and its AIP-193 mapping) lives in
             // `aip::softdelete`; the generated `SoftDeletable` impl reads the
             // `delete_time` stamp, so the shipper is passed straight in.
-            aip::softdelete::check_visible(&shipper, req.show_deleted, &name)?;
+            aip::softdelete::check_visible(&shipper, req.show_deleted, resource.as_str())?;
             return Ok(Response::new(shipper));
         }
 
@@ -307,17 +309,18 @@ impl FreightService for FreightServer {
         request: Request<DeleteShipperRequest>,
     ) -> Result<Response<Shipper>, Status> {
         let req = request.into_inner();
-        ShipperResourceName::parse_field("name", &req.name)?;
+        // Keep the typed name and address storage through `as_str()` (issue #168).
+        let resource = ShipperResourceName::parse_field("name", &req.name)?;
         // Look up the shipper; a missing one is `NOT_FOUND`, which takes precedence.
         let existing = self
             .storage
-            .get_shipper(&req.name)
+            .get_shipper(resource.as_str())
             .ok_or_else(|| Status::not_found(format!("shipper `{}` not found", req.name)))?;
         // AIP-164: a delete targets a live shipper. An already-soft-deleted one is
         // hidden — `NOT_FOUND` — since this demo does not implement `allow_missing`;
         // the same `show_deleted = false` visibility rule the Get path applies gives
         // exactly that, so a double delete is rejected rather than re-stamped.
-        aip::softdelete::check_visible(&existing, false, &req.name)?;
+        aip::softdelete::check_visible(&existing, false, resource.as_str())?;
         // AIP-154 freshness check: a Delete can't piggyback the etag on the
         // resource, so it rides on the request. A stale token is `ABORTED`, a
         // malformed one `INVALID_ARGUMENT` (AIP-193); an empty etag makes the delete
@@ -340,13 +343,14 @@ impl FreightService for FreightServer {
         request: Request<UndeleteShipperRequest>,
     ) -> Result<Response<Shipper>, Status> {
         let req = request.into_inner();
-        ShipperResourceName::parse_field("name", &req.name)?;
+        // Keep the typed name and address storage through `as_str()` (issue #168).
+        let resource = ShipperResourceName::parse_field("name", &req.name)?;
         // Undelete operates on the soft-deleted record, so the shipper is fetched
         // regardless of its delete state; a name that was never created is
         // `NOT_FOUND`.
         let existing = self
             .storage
-            .get_shipper(&req.name)
+            .get_shipper(resource.as_str())
             .ok_or_else(|| Status::not_found(format!("shipper `{}` not found", req.name)))?;
         // AIP-164 undelete precondition: the shipper must actually be soft-deleted.
         // Undeleting a live one is `ALREADY_EXISTS` via the crate's AIP-193 mapping.
