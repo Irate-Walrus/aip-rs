@@ -1,4 +1,3 @@
-//! Ported from `go.einride.tech/aip/fieldbehavior`'s `fieldbehavior_test.go`.
 //!
 //! Each case builds [`DynamicMessage`] fixtures of
 //! `einride.example.syntax.v1.FieldBehaviorMessage` or

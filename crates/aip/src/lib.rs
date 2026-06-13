@@ -1,4 +1,5 @@
-//! `aip` — a Rust SDK for Google's [API Improvement Proposals][aip-dev] (AIP).
+//! `aip` — a Rust SDK for Google's [API Improvement Proposals][aip-dev] (AIP),
+//! ported from [`go.einride.tech/aip`](https://pkg.go.dev/go.einride.tech/aip).
 //!
 //! Per-feature crates re-exported under one umbrella: enable every crate by
 //! taking the default features, or pick exactly what you need:

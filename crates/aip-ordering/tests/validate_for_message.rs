@@ -1,4 +1,3 @@
-//! Ported from `go.einride.tech/aip/ordering`'s descriptor-based validation.
 //!
 //! aip-go validates `order_by` paths against `library.Book`; lacking those
 //! protos, the cases use the vendored `einride.example` fixtures — `Shipper` for
