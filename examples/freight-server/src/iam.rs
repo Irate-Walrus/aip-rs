@@ -130,15 +130,7 @@ impl IamServer {
             }
             // Expand the Binding's Role to its Permissions via the example-owned
             // catalogue. An unrecognised Role bundles nothing.
-            granted.extend(
-                role_permissions(&binding.role)
-                    .into_iter()
-                    .map(|permission| {
-                        permission
-                            .parse::<Permission>()
-                            .expect("catalogue permissions are well-formed")
-                    }),
-            );
+            granted.extend(role_permissions(&binding.role));
         }
         Ok(granted)
     }
@@ -151,39 +143,44 @@ impl IamServer {
 /// `roles/freight.viewer` (it adds the write verbs), and `roles/freight.admin` a
 /// superset of `editor` (it adds IAM-policy administration), the way a real role
 /// hierarchy nests. An unrecognised **Role** bundles nothing.
-fn role_permissions(role: &str) -> Vec<&'static str> {
+///
+/// Each tier is a `const` slice of [`Permission`]s: `from_static` validates the
+/// literals at compile time (aip #157), so expansion neither parses nor panics
+/// at request time.
+fn role_permissions(role: &str) -> Vec<Permission> {
     /// Read access across the freight resources.
-    const VIEWER: &[&str] = &[
-        "freight.shippers.get",
-        "freight.shippers.list",
-        "freight.sites.get",
-        "freight.sites.list",
-        "freight.shipments.get",
-        "freight.shipments.list",
+    const VIEWER: &[Permission] = &[
+        Permission::from_static("freight.shippers.get"),
+        Permission::from_static("freight.shippers.list"),
+        Permission::from_static("freight.sites.get"),
+        Permission::from_static("freight.sites.list"),
+        Permission::from_static("freight.shipments.get"),
+        Permission::from_static("freight.shipments.list"),
     ];
     /// The write verbs `roles/freight.editor` adds on top of viewer.
-    const EDITOR_EXTRA: &[&str] = &[
-        "freight.shippers.create",
-        "freight.shippers.update",
-        "freight.shippers.delete",
-        "freight.sites.create",
-        "freight.sites.update",
-        "freight.sites.delete",
-        "freight.shipments.create",
-        "freight.shipments.update",
-        "freight.shipments.delete",
+    const EDITOR_EXTRA: &[Permission] = &[
+        Permission::from_static("freight.shippers.create"),
+        Permission::from_static("freight.shippers.update"),
+        Permission::from_static("freight.shippers.delete"),
+        Permission::from_static("freight.sites.create"),
+        Permission::from_static("freight.sites.update"),
+        Permission::from_static("freight.sites.delete"),
+        Permission::from_static("freight.shipments.create"),
+        Permission::from_static("freight.shipments.update"),
+        Permission::from_static("freight.shipments.delete"),
     ];
     /// IAM-policy administration `roles/freight.admin` adds on top of editor.
-    const ADMIN_EXTRA: &[&str] = &[
-        "freight.shippers.getIamPolicy",
-        "freight.shippers.setIamPolicy",
+    const ADMIN_EXTRA: &[Permission] = &[
+        Permission::from_static("freight.shippers.getIamPolicy"),
+        Permission::from_static("freight.shippers.setIamPolicy"),
     ];
-    match role {
-        "roles/freight.viewer" => VIEWER.to_vec(),
-        "roles/freight.editor" => [VIEWER, EDITOR_EXTRA].concat(),
-        "roles/freight.admin" => [VIEWER, EDITOR_EXTRA, ADMIN_EXTRA].concat(),
-        _ => Vec::new(),
-    }
+    let tiers: &[&[Permission]] = match role {
+        "roles/freight.viewer" => &[VIEWER],
+        "roles/freight.editor" => &[VIEWER, EDITOR_EXTRA],
+        "roles/freight.admin" => &[VIEWER, EDITOR_EXTRA, ADMIN_EXTRA],
+        _ => &[],
+    };
+    tiers.concat()
 }
 
 #[tonic::async_trait]

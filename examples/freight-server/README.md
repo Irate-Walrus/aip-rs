@@ -162,8 +162,9 @@ gc -d '{"parent":"'"$ID"'","filter":"tags:refrigerated"}'    127.0.0.1:50051 $SV
 # shipper never leaks into this listing.
 gc -d '{"parent":"'"$ID"'","filter":"display_name = \"Alpha\" OR display_name = \"Bravo\""}' 127.0.0.1:50051 $SVC/ListSites
 
-# A missing required field is rejected the same way (here the server's own
-# presence check, reason FIELD_REQUIRED / domain freight.example.com):
+# A missing required field is rejected the same way (the reflective
+# `aip-fieldbehavior` validator; the BadRequest names `shipper.display_name`,
+# reason FIELD_REQUIRED / domain freight.example.com):
 gc -d '{"shipper":{}}'                                       127.0.0.1:50051 $SVC/CreateShipper
 ```
 
