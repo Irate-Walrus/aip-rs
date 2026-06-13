@@ -24,6 +24,25 @@
 //! This crate ports [`go.einride.tech/aip/fieldbehavior`](https://pkg.go.dev/go.einride.tech/aip/fieldbehavior).
 //!
 //! See <https://google.aip.dev/161> and <https://google.aip.dev/203>.
+//!
+//! # Example
+//!
+//! ```
+//! use aip_fieldbehavior::{clear_fields_dynamic, has, FieldBehavior};
+//!
+//! let desc = test_fixtures::message_descriptor("einride.example.freight.v1.Shipper").unwrap();
+//! let create_time = desc.get_field_by_name("create_time").unwrap();
+//! assert!(has(&create_time, FieldBehavior::OutputOnly));
+//!
+//! // strip client-supplied OUTPUT_ONLY fields before storing
+//! let mut shipper = test_fixtures::from_json(
+//!     "einride.example.freight.v1.Shipper",
+//!     r#"{"name": "shippers/acme", "createTime": "2026-01-01T00:00:00Z"}"#,
+//! )
+//! .unwrap();
+//! clear_fields_dynamic(&mut shipper, &[FieldBehavior::OutputOnly]);
+//! assert!(!shipper.has_field_by_name("create_time"));
+//! ```
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 use prost::Message as _;
@@ -658,7 +677,7 @@ const ERROR_DOMAIN: &str = "aip-rs";
 #[cfg(feature = "tonic")]
 impl From<Error> for tonic::Status {
     /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details under the
-    /// library sentinel [`ERROR_DOMAIN`] (`aip-rs`): an `ErrorInfo` on every
+    /// library sentinel `aip-rs` domain: an `ErrorInfo` on every
     /// error (the AIP-193 MUST) and, when the error names field paths, one
     /// `BadRequest` violation per path. A deploying service rewrites the
     /// sentinel domain to its own at the serving boundary with the

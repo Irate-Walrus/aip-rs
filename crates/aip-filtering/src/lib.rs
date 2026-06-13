@@ -9,6 +9,27 @@
 //! the one reflective hook.
 //!
 //! See <https://google.aip.dev/160>.
+//!
+//! # Example
+//!
+//! ```
+//! use aip_filtering::{check, parse, Declarations, Type};
+//!
+//! // parse only: syntax, no types
+//! parse("display_name = 'Acme' AND region != 'emea'").unwrap();
+//!
+//! // declare the filterable surface, then parse + type-check
+//! let declarations = Declarations::builder()
+//!     .standard_functions()
+//!     .ident("display_name", Type::String)
+//!     .ident("region", Type::String)
+//!     .build();
+//! let filter = check("display_name = 'Acme' AND region != 'emea'", &declarations).unwrap();
+//!
+//! // an undeclared identifier fails the check
+//! assert!(check("secret = 'x'", &declarations).is_err());
+//! # let _ = filter;
+//! ```
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 use std::collections::HashMap;
@@ -634,7 +655,7 @@ const ERROR_DOMAIN: &str = "aip-rs";
 #[cfg(feature = "tonic")]
 impl From<Error> for tonic::Status {
     /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details: an `ErrorInfo`
-    /// carrying a machine-readable `reason` + [`domain`](ERROR_DOMAIN) and the
+    /// carrying a machine-readable `reason` + `domain` (`aip-rs`) and the
     /// error's dynamic values as `metadata`. A filter error points inside the
     /// filter expression rather than at a request field path, so no `BadRequest`
     /// is attached. See `docs/adr/0007-aip193-error-details.md`.

@@ -1,14 +1,14 @@
 //! Conversion between the native AST and `google.api.expr.v1alpha1` CEL protos.
 //!
-//! The native [`Expr`](crate::Expr) enum is filtering's primary product; this
+//! The native [`Expr`] enum is filtering's primary product; this
 //! module is the optional bridge to CEL tooling that speaks the proto. The
 //! mapping is:
 //!
 //! | native                     | CEL proto                            |
 //! |----------------------------|--------------------------------------|
-//! | [`Expr`](crate::Expr)      | [`cel::Expr`]                        |
-//! | [`Constant`](crate::Constant) | [`cel::Constant`]                 |
-//! | [`Filter`](crate::Filter)  | [`cel::CheckedExpr`]                 |
+//! | [`Expr`]      | [`cel::Expr`]                        |
+//! | [`Constant`] | [`cel::Constant`]                 |
+//! | [`Filter`]  | [`cel::CheckedExpr`]                 |
 //!
 //! Native → proto is total ([`From`]); each [`cel::Expr`] node is assigned a
 //! fresh, unique `id` (CEL expects non-zero ids), counting from `1` per tree.
@@ -17,7 +17,7 @@
 //! calls, presence-test selects, the `null`/`duration`/`timestamp` constants)
 //! is rejected with a [`ConversionError`] rather than silently reshaped.
 //!
-//! A native [`Filter`](crate::Filter) holds only its expression tree, not the
+//! A native [`Filter`] holds only its expression tree, not the
 //! per-node CEL types a real type-check produces, so [`cel::CheckedExpr`]'s
 //! `type_map` / `reference_map` are left empty — the conversion preserves the
 //! expression, not inferred type annotations.

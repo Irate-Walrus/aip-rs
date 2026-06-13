@@ -5,9 +5,9 @@
 //! own environment (`resource.*`, `request.time`, …) — **not** the AIP-160 subset,
 //! so `aip-filtering`'s CEL bridge is deliberately not used here (it would reject
 //! most real conditions). To *do* anything with a Condition beyond storing it, we
-//! reach for the `cel` crate (the cel-rust project): [`Condition::compile`] parses
-//! the expression once, and [`Condition::evaluate`] runs the compiled program
-//! against a [`RequestContext`] to a `bool`.
+//! reach for the `cel` crate (the cel-rust project): [`Condition::compile`](crate::eval::Condition::compile) parses
+//! the expression once, and [`Condition::evaluate`](crate::eval::Condition::evaluate) runs the compiled program
+//! against a [`RequestContext`](crate::eval::RequestContext) to a `bool`.
 //!
 //! This is the *execution* layer, so — like `aip-sql`'s SQL transpilation
 //! (ADR-0005/0008) — it lives strictly behind an opt-in feature and never in a

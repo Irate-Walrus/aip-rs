@@ -5,7 +5,7 @@
 //! This crate holds two things:
 //!
 //! - The **codegen-only helpers** ported from aip-go's `reflect/aipreflect`:
-//!   [`MethodType`], [`GrammaticalName`], and the [`strcase`] utilities. They
+//!   [`MethodType`], [`GrammaticalName`], and the `strcase` utilities. They
 //!   live here, not in the runtime `aip-reflect` crate, because they exist only
 //!   to drive generation.
 //! - The **generation logic** [`generate`], which walks `google.api.resource`
@@ -23,6 +23,22 @@
 //! The generator is a pure function over descriptors, so it is unit-tested
 //! directly (golden tests) without spawning a `protoc` process; the plugin
 //! binary is the only part that touches stdin/stdout.
+//!
+//! # Example
+//!
+//! The codegen-only helpers are usable directly; [`generate`] itself is driven
+//! by the `protoc-gen-prost-aip` plugin over real descriptors.
+//!
+//! ```
+//! use aip_codegen::{initial_upper_case, GrammaticalName, MethodType};
+//!
+//! let name = GrammaticalName::new("userEvents");
+//! name.validate().unwrap();
+//! assert_eq!(name.upper_camel_case(), "UserEvents");
+//!
+//! assert_eq!(initial_upper_case("shipper"), "Shipper");
+//! assert_eq!(MethodType::BatchGet.name_prefix(), "BatchGet");
+//! ```
 
 mod generate;
 mod grammaticalname;

@@ -1,17 +1,17 @@
-//! Structural read-modify-write ops over a [`google.iam.v1.Policy`](Policy).
+//! Structural read-modify-write ops over a [`google.iam.v1.Policy`](crate::proto::Policy).
 //!
 //! The toolkit a server runs between a `GetIamPolicy` and a `SetIamPolicy`: add or
-//! remove a **Member** from the **Binding** for a **Role** ([`add_member`] /
-//! [`remove_member`]), fold a **Policy** into a canonical form so two equal
-//! policies compare equal ([`normalize`]), enforce the *conditions ⟹ version 3*
-//! invariant ([`validate`]), and run the `etag` optimistic-concurrency check that
-//! makes the read-modify-write cycle safe ([`compute`] / [`check`]).
+//! remove a **Member** from the **Binding** for a **Role** ([`add_member`](crate::policy::add_member) /
+//! [`remove_member`](crate::policy::remove_member)), fold a **Policy** into a canonical form so two equal
+//! policies compare equal ([`normalize`](crate::policy::normalize)), enforce the *conditions ⟹ version 3*
+//! invariant ([`validate`](crate::policy::validate)), and run the `etag` optimistic-concurrency check that
+//! makes the read-modify-write cycle safe ([`compute`](crate::policy::compute) / [`check`](crate::policy::check)).
 //!
 //! These are *structural* ops — they rearrange a **Policy**'s **Bindings**; they
 //! never make an authorization **decision** (role→permission expansion, condition
 //! evaluation), which stays the caller's, behind the opt-in `eval` adapter
 //! (ADR-0010). All of them are pure functions over the proto structure, so they
-//! ride the `iam-proto` feature alongside [`Policy`].
+//! ride the `iam-proto` feature alongside [`Policy`](crate::proto::Policy).
 
 use prost::Message as _;
 

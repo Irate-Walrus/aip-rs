@@ -25,8 +25,8 @@
 //!
 //! Like the other reflective primitives this is expressed in the **Typed facade /
 //! Dynamic core** shape: the headline [`validate_resource_references`] takes a
-//! concrete [`ReflectMessage`] (`prost_reflect`) type, layered over a public
-//! [`validate_resource_references_dynamic`] that works on a [`DynamicMessage`]
+//! concrete [`ReflectMessage`](prost_reflect::ReflectMessage) (`prost_reflect`) type, layered over a public
+//! [`validate_resource_references_dynamic`] that works on a [`DynamicMessage`](prost_reflect::DynamicMessage)
 //! directly — the escape hatch and the crates' test surface.
 //!
 //! Validation failures return a typed [`Error`] that maps, behind the `tonic`
@@ -37,6 +37,25 @@
 //!
 //! See <https://google.aip.dev/123> (resource types) and
 //! <https://google.aip.dev/124> (resource references).
+//!
+//! # Example
+//!
+//! ```
+//! use aip_reflect::{resource_descriptors_in_package, ResourceType};
+//!
+//! // parse a resource type into service name + type
+//! let ty = ResourceType::new("freight-example.einride.tech/Shipper");
+//! ty.validate().unwrap();
+//! assert_eq!(ty.service_name(), "freight-example.einride.tech");
+//! assert_eq!(ty.type_name(), "Shipper");
+//!
+//! // enumerate the `google.api.resource` descriptors of a package
+//! let pool = test_fixtures::pool();
+//! let resources = resource_descriptors_in_package(&pool, "einride.example.freight.v1");
+//! assert!(resources
+//!     .iter()
+//!     .any(|r| r.resource_type.as_str() == "freight-example.einride.tech/Shipper"));
+//! ```
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod requests;
@@ -85,7 +104,7 @@ const ERROR_DOMAIN: &str = "aip-rs";
 #[cfg(feature = "tonic")]
 impl From<Error> for tonic::Status {
     /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details: an `ErrorInfo`
-    /// (machine-readable `reason` + [`domain`](ERROR_DOMAIN), with the error's
+    /// (machine-readable `reason` + `domain` (`aip-rs`), with the error's
     /// dynamic values as `metadata`) and, when the error names a request field
     /// path, a `BadRequest` field violation keyed on that path.
     /// See `docs/adr/0007-aip193-error-details.md`.

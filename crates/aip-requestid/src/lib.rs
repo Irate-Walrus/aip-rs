@@ -1,5 +1,21 @@
 //! AIP-155 request identification: validate a `request_id` and name the
 //! idempotency (de-duplication) contract.
+//!
+//! # Example
+//!
+//! ```
+//! use aip_requestid::{validate, Replay};
+//!
+//! // empty request_id = client opted out of idempotency: valid
+//! validate("").unwrap();
+//! validate("d9f0b394-4427-4543-9d0a-6dcbeae5e6e2").unwrap();
+//! assert!(validate("not-a-uuid").is_err());
+//!
+//! // decide replay outcome from the server's record for the id
+//! assert_eq!(Replay::decide(None), Replay::New);
+//! assert_eq!(Replay::decide(Some(true)), Replay::Replayed);
+//! assert_eq!(Replay::decide(Some(false)), Replay::Conflict);
+//! ```
 #![cfg_attr(docsrs, feature(doc_cfg))]
 //!
 //! A `request_id` makes a mutating call idempotent: a retry carrying the same
@@ -84,7 +100,7 @@ const ERROR_DOMAIN: &str = "aip-rs";
 #[cfg(feature = "tonic")]
 impl From<Error> for tonic::Status {
     /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details: an `ErrorInfo`
-    /// carrying `REQUEST_ID_INVALID` + the `aip-rs` [`domain`](ERROR_DOMAIN) and
+    /// carrying `REQUEST_ID_INVALID` + the `aip-rs` `domain` (`aip-rs`) and
     /// the id length as `metadata`. A `request_id` is an opaque value rather than
     /// a named request-field path, so no `BadRequest` is attached (ADR-0007).
     fn from(err: Error) -> Self {
@@ -105,7 +121,7 @@ impl From<Error> for tonic::Status {
 ///
 /// Maps to `ALREADY_EXISTS` (a reused idempotency token collides with the first
 /// request's result; HTTP 409) with an `ErrorInfo` carrying `REQUEST_ID_CONFLICT`,
-/// the `aip-rs` [`domain`](ERROR_DOMAIN), and the offending `request_id` as
+/// the `aip-rs` `domain` (`aip-rs`), and the offending `request_id` as
 /// `metadata`. AIP-155 does not fix a code for this case; `ALREADY_EXISTS` is
 /// chosen for the collision semantics over a flat `INVALID_ARGUMENT`.
 #[cfg_attr(docsrs, doc(cfg(feature = "tonic")))]

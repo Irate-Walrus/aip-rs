@@ -5,6 +5,20 @@
 //! `aip-fieldmask` for path resolution.
 //!
 //! See <https://google.aip.dev/132>.
+//!
+//! # Example
+//!
+//! ```
+//! use aip_ordering::OrderBy;
+//!
+//! let order: OrderBy = "create_time desc, display_name".parse().unwrap();
+//! assert_eq!(order.fields.len(), 2);
+//! assert!(order.fields[0].desc);
+//!
+//! // gate sortable paths with an allow-list
+//! order.validate_for_paths(&["create_time", "display_name"]).unwrap();
+//! assert!(order.validate_for_paths(&["create_time"]).is_err());
+//! ```
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 use std::str::FromStr;
@@ -173,7 +187,7 @@ const ERROR_DOMAIN: &str = "aip-rs";
 #[cfg(feature = "tonic")]
 impl From<Error> for tonic::Status {
     /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details: an `ErrorInfo`
-    /// (machine-readable `reason` + [`domain`](ERROR_DOMAIN), with the error's
+    /// (machine-readable `reason` + `domain` (`aip-rs`), with the error's
     /// dynamic values as `metadata`) and, when the error names an ordering field,
     /// a `BadRequest` field violation keyed on that path.
     /// See `docs/adr/0007-aip193-error-details.md`.

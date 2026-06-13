@@ -6,6 +6,26 @@
 //! [`Pattern`] yields named [`Captures`] (a `regex::Captures`-style API).
 //!
 //! See <https://google.aip.dev/122>.
+//!
+//! # Example
+//!
+//! ```
+//! use aip_resourcename::{is_match, Pattern};
+//!
+//! let pattern = Pattern::parse("shippers/{shipper}/sites/{site}").unwrap();
+//!
+//! // match a name, capture its variables
+//! let caps = pattern.match_name("shippers/acme/sites/oslo").unwrap();
+//! assert_eq!(caps.get("shipper"), Some("acme"));
+//! assert_eq!(caps.get("site"), Some("oslo"));
+//!
+//! // format a name from variables
+//! let name = pattern.format([("shipper", "acme"), ("site", "oslo")]).unwrap();
+//! assert_eq!(name, "shippers/acme/sites/oslo");
+//!
+//! // one-shot match without a parsed Pattern
+//! assert!(is_match("shippers/{shipper}", "shippers/acme"));
+//! ```
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -627,7 +647,7 @@ const ERROR_DOMAIN: &str = "aip-rs";
 #[cfg(feature = "tonic")]
 impl From<Error> for tonic::Status {
     /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details: an `ErrorInfo`
-    /// carrying a machine-readable `reason` + [`domain`](ERROR_DOMAIN) and the
+    /// carrying a machine-readable `reason` + `domain` (`aip-rs`) and the
     /// error's dynamic values as `metadata`. A resource name is an opaque value
     /// rather than a request field path, so no `BadRequest` is attached.
     /// See `docs/adr/0007-aip193-error-details.md`.
