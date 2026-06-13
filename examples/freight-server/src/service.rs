@@ -113,17 +113,19 @@ impl FreightService for FreightServer {
         if self.authorized(caller.as_ref(), &name) {
             // Authorized: a missing shipper is an honest `NOT_FOUND` (the caller is
             // allowed to know), and a malformed name is the usual `INVALID_ARGUMENT`.
-            ShipperResourceName::parse_field("name", &name)?;
+            // Keep the typed name `parse_field` returns and key storage by it
+            // directly (issues #168/#169) rather than discarding it for a raw String.
+            let resource = ShipperResourceName::parse_field("name", &name)?;
             let shipper = self
                 .storage
-                .get_shipper(&name)
+                .get_shipper(&resource)
                 .ok_or_else(|| Status::not_found(format!("shipper `{name}` not found")))?;
             // AIP-164: a soft-deleted shipper is hidden unless `show_deleted` was
             // set — a hidden one is `NOT_FOUND`, indistinguishable from a name that
             // never existed. The visibility rule (and its AIP-193 mapping) lives in
             // `aip::softdelete`; the generated `SoftDeletable` impl reads the
             // `delete_time` stamp, so the shipper is passed straight in.
-            aip::softdelete::check_visible(&shipper, req.show_deleted, &name)?;
+            aip::softdelete::check_visible(&shipper, req.show_deleted, resource.as_str())?;
             return Ok(Response::new(shipper));
         }
 
@@ -137,9 +139,11 @@ impl FreightService for FreightServer {
         // discoverable to an unauthorized caller than to an authorized one
         // (AIP-164, AIP-211): both branches treat a hidden shipper as absent.
         let permission = shipper_get_permission();
-        let visible = self
-            .storage
-            .get_shipper(&name)
+        // A malformed name parses to nothing — it was never in the store, so it is
+        // not visible (the same answer the old raw-string lookup gave).
+        let visible = ShipperResourceName::parse(&name)
+            .ok()
+            .and_then(|resource| self.storage.get_shipper(&resource))
             .is_some_and(|shipper| aip::softdelete::is_visible(&shipper, req.show_deleted));
         if visible {
             Err(aip::iam::authz::permission_denied(&permission, &name))
@@ -217,8 +221,10 @@ impl FreightService for FreightServer {
         // wrapper generated from shipper.proto's `google.api.resource` annotation
         // (AIP-122 / ADR-0011). `ShipperResourceName::mint()` combines
         // `generate_system()` with construction; a UUIDv4 is always a valid
-        // segment, so this is infallible.
-        shipper.name = ShipperResourceName::mint().to_string();
+        // segment, so this is infallible. Keep the typed name as the storage key
+        // (issue #169) and copy its canonical string onto the resource.
+        let resource = ShipperResourceName::mint();
+        shipper.name = resource.as_str().to_owned();
         let ts = now();
         shipper.create_time = Some(ts);
         shipper.update_time = Some(ts);
@@ -232,7 +238,7 @@ impl FreightService for FreightServer {
         // system-assigned id and etag minted — without persisting it or recording
         // an idempotency entry, so a later real create still mints a new shipper.
         preview::commit_unless(req.validate_only, || {
-            self.storage.put_shipper(shipper.clone());
+            self.storage.put_shipper(&resource, shipper.clone());
             // Record the result so a retry carrying the same `request_id` replays it.
             idempotent_record(&self.storage, &request_id, fingerprint, &shipper);
         });
@@ -247,10 +253,15 @@ impl FreightService for FreightServer {
         let incoming = req
             .shipper
             .ok_or_else(|| Status::invalid_argument("shipper is required"))?;
-        let existing = self
-            .storage
-            .get_shipper(&incoming.name)
+        // Key the lookup by the typed name (issue #169). A name that does not parse
+        // was never stored, so it falls through to the same `NOT_FOUND` an unknown
+        // name yields — the error shape is unchanged.
+        let resource = ShipperResourceName::parse(&incoming.name).ok();
+        let existing = resource
+            .as_ref()
+            .and_then(|resource| self.storage.get_shipper(resource))
             .ok_or_else(|| Status::not_found(format!("shipper `{}` not found", incoming.name)))?;
+        let resource = resource.expect("a shipper found in the store has a valid name");
 
         // AIP-154 freshness check: an Update piggybacks the etag on the
         // resource, so the client's `shipper.etag` is the token it read. Verify it
@@ -297,7 +308,7 @@ impl FreightService for FreightServer {
         // AIP-163: a `validate_only` request previews the merged shipper without
         // persisting it, so the stored shipper is left untouched.
         preview::commit_unless(req.validate_only, || {
-            self.storage.put_shipper(shipper.clone())
+            self.storage.put_shipper(&resource, shipper.clone())
         });
         Ok(Response::new(shipper))
     }
@@ -307,17 +318,18 @@ impl FreightService for FreightServer {
         request: Request<DeleteShipperRequest>,
     ) -> Result<Response<Shipper>, Status> {
         let req = request.into_inner();
-        ShipperResourceName::parse_field("name", &req.name)?;
+        // Keep the typed name and key storage by it directly (issues #168/#169).
+        let resource = ShipperResourceName::parse_field("name", &req.name)?;
         // Look up the shipper; a missing one is `NOT_FOUND`, which takes precedence.
         let existing = self
             .storage
-            .get_shipper(&req.name)
+            .get_shipper(&resource)
             .ok_or_else(|| Status::not_found(format!("shipper `{}` not found", req.name)))?;
         // AIP-164: a delete targets a live shipper. An already-soft-deleted one is
         // hidden — `NOT_FOUND` — since this demo does not implement `allow_missing`;
         // the same `show_deleted = false` visibility rule the Get path applies gives
         // exactly that, so a double delete is rejected rather than re-stamped.
-        aip::softdelete::check_visible(&existing, false, &req.name)?;
+        aip::softdelete::check_visible(&existing, false, resource.as_str())?;
         // AIP-154 freshness check: a Delete can't piggyback the etag on the
         // resource, so it rides on the request. A stale token is `ABORTED`, a
         // malformed one `INVALID_ARGUMENT` (AIP-193); an empty etag makes the delete
@@ -331,7 +343,7 @@ impl FreightService for FreightServer {
         let ts = now();
         shipper.delete_time = Some(ts);
         shipper.update_time = Some(ts);
-        self.storage.put_shipper(shipper.clone());
+        self.storage.put_shipper(&resource, shipper.clone());
         Ok(Response::new(shipper))
     }
 
@@ -340,13 +352,14 @@ impl FreightService for FreightServer {
         request: Request<UndeleteShipperRequest>,
     ) -> Result<Response<Shipper>, Status> {
         let req = request.into_inner();
-        ShipperResourceName::parse_field("name", &req.name)?;
+        // Keep the typed name and key storage by it directly (issues #168/#169).
+        let resource = ShipperResourceName::parse_field("name", &req.name)?;
         // Undelete operates on the soft-deleted record, so the shipper is fetched
         // regardless of its delete state; a name that was never created is
         // `NOT_FOUND`.
         let existing = self
             .storage
-            .get_shipper(&req.name)
+            .get_shipper(&resource)
             .ok_or_else(|| Status::not_found(format!("shipper `{}` not found", req.name)))?;
         // AIP-164 undelete precondition: the shipper must actually be soft-deleted.
         // Undeleting a live one is `ALREADY_EXISTS` via the crate's AIP-193 mapping.
@@ -357,7 +370,7 @@ impl FreightService for FreightServer {
         let mut shipper = existing;
         shipper.delete_time = None;
         shipper.update_time = Some(now());
-        self.storage.put_shipper(shipper.clone());
+        self.storage.put_shipper(&resource, shipper.clone());
         Ok(Response::new(shipper))
     }
 

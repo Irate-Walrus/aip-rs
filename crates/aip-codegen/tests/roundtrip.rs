@@ -73,6 +73,22 @@ fn single_variable_wrapper_round_trips() {
     assert_eq!(String::from(name.clone()), "shippers/acme");
 }
 
+/// The wrapper stores the canonical name, so `as_str` / `AsRef<str>` borrow it
+/// without re-formatting, and `From<_> for String` and `Display` agree with it.
+#[test]
+fn as_str_borrows_the_stored_canonical_name() {
+    let name = SiteResourceName::new("acme", "dock-1").expect("valid site variables");
+    assert_eq!(name.as_str(), "shippers/acme/sites/dock-1");
+    // `AsRef<str>` exposes the same slice — drops the wrapper into `AsRef` APIs.
+    let as_ref: &str = name.as_ref();
+    assert_eq!(as_ref, "shippers/acme/sites/dock-1");
+    // Display and `From<_> for String` reuse the same stored name.
+    assert_eq!(name.to_string(), name.as_str());
+    assert_eq!(String::from(name.clone()), "shippers/acme/sites/dock-1");
+    // `as_str` borrows — calling it twice yields the same pointer (no re-format).
+    assert!(std::ptr::eq(name.as_str(), name.as_str()));
+}
+
 #[test]
 fn validated_new_rejects_an_invalid_variable() {
     let name = ShipperResourceName::new("acme").expect("a single-segment id is valid");
@@ -114,6 +130,38 @@ fn display_round_trips_from_constructed_values() {
     let name = SiteResourceName::new("acme", "dock-1").expect("valid site variables");
     let formatted = name.to_string();
     assert_eq!(SiteResourceName::parse(&formatted).unwrap(), name);
+}
+
+/// `Ord` follows the canonical resource name's *string* order, not the variable
+/// tuple. The two diverge when one variable value is a prefix of another: with
+/// `shipper` = `a` vs `a-b`, `'-' (0x2D) < '/' (0x2F)`, so the full names sort
+/// `shippers/a-b/sites/x` before `shippers/a/sites/x` — the opposite of what a
+/// `(shipper, site)` tuple derive would give (`"a" < "a-b"`).
+#[test]
+fn ord_follows_string_order_not_the_variable_tuple() {
+    let a = SiteResourceName::new("a", "x").expect("valid site variables");
+    let ab = SiteResourceName::new("a-b", "x").expect("valid site variables");
+
+    // String order over the canonical names: `a-b` first.
+    assert!(ab.as_str() < a.as_str());
+    assert!(ab < a, "Ord must follow the canonical name string order");
+
+    // A field-tuple derive would order `("a", _) < ("a-b", _)` — the opposite —
+    // so this asserts we are NOT deriving on the variable fields.
+    assert!(
+        (ab.shipper(), ab.site()) > (a.shipper(), a.site()),
+        "the variable tuple sorts the other way, confirming the divergence",
+    );
+
+    // `Ord` agrees with the names a `BTreeMap<String, _>` would sort by.
+    let mut names = [a.to_string(), ab.to_string()];
+    names.sort();
+    let mut wrappers = [a.clone(), ab.clone()];
+    wrappers.sort();
+    assert_eq!(
+        wrappers.iter().map(|w| w.to_string()).collect::<Vec<_>>(),
+        names.to_vec(),
+    );
 }
 
 #[test]
@@ -192,7 +240,7 @@ fn mint_returns_a_valid_shipper_name() {
     let b = ShipperResourceName::mint();
     // Two minted names are distinct (UUIDs) and both parse correctly.
     assert_ne!(a.to_string(), b.to_string());
-    assert!(ShipperResourceName::parse(&a.to_string()).is_ok());
+    assert!(ShipperResourceName::parse(a.as_str()).is_ok());
 }
 
 #[test]

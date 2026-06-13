@@ -13,7 +13,9 @@ use std::sync::Mutex;
 
 use prost::Message as _;
 
-use crate::proto::einride::example::freight::v1::{site::State, Shipment, Shipper, Site};
+use crate::proto::einride::example::freight::v1::{
+    site::State, Shipment, Shipper, ShipperResourceName, Site,
+};
 // `Policy` / `Binding` are aip-proto's generated `google.iam.v1` types (ADR-0011)
 // — the very ones the `aip::iam` structural helpers operate on and the `IAMPolicy`
 // service trait speaks, so there is one `Policy` type by construction (aip #65,
@@ -22,14 +24,15 @@ use crate::proto::einride::example::freight::v1::{site::State, Shipment, Shipper
 // evaluate it (aip #68).
 use aip::iam::proto::{google::r#type::Expr, Binding, Policy};
 
-/// Process-lifetime store. Shippers are a `BTreeMap` keyed by resource name,
-/// which keeps listings in a stable order (the deterministic tie-break behind a
-/// stable `order_by` sort). Sites and shipments live in SQLite tables — the
+/// Process-lifetime store. Shippers are a `BTreeMap` keyed by the typed
+/// `ShipperResourceName` (issue #169) — its `Ord` is the canonical-name string
+/// order, which keeps listings in a stable order (the deterministic tie-break
+/// behind a stable `order_by` sort). Sites and shipments live in SQLite tables — the
 /// filterable/sortable columns plus the full resource as wire bytes — so an
 /// AIP-160 **Filter** composed with the server's own predicates (parent scope,
 /// soft delete) travels end-to-end into a real SQL engine (ADR-0008).
 pub struct Storage {
-    shippers: Mutex<BTreeMap<String, Shipper>>,
+    shippers: Mutex<BTreeMap<ShipperResourceName, Shipper>>,
     sites: Mutex<rusqlite::Connection>,
     shipments: Mutex<rusqlite::Connection>,
     /// AIP-155 idempotency cache (issue #94): per `request_id`, the wire bytes of
@@ -98,25 +101,26 @@ impl Storage {
             .insert(request_id, IdempotentRecord { request, response });
     }
 
-    /// Fetch a shipper by resource name.
-    pub fn get_shipper(&self, name: &str) -> Option<Shipper> {
+    /// Fetch a shipper by its typed resource name (issue #169). The map is keyed
+    /// by the wrapper, so the handler passes the `ShipperResourceName` it already
+    /// parsed instead of a raw string.
+    pub fn get_shipper(&self, name: &ShipperResourceName) -> Option<Shipper> {
         self.shippers.lock().unwrap().get(name).cloned()
     }
 
-    /// Every shipper, in resource-name order.
+    /// Every shipper, in resource-name order. The typed key's `Ord` is the
+    /// canonical-name string order (issue #169), so this is the same stable
+    /// listing order the old `String`-keyed map produced.
     pub fn list_shippers(&self) -> Vec<Shipper> {
         self.shippers.lock().unwrap().values().cloned().collect()
     }
 
-    /// Insert or overwrite a shipper, keyed by its `name`. Soft delete (AIP-164)
+    /// Insert or overwrite a shipper under its typed `name`. Soft delete (AIP-164)
     /// stamps a `delete_time` and re-puts the shipper rather than removing it, so
     /// it stays addressable for `GetShipper`/`ListShippers` with `show_deleted`
     /// and recoverable by `UndeleteShipper` (#96) — there is no shipper removal.
-    pub fn put_shipper(&self, shipper: Shipper) {
-        self.shippers
-            .lock()
-            .unwrap()
-            .insert(shipper.name.clone(), shipper);
+    pub fn put_shipper(&self, name: &ShipperResourceName, shipper: Shipper) {
+        self.shippers.lock().unwrap().insert(name.clone(), shipper);
     }
 
     /// Insert or overwrite a site, keyed by its `name`. The full site is stored as

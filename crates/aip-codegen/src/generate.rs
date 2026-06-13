@@ -13,11 +13,20 @@
 //! its parent wrapper) by bare path in that shared module.
 //!
 //! Each resource yields a `<Type>ResourceName` struct — one **private** `String`
-//! field per pattern variable — built through a validated `new(...) ->
-//! Result<Self, Error>` constructor (each variable checked with
-//! [`aip_resourcename::validate_variable`]). Because construction validates every
-//! variable, the wrapper formats infallibly: it implements [`Display`], plus
-//! [`FromStr`] (delegating to `parse`) and `From<Self> for String`. The compiled
+//! field per pattern variable, plus the canonical resource name formatted once at
+//! construction — built through a validated `new(...) -> Result<Self, Error>`
+//! constructor (each variable checked with [`aip_resourcename::validate_variable`]).
+//! Every constructor funnels through one private `from_parts` that formats and
+//! stores that name, so `as_str(&self) -> &str` and `AsRef<str>` hand it back
+//! with no allocation. Because construction validates every variable, the wrapper
+//! formats infallibly: it implements [`Display`] (writing the stored name), plus
+//! [`FromStr`] (delegating to `parse`), the matching `TryFrom<&str>` /
+//! `TryFrom<String>` (same `Error`, for `.try_into()` and generic bounds), and
+//! `From<Self> for String` (moving out the stored name). The stored name is
+//! redundant with the variables, so `Eq` / `Hash` are unchanged. The wrapper also
+//! implements `Ord` / `PartialOrd` **over that stored name** — string order, the
+//! same a `BTreeMap<String, _>` or SQL `ORDER BY name` gives — not a field-tuple
+//! derive (the two diverge when one variable value is a prefix of another). The compiled
 //! [`Pattern`] is built once per wrapper in a `LazyLock`, shared by `parse` and
 //! `Display`. The generator does **not** reimplement the runtime; the emitted
 //! code calls into it.
@@ -385,6 +394,12 @@ fn write_resource_name(
     for var in &variables {
         line(&format!("    {var}: String,"));
     }
+    // The canonical resource name, formatted once at construction and stored so
+    // `as_str` / `Display` hand back a `&str` with no per-call Pattern re-format.
+    // Redundant with the variables (they determine it 1:1), so it does not change
+    // `Eq` / `Hash`: two wrappers are equal iff their variables are.
+    line("    /// canonical resource name. built once. backs as_str + Display.");
+    line("    name: String,");
     line("}");
     line("");
     line(&format!(
@@ -413,6 +428,58 @@ fn write_resource_name(
     line(&format!(
         "    pub const PATTERN: &'static str = \"{pattern}\";"
     ));
+    line("");
+
+    // `from_parts` — the one place the canonical name is formatted. Every public
+    // constructor funnels its already-valid variables through here, so the name
+    // is built exactly once (per construction) and the format logic lives once.
+    // The format-array (`[(var, value), …]`) collapses to one line under the
+    // width limit, else one pair per line, matching how rustfmt would break it.
+    let parts_pairs: Vec<String> = variables
+        .iter()
+        .map(|var| format!("(\"{var}\", {var}.as_str())"))
+        .collect();
+    let parts_params: Vec<String> = variables
+        .iter()
+        .map(|var| format!("{var}: String"))
+        .collect();
+    line("    /// Build from already-validated variables, formatting the canonical");
+    line("    /// resource name once and storing it. Private: callers go through the");
+    line("    /// validating/parsing constructors that guarantee the variables hold.");
+    let parts_sig = format!("    fn from_parts({}) -> Self {{", parts_params.join(", "));
+    if parts_sig.len() <= RUSTFMT_MAX_WIDTH {
+        line(&parts_sig);
+    } else {
+        line("    fn from_parts(");
+        for param in &parts_params {
+            line(&format!("        {param},"));
+        }
+        line("    ) -> Self {");
+    }
+    let parts_one_line = format!(
+        "        let name = {pattern_const}.format([{}]).expect(\"a validated resource name formats\");",
+        parts_pairs.join(", ")
+    );
+    if parts_one_line.len() <= RUSTFMT_MAX_WIDTH {
+        line(&parts_one_line);
+    } else {
+        line(&format!("        let name = {pattern_const}"));
+        let array = format!("[{}]", parts_pairs.join(", "));
+        if array.len() <= RUSTFMT_ARRAY_WIDTH {
+            line(&format!("            .format({array})"));
+        } else {
+            line("            .format([");
+            for pair in &parts_pairs {
+                line(&format!("                {pair},"));
+            }
+            line("            ])");
+        }
+        line("            .expect(\"a validated resource name formats\");");
+    }
+    let mut parts_fields = variables.clone();
+    parts_fields.push("name".to_owned());
+    line(&format!("        Self {{ {} }}", parts_fields.join(", ")));
+    line("    }");
     line("");
 
     // `new` — validated construction over `impl Into<String>` variables. The
@@ -445,7 +512,10 @@ fn write_resource_name(
             "        {rn}::validate_variable(\"{var}\", &{var})?;"
         ));
     }
-    line(&format!("        Ok(Self {{ {} }})", variables.join(", ")));
+    line(&format!(
+        "        Ok(Self::from_parts({}))",
+        variables.join(", ")
+    ));
     line("    }");
 
     for var in &variables {
@@ -455,6 +525,15 @@ fn write_resource_name(
         line(&format!("        &self.{var}"));
         line("    }");
     }
+
+    // `as_str` — the canonical resource name as a borrowed `&str`, no allocation
+    // (it was formatted once at construction). Call sites hold the typed wrapper
+    // and address storage through this instead of falling back to raw `String`.
+    line("");
+    line("    /// The canonical resource name as a string slice — no allocation.");
+    line("    pub fn as_str(&self) -> &str {");
+    line("        &self.name");
+    line("    }");
 
     line("");
     line("    /// Parse a resource name string into its typed variables.");
@@ -470,18 +549,20 @@ fn write_resource_name(
     line("                pattern: Self::PATTERN.to_owned(),");
     line("            });");
     line("        };");
-    line("        Ok(Self {");
     for var in &variables {
-        line(&format!("            {var}: captures"));
-        line(&format!("                .get(\"{var}\")"));
+        line(&format!("        let {var} = captures"));
+        line(&format!("            .get(\"{var}\")"));
         line(&format!(
-            "                .ok_or_else(|| {rn}::Error::MissingVariable {{"
+            "            .ok_or_else(|| {rn}::Error::MissingVariable {{"
         ));
-        line(&format!("                    name: \"{var}\".to_owned(),"));
-        line("                })?");
-        line("                .to_owned(),");
+        line(&format!("                name: \"{var}\".to_owned(),"));
+        line("            })?");
+        line("            .to_owned();");
     }
-    line("        })");
+    line(&format!(
+        "        Ok(Self::from_parts({}))",
+        variables.join(", ")
+    ));
     line("    }");
 
     // `parse_field` — validates the value as a resource name then matches the
@@ -506,15 +587,14 @@ fn write_resource_name(
     // `mint` — infallible constructor for single-variable (no parent) wrappers
     // only; `mint_under` is the parented variant.
     if parent.is_none() && variables.len() == 1 {
-        let last_var = variables.last().expect("at least one variable");
         let ri = &paths.resourceid;
         line("");
         line("    /// Mint a resource name with a system-assigned ID (AIP-148).");
         line("    /// A UUIDv4 is always a valid segment, so this is infallible.");
         line("    pub fn mint() -> Self {");
-        line("        Self {");
-        line(&format!("            {last_var}: {ri}::generate_system(),"));
-        line("        }");
+        line(&format!(
+            "        Self::from_parts({ri}::generate_system())"
+        ));
         line("    }");
     }
 
@@ -550,7 +630,6 @@ fn write_resource_name(
         line("    }");
 
         // `mint_under` — infallible constructor for parented wrappers.
-        let last_var = variables.last().expect("at least one variable");
         let ri = &paths.resourceid;
         line("");
         line("    /// Mint a resource name under `parent` with a system-assigned ID (AIP-148).");
@@ -558,50 +637,64 @@ fn write_resource_name(
         line(&format!(
             "    pub fn mint_under(parent: &{parent_name}) -> Self {{"
         ));
-        line("        Self {");
-        for var in parent_variables {
-            line(&format!("            {var}: parent.{var}().to_owned(),"));
+        let mut mint_args: Vec<String> = parent_variables
+            .iter()
+            .map(|var| format!("parent.{var}().to_owned()"))
+            .collect();
+        mint_args.push(format!("{ri}::generate_system()"));
+        let mint_one_line = format!("        Self::from_parts({})", mint_args.join(", "));
+        if mint_one_line.len() <= RUSTFMT_MAX_WIDTH {
+            line(&mint_one_line);
+        } else {
+            line("        Self::from_parts(");
+            for arg in &mint_args {
+                line(&format!("            {arg},"));
+            }
+            line("        )");
         }
-        line(&format!("            {last_var}: {ri}::generate_system(),"));
-        line("        }");
         line("    }");
     }
     line("}");
 
-    // `Display` — infallible, since construction validated every variable. Emits
-    // the `[(var, value), …]` array on one line when it fits, else one per line.
+    // `Display` — writes the canonical name stored at construction, no per-call
+    // re-format (the `from_parts` constructor already paid that cost once).
     line("");
     line(&format!("impl ::std::fmt::Display for {struct_name} {{"));
     line("    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {");
-    line("        // Construction validated each variable, so formatting is infallible.");
-    let pairs: Vec<String> = variables
-        .iter()
-        .map(|var| format!("(\"{var}\", self.{var}.as_str())"))
-        .collect();
-    let one_line = format!(
-        "        f.write_str(&{pattern_const}.format([{}]).expect(\"a validated resource name formats\"))",
-        pairs.join(", ")
-    );
-    if one_line.len() <= RUSTFMT_MAX_WIDTH {
-        line(&one_line);
-    } else {
-        // The chain breaks across lines; the `.format([…])` array stays inline
-        // while its literal fits rustfmt's `array_width`, else one pair per line.
-        line("        f.write_str(");
-        line(&format!("            &{pattern_const}"));
-        let array = format!("[{}]", pairs.join(", "));
-        if array.len() <= RUSTFMT_ARRAY_WIDTH {
-            line(&format!("                .format({array})"));
-        } else {
-            line("                .format([");
-            for pair in &pairs {
-                line(&format!("                    {pair},"));
-            }
-            line("                ])");
-        }
-        line("                .expect(\"a validated resource name formats\"),");
-        line("        )");
-    }
+    line("        f.write_str(&self.name)");
+    line("    }");
+    line("}");
+
+    // `AsRef<str>` — the canonical name as `&str`, so the wrapper drops into any
+    // `impl AsRef<str>` API (map keys, comparisons) without an explicit `as_str`.
+    line("");
+    line(&format!("impl AsRef<str> for {struct_name} {{"));
+    line("    fn as_ref(&self) -> &str {");
+    line("        &self.name");
+    line("    }");
+    line("}");
+
+    // `Ord` / `PartialOrd` — ordered by the canonical resource name's *string*
+    // order, NOT a field-tuple derive. The two diverge when one variable value is
+    // a prefix of another: `a` vs `a-b` has `'-' < '/'`, so `…/a-b/…` sorts before
+    // `…/a/…` as strings, while a `(var, …)` tuple sorts `a` first. String order
+    // matches `BTreeMap<String, _>` and SQL `ORDER BY name`, so a wrapper-keyed
+    // map lists in the same order the demo's name-keyed map did. Consistent with
+    // the derived `Eq` (the stored name determines the variables 1:1).
+    line("");
+    line(&format!("impl Ord for {struct_name} {{"));
+    line("    /// Orders by the canonical resource name string — the order a");
+    line("    /// `BTreeMap<String, _>` or SQL `ORDER BY name` produces, not the");
+    line("    /// variable-tuple order (which diverges when one value is a prefix of");
+    line("    /// another, e.g. `a` vs `a-b`).");
+    line("    fn cmp(&self, other: &Self) -> ::std::cmp::Ordering {");
+    line("        self.name.cmp(&other.name)");
+    line("    }");
+    line("}");
+    line("");
+    line(&format!("impl PartialOrd for {struct_name} {{"));
+    line("    fn partial_cmp(&self, other: &Self) -> Option<::std::cmp::Ordering> {");
+    line("        Some(self.cmp(other))");
     line("    }");
     line("}");
 
@@ -614,10 +707,33 @@ fn write_resource_name(
     line("    }");
     line("}");
 
+    // `TryFrom<&str>` / `TryFrom<String>` — std pairs these with `FromStr` so
+    // call sites can `.try_into()` and generic `T: TryFrom<&str>` bounds bind.
+    // Both delegate to `parse`, carrying the same `Error` as `FromStr`.
+    line("");
+    line(&format!("impl TryFrom<&str> for {struct_name} {{"));
+    line(&format!("    type Error = {rn}::Error;"));
+    line("");
+    line("    fn try_from(s: &str) -> Result<Self, Self::Error> {");
+    line("        Self::parse(s)");
+    line("    }");
+    line("}");
+
+    line("");
+    line(&format!("impl TryFrom<String> for {struct_name} {{"));
+    line(&format!("    type Error = {rn}::Error;"));
+    line("");
+    line("    fn try_from(s: String) -> Result<Self, Self::Error> {");
+    line("        Self::parse(&s)");
+    line("    }");
+    line("}");
+
+    // `From<Wrapper> for String` — hands back the stored canonical name by move,
+    // no re-format or extra allocation.
     line("");
     line(&format!("impl From<{struct_name}> for String {{"));
     line(&format!("    fn from(name: {struct_name}) -> Self {{"));
-    line("        name.to_string()");
+    line("        name.name");
     line("    }");
     line("}");
     Ok(())

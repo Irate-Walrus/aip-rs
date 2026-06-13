@@ -6,6 +6,8 @@
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ShipperResourceName {
     shipper: String,
+    /// canonical resource name. built once. backs as_str + Display.
+    name: String,
 }
 
 /// The compiled `shippers/{shipper}` pattern, parsed once.
@@ -22,17 +24,32 @@ impl ShipperResourceName {
     /// The resource name pattern, `shippers/{shipper}`.
     pub const PATTERN: &'static str = "shippers/{shipper}";
 
+    /// Build from already-validated variables, formatting the canonical
+    /// resource name once and storing it. Private: callers go through the
+    /// validating/parsing constructors that guarantee the variables hold.
+    fn from_parts(shipper: String) -> Self {
+        let name = SHIPPER_RESOURCE_NAME_PATTERN
+            .format([("shipper", shipper.as_str())])
+            .expect("a validated resource name formats");
+        Self { shipper, name }
+    }
+
     /// Construct the resource name from its variables, validating each
     /// as a single resource-name segment (non-empty, no `/`).
     pub fn new(shipper: impl Into<String>) -> Result<Self, ::aip::resourcename::Error> {
         let shipper = shipper.into();
         ::aip::resourcename::validate_variable("shipper", &shipper)?;
-        Ok(Self { shipper })
+        Ok(Self::from_parts(shipper))
     }
 
     /// The `{shipper}` variable.
     pub fn shipper(&self) -> &str {
         &self.shipper
+    }
+
+    /// The canonical resource name as a string slice — no allocation.
+    pub fn as_str(&self) -> &str {
+        &self.name
     }
 
     /// Parse a resource name string into its typed variables.
@@ -42,14 +59,13 @@ impl ShipperResourceName {
                 pattern: Self::PATTERN.to_owned(),
             });
         };
-        Ok(Self {
-            shipper: captures
-                .get("shipper")
-                .ok_or_else(|| ::aip::resourcename::Error::MissingVariable {
-                    name: "shipper".to_owned(),
-                })?
-                .to_owned(),
-        })
+        let shipper = captures
+            .get("shipper")
+            .ok_or_else(|| ::aip::resourcename::Error::MissingVariable {
+                name: "shipper".to_owned(),
+            })?
+            .to_owned();
+        Ok(Self::from_parts(shipper))
     }
 
     /// Parse `value` from request field `field`, wrapping any error with
@@ -65,20 +81,35 @@ impl ShipperResourceName {
     /// Mint a resource name with a system-assigned ID (AIP-148).
     /// A UUIDv4 is always a valid segment, so this is infallible.
     pub fn mint() -> Self {
-        Self {
-            shipper: ::aip::resourceid::generate_system(),
-        }
+        Self::from_parts(::aip::resourceid::generate_system())
     }
 }
 
 impl ::std::fmt::Display for ShipperResourceName {
     fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        // Construction validated each variable, so formatting is infallible.
-        f.write_str(
-            &SHIPPER_RESOURCE_NAME_PATTERN
-                .format([("shipper", self.shipper.as_str())])
-                .expect("a validated resource name formats"),
-        )
+        f.write_str(&self.name)
+    }
+}
+
+impl AsRef<str> for ShipperResourceName {
+    fn as_ref(&self) -> &str {
+        &self.name
+    }
+}
+
+impl Ord for ShipperResourceName {
+    /// Orders by the canonical resource name string — the order a
+    /// `BTreeMap<String, _>` or SQL `ORDER BY name` produces, not the
+    /// variable-tuple order (which diverges when one value is a prefix of
+    /// another, e.g. `a` vs `a-b`).
+    fn cmp(&self, other: &Self) -> ::std::cmp::Ordering {
+        self.name.cmp(&other.name)
+    }
+}
+
+impl PartialOrd for ShipperResourceName {
+    fn partial_cmp(&self, other: &Self) -> Option<::std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -90,9 +121,25 @@ impl ::std::str::FromStr for ShipperResourceName {
     }
 }
 
+impl TryFrom<&str> for ShipperResourceName {
+    type Error = ::aip::resourcename::Error;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        Self::parse(s)
+    }
+}
+
+impl TryFrom<String> for ShipperResourceName {
+    type Error = ::aip::resourcename::Error;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Self::parse(&s)
+    }
+}
+
 impl From<ShipperResourceName> for String {
     fn from(name: ShipperResourceName) -> Self {
-        name.to_string()
+        name.name
     }
 }
 
