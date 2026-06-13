@@ -1,0 +1,99 @@
+# Lint + test gate for every push and PR to `main` (issue #89).
+#
+# The workspace is per-feature crates re-exported by the umbrella `aip` crate, so
+# a feature-gated crate can rot silently if CI only ever builds the default set.
+# The `features` job below guards against that with `cargo hack`: each feature in
+# isolation, plus the umbrella's opt-in features composed pairwise.
+#
+# Generated proto code is committed (ADR-0011), so nothing here needs `buf` or
+# `protoc` — only a Rust toolchain and (for the example's bundled SQLite) a C
+# compiler, which `ubuntu-latest` already ships. The buf-generate drift check is
+# a separate workflow (issue #85).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# One in-flight run per ref; a newer push cancels the older run rather than
+# queueing redundant work.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # Every clippy/rustc warning is a hard error. `-D warnings` is passed after
+      # `--` so it denies lints for the workspace crates only; dependency
+      # warnings (which we cannot fix) do not fail the build. The committed
+      # `src/gen` modules carry `#![allow(clippy::all, ...)]`, so generated code
+      # is exempt by construction.
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # `--all-features` enables every opt-in (`iam`, `iam-proto`, `iam-eval`,
+      # `sql`, `tonic`, ...), so a feature-gated test cannot hide from this run.
+      - run: cargo test --workspace --all-features
+
+  features:
+    name: feature matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack
+      - uses: Swatinem/rust-cache@v2
+      # Each feature, in isolation, across the whole workspace: a crate that only
+      # compiles when some *other* feature happens to be enabled fails here.
+      # `--no-dev-deps` skips test/example targets to keep the sweep a fast
+      # compile check (the `test` job above runs the tests under all features).
+      - run: cargo hack --workspace --each-feature --no-dev-deps check
+      # The umbrella's opt-in features must also *compose*: `tonic` + `iam`, `sql`
+      # + `iam`, the `cel-proto`/`iam-proto`/`iam-eval` proto adapters, and so on.
+      # A full powerset is 2^n; depth 2 covers every pair, which is where the
+      # cross-feature interactions actually live, without the combinatorial blowup.
+      - run: cargo hack --package aip --feature-powerset --depth 2 --no-dev-deps check
+
+  example:
+    name: freight-server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Extending the example is part of every issue's definition of done
+      # (CLAUDE.md), so it must keep building. `rusqlite`'s `bundled` feature
+      # compiles a vendored SQLite, which needs the C toolchain `ubuntu-latest`
+      # already provides.
+      - run: cargo build -p freight-server
