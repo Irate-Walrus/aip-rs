@@ -31,9 +31,6 @@
 //! Validation failures return a typed [`Error`] that maps, behind the `tonic`
 //! feature, to `INVALID_ARGUMENT` with AIP-193 standard error details.
 //!
-//! [adr9]: https://github.com/irate-walrus/aip-rs/blob/main/docs/adr/0009-reflective-typed-message-api.md
-//! [adr7]: https://github.com/irate-walrus/aip-rs/blob/main/docs/adr/0007-aip193-error-details.md
-//!
 //! See <https://google.aip.dev/123> (resource types) and
 //! <https://google.aip.dev/124> (resource references).
 //!
