@@ -21,8 +21,6 @@
 //! behind the `tonic` feature, to `INVALID_ARGUMENT` with AIP-193 standard
 //! error details.
 //!
-//! This crate ports [`go.einride.tech/aip/fieldbehavior`](https://pkg.go.dev/go.einride.tech/aip/fieldbehavior).
-//!
 //! See <https://google.aip.dev/161> and <https://google.aip.dev/203>.
 //!
 //! # Example

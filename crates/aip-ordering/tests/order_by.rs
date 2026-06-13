@@ -1,5 +1,4 @@
-//! Ported from `go.einride.tech/aip/ordering`'s `orderby_test.go` and
-//! `request_test.go`.
+//! Tests for `orderby_test.go` and `request_test.go` cases.
 
 use aip_ordering::{parse, Error, OrderBy, OrderByField, OrderByRequest};
 

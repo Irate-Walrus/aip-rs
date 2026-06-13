@@ -9,9 +9,8 @@
 //! layered on a still-public **Dynamic core** ([`update_dynamic`], over
 //! [`DynamicMessage`]).
 //!
-//! The core is a port of `go.einride.tech/aip/fieldmask`. It departs from the
-//! reference in one place: a source/destination type mismatch returns
-//! [`Error::TypeMismatch`] where aip-go panics.
+//! A source/destination type mismatch returns [`Error::TypeMismatch`] where
+//! the Go reference implementation panics.
 //!
 //! See <https://google.aip.dev/161> and <https://google.aip.dev/134>.
 //!

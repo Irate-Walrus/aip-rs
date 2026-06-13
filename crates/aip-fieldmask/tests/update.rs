@@ -1,4 +1,3 @@
-//! Ported from `go.einride.tech/aip/fieldmask`'s `update_test.go`.
 //!
 //! Each case builds `src`/`dst`/`expected` as [`DynamicMessage`] fixtures of
 //! `einride.example.syntax.v1.Message` from JSON, applies [`update_dynamic`], and

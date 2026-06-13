@@ -1,4 +1,3 @@
-//! Ported from `go.einride.tech/aip/fieldmask`'s `validate_test.go`.
 //!
 //! aip-go validates against `library.Book`/`CreateBookRequest`; lacking those
 //! protos, the cases use the vendored `einride.example` fixtures — `Shipper`

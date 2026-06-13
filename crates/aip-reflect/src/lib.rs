@@ -3,9 +3,8 @@
 //!
 //! This is distinct from the `prost-reflect` *mechanics* (descriptor pools,
 //! dynamic messages) it is built on: this crate reads the AIP annotations off a
-//! [`Descriptor`](prost_reflect) and validates references between resources. It
-//! ports the standalone-useful subset of
-//! [`go.einride.tech/aip/reflect/aipreflect`](https://pkg.go.dev/go.einride.tech/aip/reflect/aipreflect):
+//! [`Descriptor`](prost_reflect) and validates references between resources.
+//! Exposed primitives:
 //!
 //! - [`ResourceType`] — parse a resource type string such as
 //!   `freight-example.einride.tech/Shipper` into its service name and type, and

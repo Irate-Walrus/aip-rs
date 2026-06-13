@@ -1,6 +1,5 @@
-//! Ported from `go.einride.tech/aip/fieldbehavior`'s `required.go` and
-//! `immutable.go` table tests. Each case uses `test-fixtures` JSON → dynamic
-//! message fixtures and exercises the dynamic-core validation functions.
+//! Table tests for the dynamic-core validation functions; each case uses
+//! `test-fixtures` JSON → dynamic message fixtures.
 
 use aip_fieldbehavior::{
     validate_immutable_not_changed_dynamic, validate_required_dynamic,
