@@ -1,11 +1,14 @@
-# release-plz configuration (issue #100): publish automation across the
+# release-plz configuration (issue #100): release management across the
 # inter-dependent crates.
 #
-# release-plz computes the dependency order itself, bumps versions + changelogs
-# from conventional commits, runs cargo-semver-checks against the last crates.io
-# release, and — once its release PR is merged — publishes the changed crates in
-# order and cuts a GitHub release + tag per crate. The two `.github/workflows`
-# halves (`release-plz.yml`, `release-plugin-binaries.yml`) drive it.
+# Mode: GIT-ONLY for now. release-plz bumps versions + changelogs from
+# conventional commits and — once its release PR is merged — cuts a GitHub
+# release + git tag per crate, which is what feeds `release-plugin-binaries.yml`.
+# It does NOT push to crates.io (`publish = false` below), because the two
+# colliding names are owned by other people there: `aip` (by AprilNEA) and
+# `aip-filtering` (by J0sh0nat0r). Publishing needs those two renamed to free
+# names (`aip-rs` / `aip-rs-filtering`) plus a CARGO_REGISTRY_TOKEN — flip
+# `publish` back on (and re-enable `semver_check`) when that happens.
 #
 # All crates share one version via `[workspace.package] version` (every member is
 # `version.workspace = true`), so release-plz versions them as a set.
@@ -16,24 +19,23 @@
 # Moving to 0.1.0 is a deliberate, manual bump of `[workspace.package] version`.
 
 [workspace]
-# Gate every release on cargo-semver-checks against the last published version:
-# a breaking change without the matching version bump fails the release PR rather
-# than shipping silently. release-plz proposes the correct bump (in 0.0.x every
-# change is a patch bump: 0.0.1 -> 0.0.2).
-semver_check = true
+# Git-only: manage versions/changelogs/tags/GitHub releases, but do not run
+# `cargo publish`. No crates.io token is needed while this is off.
+publish = false
+# cargo-semver-checks compares against the *crates.io* baseline, but the crates
+# published under `aip` / `aip-filtering` are unrelated third-party crates — so a
+# semver check against them is meaningless here. Re-enable alongside `publish`
+# once we own the names.
+semver_check = false
 # One GitHub release + git tag per crate. The default tag is
 # `{{ package }}-v{{ version }}` (e.g. `protoc-gen-prost-aip-v0.0.1`); the
 # plugin-binary workflow keys off the `protoc-gen-prost-aip-v*` tag.
 git_release_enable = true
 git_tag_enable = true
 
-# The test harness and the example server never publish. Both are already
-# `publish = false` in their manifests (so release-plz skips them regardless);
-# restated here so the release surface is legible from one file.
-[[package]]
-name = "test-fixtures"
-release = false
-
-[[package]]
-name = "freight-server"
-release = false
+# The test harness (`test-fixtures`) and the example server (`freight-server`)
+# never publish: both are `publish = false` in their manifests, which release-plz
+# reads and skips on its own. Do NOT restate that as a `[[package]]` override here
+# — a per-package block defaults `publish = true`, which release-plz rejects as
+# contradicting the manifest ("has `publish = false` in Cargo.toml, but `publish =
+# true` in the release-plz configuration").

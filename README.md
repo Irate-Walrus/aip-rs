@@ -164,11 +164,16 @@ relevant ADR in [`docs/adr/`](docs/adr) and use the terminology from
 
 Releases are automated with [release-plz](https://release-plz.dev). Merging
 conventional-commit changes to `main` keeps an open release PR with the version
-bumps and changelog entries; merging that PR publishes the changed crates to
-crates.io in dependency order, cuts a GitHub release + tag per crate, and (for
-`protoc-gen-prost-aip`) attaches the prebuilt plugin binaries. cargo-semver-checks
-gates each release and an MSRV job pins the floor. The required repo secrets are
-documented in [`.github/workflows/release-plz.yml`](.github/workflows/release-plz.yml).
+bumps and changelog entries; merging that PR cuts a GitHub release + git tag per
+crate and (for `protoc-gen-prost-aip`) attaches the prebuilt plugin binaries. An
+MSRV job pins the floor.
+
+Releases are **git-only for now** — release-plz is configured with `publish =
+false`, so nothing is pushed to crates.io. The `aip` and `aip-filtering` names
+are already owned by unrelated crates there; enabling crates.io publishing means
+renaming those two and adding a token, as documented in
+[`release-plz.toml`](release-plz.toml) and
+[`.github/workflows/release-plz.yml`](.github/workflows/release-plz.yml).
 
 ## Credits
 
