@@ -4,8 +4,10 @@
 //! remove a **Member** from the **Binding** for a **Role** ([`add_member`](crate::policy::add_member) /
 //! [`remove_member`](crate::policy::remove_member)), fold a **Policy** into a canonical form so two equal
 //! policies compare equal ([`normalize`](crate::policy::normalize)), enforce the *conditions ⟹ version 3*
-//! invariant ([`validate`](crate::policy::validate)), and run the `etag` optimistic-concurrency check that
-//! makes the read-modify-write cycle safe ([`compute`](crate::policy::compute) / [`check`](crate::policy::check)).
+//! invariant ([`validate`](crate::policy::validate)) — and recover the `version` it implies for a
+//! decomposed policy read back from per-binding rows ([`canonical_version`](crate::policy::canonical_version)) —
+//! answer coarse membership ([`grants`](crate::policy::grants)), and run the `etag` optimistic-concurrency
+//! check that makes the read-modify-write cycle safe ([`compute`](crate::policy::compute) / [`check`](crate::policy::check)).
 //!
 //! These are *structural* ops — they rearrange a **Policy**'s **Bindings**; they
 //! never make an authorization **decision** (role→permission expansion, condition
@@ -125,23 +127,86 @@ fn binding_key(binding: &Binding) -> (&str, Option<(&str, &str, &str, &str)>) {
     )
 }
 
+/// Does any **Binding** in `bindings` carry a **Condition**? The single predicate
+/// the *conditions ⟹ version 3* invariant turns on — shared by [`validate`] (the
+/// write-path check) and [`canonical_version`] (the read-path recovery) so the two
+/// cannot drift apart.
+fn any_conditional(bindings: &[Binding]) -> bool {
+    bindings.iter().any(|b| b.condition.is_some())
+}
+
+/// The canonical schema `version` for a set of **Bindings**: `3` when any **Binding**
+/// is conditional, else `1` — the *conditions ⟹ version 3* invariant read forwards.
+///
+/// This is the inverse [`validate`] enforces on the write path: a store that
+/// decomposes a **Policy** into per-binding rows (dropping `version`, which is
+/// derivable) recovers it here on read rather than hand-rolling
+/// `if any condition { 3 } else { 1 }` — get that wrong and, since the content
+/// `etag` digests `version` too ([`compute`]), the `etag` silently skews. One
+/// function owns the invariant; [`validate`] and this share [`any_conditional`], so
+/// they agree by construction (ADR-0010).
+///
+/// ```
+/// # use aip_iam::policy::canonical_version;
+/// # use aip_iam::proto::{Binding, google::r#type::Expr};
+/// let unconditional = Binding { role: "roles/viewer".into(), ..Default::default() };
+/// assert_eq!(canonical_version(&[unconditional.clone()]), 1);
+///
+/// let conditional = Binding { condition: Some(Expr::default()), ..unconditional };
+/// assert_eq!(canonical_version(&[conditional]), 3);
+/// ```
+pub fn canonical_version(bindings: &[Binding]) -> i32 {
+    if any_conditional(bindings) {
+        3
+    } else {
+        1
+    }
+}
+
 /// Enforce the *conditions ⟹ version 3* invariant: if any **Binding** carries a
 /// **Condition**, the **Policy** `version` must be `3` (IAM rejects a conditional
 /// binding on an older schema). A policy with no conditions is accepted at any
 /// version, and version `3` without conditions is fine — only the conditional case
 /// is constrained (ADR-0010).
 ///
+/// The mirror of [`canonical_version`], which recovers the `version` a decomposed
+/// policy should carry; both turn on the same [`any_conditional`] predicate, so the
+/// write-path check and the read-path recovery cannot disagree.
+///
 /// # Errors
 ///
 /// [`Error::PolicyConditionRequiresVersion3`] when a conditional binding is present
 /// but `version != 3`.
 pub fn validate(policy: &Policy) -> Result<(), Error> {
-    if policy.bindings.iter().any(|b| b.condition.is_some()) && policy.version != 3 {
+    if any_conditional(&policy.bindings) && policy.version != 3 {
         return Err(Error::PolicyConditionRequiresVersion3 {
             version: policy.version,
         });
     }
     Ok(())
+}
+
+/// Does `policy` grant anything to `caller` (the request's **Member**, or `None`
+/// for an anonymous caller)? `true` when `caller` is admitted by *any* **Member** of
+/// *any* **Binding** — coarse membership, the cheap gate a server runs before the
+/// real work (an AIP-211 read check).
+///
+/// "Coarse" is the whole point: this answers *is the caller named in the Policy at
+/// all*, not *what may they do*. It does **not** expand **Roles** to **Permissions**
+/// or evaluate a **Binding**'s **Condition** — those are the authorization
+/// **decision**, which stays the caller's, behind the opt-in `eval` adapter
+/// (ADR-0010). A conditional **Binding** counts here even when its **Condition**
+/// would not hold; a server needing the precise answer evaluates conditions itself.
+///
+/// Each **Member** string is matched with [`grant_admits`](crate::grant_admits), so
+/// `allUsers` / `allAuthenticatedUsers` / exact-member semantics are applied
+/// uniformly with the per-grant helpers.
+pub fn grants(policy: &Policy, caller: Option<&Member>) -> bool {
+    policy
+        .bindings
+        .iter()
+        .flat_map(|binding| &binding.members)
+        .any(|granted| crate::grant_admits(granted, caller))
 }
 
 /// The content `etag` of `policy`: a deterministic CRC32 digest of its content,
@@ -417,6 +482,77 @@ mod tests {
             ..Policy::default()
         };
         assert_eq!(validate(&policy), Ok(()));
+    }
+
+    #[test]
+    fn canonical_version_recovers_3_only_for_a_conditional_binding_set() {
+        let unconditional = vec![binding("roles/viewer", &["user:alice@example.com"])];
+        assert_eq!(canonical_version(&unconditional), 1);
+        // No bindings at all is the unconditional case.
+        assert_eq!(canonical_version(&[]), 1);
+
+        let conditional = vec![Binding {
+            condition: Some(Expr {
+                expression: "true".to_owned(),
+                ..Expr::default()
+            }),
+            ..binding("roles/viewer", &["user:alice@example.com"])
+        }];
+        assert_eq!(canonical_version(&conditional), 3);
+    }
+
+    #[test]
+    fn canonical_version_and_validate_agree_by_construction() {
+        // The recovered version always satisfies the write-path check: a policy
+        // stamped with `canonical_version` validates, conditional or not.
+        for bindings in [
+            vec![binding("roles/viewer", &["user:alice@example.com"])],
+            vec![Binding {
+                condition: Some(Expr {
+                    expression: "true".to_owned(),
+                    ..Expr::default()
+                }),
+                ..binding("roles/viewer", &["user:alice@example.com"])
+            }],
+        ] {
+            let policy = Policy {
+                version: canonical_version(&bindings),
+                bindings,
+                ..Policy::default()
+            };
+            assert_eq!(validate(&policy), Ok(()), "recovered version validates");
+        }
+    }
+
+    #[test]
+    fn grants_is_coarse_membership_over_every_binding() {
+        let policy = Policy {
+            bindings: vec![
+                binding("roles/viewer", &["group:ops@example.com"]),
+                binding("roles/editor", &["user:alice@example.com"]),
+            ],
+            ..Policy::default()
+        };
+
+        // Named in some binding ⇒ granted; named in none ⇒ not.
+        assert!(grants(&policy, Some(&member("user:alice@example.com"))));
+        assert!(!grants(&policy, Some(&member("user:bob@example.com"))));
+
+        // The wildcard semantics flow through `grant_admits`.
+        let anon = Policy {
+            bindings: vec![binding("roles/viewer", &["allUsers"])],
+            ..Policy::default()
+        };
+        assert!(grants(&anon, None), "allUsers admits the anonymous caller");
+        let authed = Policy {
+            bindings: vec![binding("roles/viewer", &["allAuthenticatedUsers"])],
+            ..Policy::default()
+        };
+        assert!(
+            !grants(&authed, None),
+            "allAuthenticatedUsers needs a caller"
+        );
+        assert!(grants(&authed, Some(&member("user:alice@example.com"))));
     }
 
     #[test]

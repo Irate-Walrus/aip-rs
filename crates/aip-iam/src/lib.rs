@@ -35,9 +35,9 @@ mod member;
 mod permission;
 mod role;
 
-pub use member::Member;
+pub use member::{grant_admits, Member};
 pub use permission::Permission;
-pub use role::Role;
+pub use role::{Role, RoleSet};
 
 /// AIP-211 authorization-error shaping — opt-in via the non-default `tonic`
 /// feature. The canonical non-leaking `PERMISSION_DENIED`

@@ -60,6 +60,52 @@ impl FromStr for Member {
     }
 }
 
+impl Member {
+    /// Does the stored Policy member string `granted` admit *this* **Member**?
+    ///
+    /// The two wildcard grants — `allUsers` and `allAuthenticatedUsers` — admit
+    /// any present member (this method is only ever called with a concrete
+    /// **Member** in hand, so "authenticated" is already satisfied); a typed grant
+    /// admits only the **Member** whose canonical [`Display`](fmt::Display) form
+    /// equals `granted`. Comparing against the canonical rendering is what makes
+    /// the match exact — a malformed grant matches nothing.
+    ///
+    /// This is the per-grant half of the IAM membership rule; the anonymous
+    /// caller (no **Member** at all) is handled by [`grant_admits`], and
+    /// whole-**Policy** membership by [`policy::grants`](crate::policy::grants).
+    /// The authorization **decision** (role→permission expansion, **Condition**
+    /// evaluation) stays the caller's (ADR-0010).
+    pub fn matches_grant(&self, granted: &str) -> bool {
+        match granted {
+            "allUsers" | "allAuthenticatedUsers" => true,
+            typed => self.to_string() == typed,
+        }
+    }
+}
+
+/// Does the stored Policy member string `granted` admit `caller` (the request's
+/// **Member**, or `None` for an anonymous caller)?
+///
+/// The full `google.iam.v1` membership rule for a single grant:
+///
+/// - `allUsers` admits anyone — even an absent (anonymous) caller;
+/// - `allAuthenticatedUsers` admits any *present* caller, anonymous denied;
+/// - a typed grant (`user:`, `group:`, …) admits only the exact canonical
+///   [`Member`] (via [`Member::matches_grant`]).
+///
+/// This is the anonymous-aware companion to [`Member::matches_grant`]: reach for
+/// the method when a concrete **Member** is in hand, this free function when the
+/// caller may be anonymous (a server's AIP-211 gate). Coarse membership only —
+/// the authorization **decision** stays the caller's (ADR-0010).
+pub fn grant_admits(granted: &str, caller: Option<&Member>) -> bool {
+    match (granted, caller) {
+        // allUsers admits even an absent caller; every other grant needs one.
+        ("allUsers", _) => true,
+        (granted, Some(member)) => member.matches_grant(granted),
+        (_, None) => false,
+    }
+}
+
 impl fmt::Display for Member {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -123,5 +169,38 @@ mod tests {
                 kind: "user".to_owned(),
             })
         );
+    }
+
+    #[test]
+    fn matches_grant_honours_wildcards_and_exact_member() {
+        let alice: Member = "user:alice@example.com".parse().unwrap();
+
+        // A concrete member is admitted by either wildcard grant.
+        assert!(alice.matches_grant("allUsers"));
+        assert!(alice.matches_grant("allAuthenticatedUsers"));
+
+        // A typed grant admits only the exact canonical rendering.
+        assert!(alice.matches_grant("user:alice@example.com"));
+        assert!(!alice.matches_grant("user:bob@example.com"));
+        // Right value, wrong type is not a match.
+        assert!(!alice.matches_grant("group:alice@example.com"));
+    }
+
+    #[test]
+    fn grant_admits_handles_the_anonymous_caller() {
+        let alice: Member = "user:alice@example.com".parse().unwrap();
+
+        // allUsers admits anyone, including an absent (anonymous) caller.
+        assert!(grant_admits("allUsers", None));
+        assert!(grant_admits("allUsers", Some(&alice)));
+
+        // allAuthenticatedUsers admits any present caller, but not the anonymous one.
+        assert!(!grant_admits("allAuthenticatedUsers", None));
+        assert!(grant_admits("allAuthenticatedUsers", Some(&alice)));
+
+        // A typed grant needs a present caller matching it exactly.
+        assert!(!grant_admits("user:alice@example.com", None));
+        assert!(grant_admits("user:alice@example.com", Some(&alice)));
+        assert!(!grant_admits("user:bob@example.com", Some(&alice)));
     }
 }

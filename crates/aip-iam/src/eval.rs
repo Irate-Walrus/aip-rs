@@ -88,31 +88,47 @@ impl Condition {
 /// `resource.*` attributes the request targets and the `request.time` it arrived
 /// at, the two halves of the environment AIP/IAM conditions reach for.
 ///
-/// Built fluently — every field is optional, so a Condition that references only
-/// `resource.name` need not supply a `request.time`, and vice versa:
+/// Built fluently — [`new`](RequestContext::new) stamps `request.time` with the
+/// moment the context is built (what every real caller passes), and each setter
+/// layers on `resource.*` attributes or overrides the time:
 ///
 /// ```
-/// # use std::time::SystemTime;
 /// # use aip_iam::eval::{Condition, RequestContext};
-/// let ctx = RequestContext::new()
-///     .resource("name", "shippers/acme")
-///     .request_time(SystemTime::now());
+/// // `request.time` defaults to now, so a resource-only Condition needs no clock.
+/// let ctx = RequestContext::new().resource("name", "shippers/acme");
 /// let held = Condition::compile("resource.name == \"shippers/acme\"")
 ///     .unwrap()
 ///     .evaluate(&ctx)
 ///     .unwrap();
 /// assert!(held);
 /// ```
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RequestContext {
     resource: BTreeMap<String, String>,
-    request_time: Option<SystemTime>,
+    request_time: SystemTime,
+}
+
+impl Default for RequestContext {
+    /// Same as [`new`](RequestContext::new) — `request.time` stamped with now, no
+    /// `resource.*` attributes.
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RequestContext {
-    /// An empty request context — no `resource.*` attributes and no `request.time`.
+    /// A fresh request context with `request.time` set to **now** — the instant the
+    /// context is built, which is what every real caller passes — and no
+    /// `resource.*` attributes yet.
+    ///
+    /// A test that needs a fixed clock overrides the default via
+    /// [`request_time`](RequestContext::request_time); production code that just
+    /// wants "when the request arrived" takes the default and drops a line.
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            resource: BTreeMap::new(),
+            request_time: SystemTime::now(),
+        }
     }
 
     /// Set a `resource.<key>` attribute (e.g. `name`, `type`, `service`) the
@@ -123,19 +139,22 @@ impl RequestContext {
         self
     }
 
-    /// Set `request.time` — the instant the request arrived — which a Condition can
-    /// compare against a CEL `timestamp(...)` literal (e.g. an expiry window).
+    /// Override `request.time` — the instant the request arrived — which a Condition
+    /// can compare against a CEL `timestamp(...)` literal (e.g. an expiry window).
+    ///
+    /// [`new`](RequestContext::new) already defaults this to now, so the override
+    /// exists for deterministic tests that pin a fixed clock; production callers
+    /// rarely need it.
     #[must_use]
     pub fn request_time(mut self, time: SystemTime) -> Self {
-        self.request_time = Some(time);
+        self.request_time = time;
         self
     }
 
     /// Lower this environment into a CEL [`Context`], binding `resource` to a map of
-    /// its string attributes and `request` to a map carrying the `time` timestamp
-    /// (omitted when unset). [`Context::default`] supplies the standard CEL
-    /// functions — `timestamp(...)`, `size(...)`, the time accessors — a Condition
-    /// builds on.
+    /// its string attributes and `request` to a map carrying the `time` timestamp.
+    /// [`Context::default`] supplies the standard CEL functions — `timestamp(...)`,
+    /// `size(...)`, the time accessors — a Condition builds on.
     fn to_cel_context(&self) -> Context<'static> {
         let mut context = Context::default();
 
@@ -147,14 +166,12 @@ impl RequestContext {
         context.add_variable_from_value("resource", resource);
 
         // `request.time` is a CEL timestamp value (a chrono instant), not a string,
-        // so a `request.time < timestamp(...)` comparison type-checks. The key is
-        // omitted when no time was supplied, so referencing it then is a clean
-        // evaluation error rather than a silent null.
-        let mut request: HashMap<String, Value> = HashMap::new();
-        if let Some(time) = self.request_time {
-            let datetime: chrono::DateTime<chrono::Utc> = time.into();
-            request.insert("time".to_owned(), Value::Timestamp(datetime.fixed_offset()));
-        }
+        // so a `request.time < timestamp(...)` comparison type-checks. It is always
+        // populated — `new` defaults it to now — so a Condition reaching for it
+        // never hits an absent value.
+        let datetime: chrono::DateTime<chrono::Utc> = self.request_time.into();
+        let request =
+            HashMap::from([("time".to_owned(), Value::Timestamp(datetime.fixed_offset()))]);
         context.add_variable_from_value("request", request);
 
         context
@@ -235,16 +252,30 @@ mod tests {
 
     #[test]
     fn referencing_an_unsupplied_variable_is_an_evaluation_error() {
-        // A Condition needing `request.time` with none supplied is an error,
-        // distinct from `false` — the request could not be decided.
-        let condition = Condition::compile("request.time < timestamp(\"2030-01-01T00:00:00Z\")")
-            .expect("valid");
+        // A Condition reaching for a variable the context does not bind (only
+        // `resource` and `request` are in scope) is an error, distinct from
+        // `false` — the request could not be decided.
+        let condition = Condition::compile("principal == \"user:alice@example.com\"")
+            .expect("valid CEL — `principal` is just an unbound identifier");
         let err = condition
             .evaluate(&RequestContext::new())
-            .expect_err("no request.time supplied");
+            .expect_err("`principal` is not in scope");
         assert!(
             matches!(err, Error::ConditionEvaluation { .. }),
             "got {err:?}"
         );
+    }
+
+    #[test]
+    fn request_time_defaults_to_now_so_an_expiry_window_decides_without_a_clock() {
+        // `new()` stamps `request.time`, so a time-window Condition decides with no
+        // explicit `request_time` — the override is only for pinning a fixed clock.
+        let open = Condition::compile("request.time < timestamp(\"2999-01-01T00:00:00Z\")")
+            .expect("valid");
+        assert_eq!(open.evaluate(&RequestContext::new()), Ok(true));
+
+        let closed = Condition::compile("request.time < timestamp(\"2000-01-01T00:00:00Z\")")
+            .expect("valid");
+        assert_eq!(closed.evaluate(&RequestContext::new()), Ok(false));
     }
 }

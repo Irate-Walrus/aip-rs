@@ -20,14 +20,13 @@
 //! `TestIamPermissions` (aip #68) decides the held permission subset *through* the
 //! opt-in cel-backed `eval` adapter (#66, ADR-0010): given the stored **Policy**,
 //! it expands each **Binding**'s **Role** to **Permissions** via an example-owned
-//! catalogue ([`role_permissions`] — `aip-iam` ships none), matches the caller's
+//! catalogue ([`CATALOGUE`] over `aip::iam`'s `RoleSet` — `aip-iam` ships none), matches the caller's
 //! **Member**, and evaluates any **Condition** against the request context. It
 //! returns only the subset the caller holds and never errors on a permission the
 //! caller simply lacks.
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use tonic::{Request, Response, Status};
 
@@ -39,14 +38,14 @@ use crate::proto::google::iam::v1::{
     iam_policy_server::IamPolicy, GetIamPolicyRequest, SetIamPolicyRequest,
     TestIamPermissionsRequest, TestIamPermissionsResponse,
 };
-// `TestIamPermissions` reuses the freight service's caller-identity and
-// member-matching helpers (#67/#68), so the two services decide membership the
-// same way over the shared Policy store.
-use crate::service::{caller_member, member_matches};
+// `TestIamPermissions` reuses the freight service's caller-identity helper
+// (#67/#68) and decides membership through `aip::iam`'s grant-matching helper
+// (#142), so the two services agree over the shared Policy store.
+use crate::service::caller_member;
 use crate::storage::PolicyStore;
 use aip::iam::eval::{Condition, RequestContext};
 use aip::iam::proto::Policy;
-use aip::iam::{Member, Permission};
+use aip::iam::{Member, Permission, RoleSet};
 
 /// Serves `IAMPolicy` over an in-memory, resource-name-keyed [`PolicyStore`].
 ///
@@ -80,7 +79,7 @@ impl IamServer {
     ///
     /// It is the union, over every **Binding** `caller` is a **Member** of whose
     /// **Condition** holds, of that **Binding**'s **Role** expanded through the
-    /// example-owned [`role_permissions`] catalogue. Three things the *caller* owns,
+    /// example-owned [`CATALOGUE`]. Three things the *caller* owns,
     /// not `aip-iam`: role→permission expansion (the library ships no role
     /// definitions), **Member** matching, and **Condition** evaluation through the
     /// opt-in cel-backed `eval` adapter (#66).
@@ -106,17 +105,21 @@ impl IamServer {
 
         // The IAM-style **Condition** environment the eval adapter exposes: the
         // resource under test (`resource.name`) and when the request arrived
-        // (`request.time`). Built once and reused across the Policy's Bindings, so a
-        // re-checked Condition compiles per evaluation but the context does not
-        // rebuild.
-        let context = RequestContext::new()
-            .resource("name", resource)
-            .request_time(SystemTime::now());
+        // (`request.time`, which `RequestContext::new` defaults to now; #182). Built
+        // once and reused across the Policy's Bindings, so a re-checked Condition
+        // compiles per evaluation but the context does not rebuild.
+        let context = RequestContext::new().resource("name", resource);
 
         let mut granted = HashSet::new();
         for binding in &policy.bindings {
-            // Only a Binding the caller is a Member of can grant anything.
-            if !binding.members.iter().any(|m| member_matches(m, caller)) {
+            // Only a Binding the caller is a Member of can grant anything — matched
+            // through aip::iam's grant helper (allUsers / allAuthenticatedUsers /
+            // exact-member semantics; #142).
+            if !binding
+                .members
+                .iter()
+                .any(|m| aip::iam::grant_admits(m, caller))
+            {
                 continue;
             }
             // A conditional Binding is gated on its Condition: compile it (general
@@ -130,58 +133,58 @@ impl IamServer {
             }
             // Expand the Binding's Role to its Permissions via the example-owned
             // catalogue. An unrecognised Role bundles nothing.
-            granted.extend(role_permissions(&binding.role));
+            granted.extend(CATALOGUE.permissions(&binding.role).cloned());
         }
         Ok(granted)
     }
 }
 
+/// Read access across the freight resources.
+const VIEWER: &[Permission] = &[
+    Permission::from_static("freight.shippers.get"),
+    Permission::from_static("freight.shippers.list"),
+    Permission::from_static("freight.sites.get"),
+    Permission::from_static("freight.sites.list"),
+    Permission::from_static("freight.shipments.get"),
+    Permission::from_static("freight.shipments.list"),
+];
+/// The write verbs `roles/freight.editor` adds on top of viewer.
+const EDITOR_EXTRA: &[Permission] = &[
+    Permission::from_static("freight.shippers.create"),
+    Permission::from_static("freight.shippers.update"),
+    Permission::from_static("freight.shippers.delete"),
+    Permission::from_static("freight.sites.create"),
+    Permission::from_static("freight.sites.update"),
+    Permission::from_static("freight.sites.delete"),
+    Permission::from_static("freight.shipments.create"),
+    Permission::from_static("freight.shipments.update"),
+    Permission::from_static("freight.shipments.delete"),
+];
+/// IAM-policy administration `roles/freight.admin` adds on top of editor.
+const ADMIN_EXTRA: &[Permission] = &[
+    Permission::from_static("freight.shippers.getIamPolicy"),
+    Permission::from_static("freight.shippers.setIamPolicy"),
+];
+
 /// The example-owned **Role**→**Permission** catalogue. `aip-iam` ships no role
 /// definitions — role→permission expansion is the caller's responsibility
 /// (ADR-0010) — so the demo owns this mapping from a freight **Role** to the
-/// **Permissions** it bundles. `roles/freight.editor` is a superset of
+/// **Permissions** it bundles, expressed through the library's [`RoleSet`]
+/// *mechanism* (aip #181). `roles/freight.editor` is a superset of
 /// `roles/freight.viewer` (it adds the write verbs), and `roles/freight.admin` a
 /// superset of `editor` (it adds IAM-policy administration), the way a real role
-/// hierarchy nests. An unrecognised **Role** bundles nothing.
+/// hierarchy nests — the tiers name each lower tier by reference rather than
+/// re-spelling its literals. An unrecognised **Role** expands to nothing.
 ///
-/// Each tier is a `const` slice of [`Permission`]s: `from_static` validates the
-/// literals at compile time (aip #157), so expansion neither parses nor panics
-/// at request time.
-fn role_permissions(role: &str) -> Vec<Permission> {
-    /// Read access across the freight resources.
-    const VIEWER: &[Permission] = &[
-        Permission::from_static("freight.shippers.get"),
-        Permission::from_static("freight.shippers.list"),
-        Permission::from_static("freight.sites.get"),
-        Permission::from_static("freight.sites.list"),
-        Permission::from_static("freight.shipments.get"),
-        Permission::from_static("freight.shipments.list"),
-    ];
-    /// The write verbs `roles/freight.editor` adds on top of viewer.
-    const EDITOR_EXTRA: &[Permission] = &[
-        Permission::from_static("freight.shippers.create"),
-        Permission::from_static("freight.shippers.update"),
-        Permission::from_static("freight.shippers.delete"),
-        Permission::from_static("freight.sites.create"),
-        Permission::from_static("freight.sites.update"),
-        Permission::from_static("freight.sites.delete"),
-        Permission::from_static("freight.shipments.create"),
-        Permission::from_static("freight.shipments.update"),
-        Permission::from_static("freight.shipments.delete"),
-    ];
-    /// IAM-policy administration `roles/freight.admin` adds on top of editor.
-    const ADMIN_EXTRA: &[Permission] = &[
-        Permission::from_static("freight.shippers.getIamPolicy"),
-        Permission::from_static("freight.shippers.setIamPolicy"),
-    ];
-    let tiers: &[&[Permission]] = match role {
-        "roles/freight.viewer" => &[VIEWER],
-        "roles/freight.editor" => &[VIEWER, EDITOR_EXTRA],
-        "roles/freight.admin" => &[VIEWER, EDITOR_EXTRA, ADMIN_EXTRA],
-        _ => &[],
-    };
-    tiers.concat()
-}
+/// Const end to end: each tier is a `const` slice whose `from_static` literals are
+/// validated at compile time (aip #157), and `RoleSet::new` folds them into the
+/// catalogue at compile time too, so expansion neither parses nor panics at
+/// request time.
+const CATALOGUE: RoleSet = RoleSet::new(&[
+    ("roles/freight.viewer", &[VIEWER]),
+    ("roles/freight.editor", &[VIEWER, EDITOR_EXTRA]),
+    ("roles/freight.admin", &[VIEWER, EDITOR_EXTRA, ADMIN_EXTRA]),
+]);
 
 #[tonic::async_trait]
 impl IamPolicy for IamServer {
