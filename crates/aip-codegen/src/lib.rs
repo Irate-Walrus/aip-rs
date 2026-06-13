@@ -18,7 +18,7 @@
 //!   [`RequestDescriptor`](aip_reflect::RequestDescriptor)s and emits
 //!   `impl aip_pagination::PageRequest` keyed on field shape (ADR-0013;
 //!   [`MethodType`] is unused by that emission — it stays for the name/grammar
-//!   codegen it was ported for, issue #62).
+//!   codegen it was ported for).
 //!
 //! The generator is a pure function over descriptors, so it is unit-tested
 //! directly (golden tests) without spawning a `protoc` process; the plugin
