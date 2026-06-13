@@ -132,6 +132,38 @@ fn display_round_trips_from_constructed_values() {
     assert_eq!(SiteResourceName::parse(&formatted).unwrap(), name);
 }
 
+/// `Ord` follows the canonical resource name's *string* order, not the variable
+/// tuple. The two diverge when one variable value is a prefix of another: with
+/// `shipper` = `a` vs `a-b`, `'-' (0x2D) < '/' (0x2F)`, so the full names sort
+/// `shippers/a-b/sites/x` before `shippers/a/sites/x` — the opposite of what a
+/// `(shipper, site)` tuple derive would give (`"a" < "a-b"`).
+#[test]
+fn ord_follows_string_order_not_the_variable_tuple() {
+    let a = SiteResourceName::new("a", "x").expect("valid site variables");
+    let ab = SiteResourceName::new("a-b", "x").expect("valid site variables");
+
+    // String order over the canonical names: `a-b` first.
+    assert!(ab.as_str() < a.as_str());
+    assert!(ab < a, "Ord must follow the canonical name string order");
+
+    // A field-tuple derive would order `("a", _) < ("a-b", _)` — the opposite —
+    // so this asserts we are NOT deriving on the variable fields.
+    assert!(
+        (ab.shipper(), ab.site()) > (a.shipper(), a.site()),
+        "the variable tuple sorts the other way, confirming the divergence",
+    );
+
+    // `Ord` agrees with the names a `BTreeMap<String, _>` would sort by.
+    let mut names = [a.to_string(), ab.to_string()];
+    names.sort();
+    let mut wrappers = [a.clone(), ab.clone()];
+    wrappers.sort();
+    assert_eq!(
+        wrappers.iter().map(|w| w.to_string()).collect::<Vec<_>>(),
+        names.to_vec(),
+    );
+}
+
 #[test]
 fn parent_returns_the_typed_parent_wrapper() {
     let site = SiteResourceName::new("acme", "dock-1").expect("valid site variables");

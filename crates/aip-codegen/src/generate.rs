@@ -23,7 +23,10 @@
 //! [`FromStr`] (delegating to `parse`), the matching `TryFrom<&str>` /
 //! `TryFrom<String>` (same `Error`, for `.try_into()` and generic bounds), and
 //! `From<Self> for String` (moving out the stored name). The stored name is
-//! redundant with the variables, so `Eq` / `Hash` are unchanged. The compiled
+//! redundant with the variables, so `Eq` / `Hash` are unchanged. The wrapper also
+//! implements `Ord` / `PartialOrd` **over that stored name** — string order, the
+//! same a `BTreeMap<String, _>` or SQL `ORDER BY name` gives — not a field-tuple
+//! derive (the two diverge when one variable value is a prefix of another). The compiled
 //! [`Pattern`] is built once per wrapper in a `LazyLock`, shared by `parse` and
 //! `Display`. The generator does **not** reimplement the runtime; the emitted
 //! code calls into it.
@@ -668,6 +671,30 @@ fn write_resource_name(
     line(&format!("impl AsRef<str> for {struct_name} {{"));
     line("    fn as_ref(&self) -> &str {");
     line("        &self.name");
+    line("    }");
+    line("}");
+
+    // `Ord` / `PartialOrd` — ordered by the canonical resource name's *string*
+    // order, NOT a field-tuple derive. The two diverge when one variable value is
+    // a prefix of another: `a` vs `a-b` has `'-' < '/'`, so `…/a-b/…` sorts before
+    // `…/a/…` as strings, while a `(var, …)` tuple sorts `a` first. String order
+    // matches `BTreeMap<String, _>` and SQL `ORDER BY name`, so a wrapper-keyed
+    // map lists in the same order the demo's name-keyed map did. Consistent with
+    // the derived `Eq` (the stored name determines the variables 1:1).
+    line("");
+    line(&format!("impl Ord for {struct_name} {{"));
+    line("    /// Orders by the canonical resource name string — the order a");
+    line("    /// `BTreeMap<String, _>` or SQL `ORDER BY name` produces, not the");
+    line("    /// variable-tuple order (which diverges when one value is a prefix of");
+    line("    /// another, e.g. `a` vs `a-b`).");
+    line("    fn cmp(&self, other: &Self) -> ::std::cmp::Ordering {");
+    line("        self.name.cmp(&other.name)");
+    line("    }");
+    line("}");
+    line("");
+    line(&format!("impl PartialOrd for {struct_name} {{"));
+    line("    fn partial_cmp(&self, other: &Self) -> Option<::std::cmp::Ordering> {");
+    line("        Some(self.cmp(other))");
     line("    }");
     line("}");
 

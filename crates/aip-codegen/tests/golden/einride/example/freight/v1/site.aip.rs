@@ -121,6 +121,22 @@ impl AsRef<str> for SiteResourceName {
     }
 }
 
+impl Ord for SiteResourceName {
+    /// Orders by the canonical resource name string — the order a
+    /// `BTreeMap<String, _>` or SQL `ORDER BY name` produces, not the
+    /// variable-tuple order (which diverges when one value is a prefix of
+    /// another, e.g. `a` vs `a-b`).
+    fn cmp(&self, other: &Self) -> ::std::cmp::Ordering {
+        self.name.cmp(&other.name)
+    }
+}
+
+impl PartialOrd for SiteResourceName {
+    fn partial_cmp(&self, other: &Self) -> Option<::std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 impl ::std::str::FromStr for SiteResourceName {
     type Err = ::aip_resourcename::Error;
 
