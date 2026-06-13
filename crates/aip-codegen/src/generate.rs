@@ -74,6 +74,7 @@ use std::fmt::Write as _;
 
 use aip_reflect::{ReflectMessageName, RequestDescriptor, ResourceDescriptor, ResourceType};
 use aip_resourcename::{Pattern, Scanner};
+use heck::ToSnakeCase as _;
 
 use crate::Error;
 
@@ -83,6 +84,7 @@ use crate::Error;
 ///
 /// Construct with [`CratePaths::default`] for per-crate paths, or
 /// [`CratePaths::from_aip_crate`] with an umbrella root like `"aip"`.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CratePaths {
     /// Module path to `aip-resourcename`, e.g. `::aip_resourcename` or `::aip::resourcename`.
@@ -121,6 +123,15 @@ impl Default for CratePaths {
 }
 
 impl CratePaths {
+    /// Set the [`descriptor_pool`](Self::descriptor_pool) path, consuming and
+    /// returning `self`. Pairs with [`default`](Self::default) or
+    /// [`from_aip_crate`](Self::from_aip_crate) for the common case:
+    /// `CratePaths::default().with_descriptor_pool("crate::POOL".to_owned())`.
+    pub fn with_descriptor_pool(mut self, pool: String) -> Self {
+        self.descriptor_pool = Some(pool);
+        self
+    }
+
     /// Build paths rooted at `aip_crate` (e.g. `"aip"` -> `::aip::pagination::…`).
     /// `None` returns the per-crate default.
     pub fn from_aip_crate(aip_crate: Option<&str>) -> Self {
@@ -156,6 +167,7 @@ pub struct GenFile {
 ///
 /// The plugin builds these from a `CodeGeneratorRequest` (via runtime
 /// `aip-reflect`); a golden test constructs them directly.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct GenInput {
     /// The source proto file path, e.g.
@@ -176,6 +188,18 @@ pub struct GenInput {
     pub messages: Vec<ReflectMessageName>,
 }
 
+impl GenInput {
+    /// Construct a `GenInput`. Required because the struct is `#[non_exhaustive]`.
+    pub fn new(
+        proto_file: String,
+        resources: Vec<ResourceDescriptor>,
+        requests: Vec<RequestDescriptor>,
+        messages: Vec<ReflectMessageName>,
+    ) -> Self {
+        Self { proto_file, resources, requests, messages }
+    }
+}
+
 /// Generate typed resource-name wrappers, request-trait impls, and
 /// `ReflectMessage` impls, one output [`GenFile`] per input file whose body
 /// carries at least one of them.
@@ -185,6 +209,10 @@ pub struct GenInput {
 /// wrappers/request-impls, so a file contributing none of the three produces no
 /// file at all (matching aip-go).
 pub fn generate(inputs: &[GenInput], paths: &CratePaths) -> Result<Vec<GenFile>, Error> {
+    if inputs.iter().any(|i| !i.messages.is_empty()) && paths.descriptor_pool.is_none() {
+        return Err(Error::MissingDescriptorPool);
+    }
+
     // A `pattern -> <Type>ResourceName` index over every resource in the whole
     // invocation, so a multi-segment wrapper can resolve its parent pattern to
     // the parent's typed wrapper even when that parent lives in another file.
@@ -396,21 +424,11 @@ fn write_reflect_message(out: &mut String, message: &ReflectMessageName, paths: 
         "impl ::prost_reflect::ReflectMessage for {rust_path} {{"
     ));
     line("    fn descriptor(&self) -> ::prost_reflect::MessageDescriptor {");
-    // The pool lookup is a method chain. rustfmt keeps it on one line only while
-    // the chain (from the receiver, no indent) fits `chain_width`; past that it
-    // breaks one call per line. Emit whichever form rustfmt would, since nothing
-    // re-formats the committed output.
-    let chain =
-        format!("{pool}.get_message_by_name(\"{fqn}\").expect(\"descriptor pool contains {fqn}\")");
-    if chain.len() <= RUSTFMT_CHAIN_WIDTH {
-        line(&format!("        {chain}"));
-    } else {
-        line(&format!("        {pool}"));
-        line(&format!("            .get_message_by_name(\"{fqn}\")"));
-        line(&format!(
-            "            .expect(\"descriptor pool contains {fqn}\")"
-        ));
-    }
+    line(&format!("        {pool}"));
+    line(&format!("            .get_message_by_name(\"{fqn}\")"));
+    line(&format!(
+        "            .expect(\"descriptor pool contains {fqn}\")"
+    ));
     line("    }");
     line("}");
 }
@@ -428,21 +446,11 @@ fn rust_path(path: &[String]) -> String {
     segments.join("::")
 }
 
-/// `PascalCase` message name -> the prost module name nesting it: `snake_case`,
-/// then prost-build's keyword sanitization. Like [`screaming_snake`] this splits
-/// only before each interior ASCII capital — correct for the AIP/google message
-/// names in scope (escaping exotic, non-`PascalCase`/acronym names is deferred
-/// with the rest, #82; a wrong path is a loud compile error in the consumer, not
-/// a silent bug).
-fn snake_module(pascal: &str) -> String {
-    let mut snake = String::new();
-    for (i, c) in pascal.char_indices() {
-        if i > 0 && c.is_ascii_uppercase() {
-            snake.push('_');
-        }
-        snake.push(c.to_ascii_lowercase());
-    }
-    sanitize_keyword(snake)
+/// Message name -> the prost module name nesting it: `heck::ToSnakeCase` (matching
+/// prost-build's own `to_snake` exactly, including acronym handling: `XMLHttpRequest`
+/// -> `xml_http_request`), then prost-build's keyword sanitization.
+fn snake_module(name: &str) -> String {
+    sanitize_keyword(name.to_snake_case())
 }
 
 /// prost-build's identifier keyword handling, ported verbatim so a generated
@@ -882,11 +890,6 @@ const RUSTFMT_MAX_WIDTH: usize = 100;
 /// whole line would still fit within [`RUSTFMT_MAX_WIDTH`].
 const RUSTFMT_ARRAY_WIDTH: usize = 60;
 
-/// rustfmt's default `chain_width` (also 60% of `max_width`): a method-call chain
-/// wider than this — measured from the receiver, no indent — breaks to one call
-/// per line even when the whole line would still fit within [`RUSTFMT_MAX_WIDTH`].
-/// Governs the `ReflectMessage` impl's pool lookup.
-const RUSTFMT_CHAIN_WIDTH: usize = 60;
 
 /// `PascalCase` -> `SCREAMING_SNAKE_CASE` for the per-wrapper `LazyLock` const
 /// name (`ShipperResourceName` -> `SHIPPER_RESOURCE_NAME`). The struct names are
@@ -940,6 +943,9 @@ mod tests {
         assert_eq!(snake_module("FunctionDecl"), "function_decl");
         assert_eq!(snake_module("CreateStruct"), "create_struct");
         assert_eq!(snake_module("Expr"), "expr");
+        // Acronyms: matches prost-build (heck) — xml_http_request not x_m_l_http_request.
+        assert_eq!(snake_module("XMLHttpRequest"), "xml_http_request");
+        assert_eq!(snake_module("HTTPConfig"), "http_config");
     }
 
     /// A message-name module that is a Rust keyword must match prost: `r#kw` for

@@ -152,7 +152,10 @@ impl Flags {
                     }
                     match key {
                         "aip_crate" => flags.aip_crate = Some(value.to_owned()),
-                        _ => flags.reflect_descriptor_pool = Some(value.to_owned()),
+                        "reflect_descriptor_pool" => {
+                            flags.reflect_descriptor_pool = Some(value.to_owned())
+                        }
+                        _ => unreachable!("outer arm only matches the two keys above"),
                     }
                     continue;
                 }
@@ -245,12 +248,7 @@ fn generate_response(request: CodeGeneratorRequest) -> Result<Vec<File>, String>
         } else {
             Vec::new()
         };
-        inputs.push(GenInput {
-            proto_file: name.clone(),
-            resources,
-            requests,
-            messages,
-        });
+        inputs.push(GenInput::new(name.clone(), resources, requests, messages));
     }
 
     let mut paths = CratePaths::from_aip_crate(flags.aip_crate.as_deref());
