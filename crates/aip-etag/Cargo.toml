@@ -3,6 +3,7 @@ name = "aip-etag"
 description = "AIP-154 resource freshness validation: content etags for optimistic concurrency"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true

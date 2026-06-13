@@ -12,6 +12,11 @@ members = ["crates/*", "examples/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+# Declared + CI-enforced MSRV (issue #100). The hard floor is rustc 1.88 (tonic
+# 0.14 / cel 0.13 demand it), but we track recent stable for language headroom;
+# the `msrv` CI job pins exactly this toolchain. Bump deliberately, in step with
+# the version pinned in `.github/workflows/ci.yml`.
+rust-version = "1.95"
 license = "MIT"
 repository = "https://github.com/irate-walrus/aip-rs"
 authors = ["irate-walrus"]

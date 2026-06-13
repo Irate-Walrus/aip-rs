@@ -97,3 +97,17 @@ jobs:
       # compiles a vendored SQLite, which needs the C toolchain `ubuntu-latest`
       # already provides.
       - run: cargo build -p freight-server
+
+  msrv:
+    name: msrv (1.95)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pin the exact declared MSRV (`rust-version` in `Cargo.toml`'s
+      # `[workspace.package]`, issue #100). The hard floor the dependency tree
+      # forces is 1.88 (tonic 0.14 / cel 0.13); we track recent stable. Keep this
+      # version in step with `rust-version`. `--locked` builds the committed
+      # `Cargo.lock` so a transitive bump cannot silently raise the floor.
+      - uses: dtolnay/rust-toolchain@1.95
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-features --locked

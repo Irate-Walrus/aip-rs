@@ -3,6 +3,7 @@ name = "aip-iam"
 description = "google.iam.v1 primitives: Member / Role / Permission parsing and Policy structure"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true

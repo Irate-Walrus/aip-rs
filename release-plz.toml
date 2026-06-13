@@ -1,0 +1,34 @@
+# release-plz configuration (issue #100): publish automation across the
+# inter-dependent crates.
+#
+# release-plz computes the dependency order itself, bumps versions + changelogs
+# from conventional commits, runs cargo-semver-checks against the last crates.io
+# release, and — once its release PR is merged — publishes the changed crates in
+# order and cuts a GitHub release + tag per crate. The two `.github/workflows`
+# halves (`release-plz.yml`, `release-plugin-binaries.yml`) drive it.
+#
+# All crates share one version via `[workspace.package] version` (every member is
+# `version.workspace = true`), so release-plz versions them as a set.
+
+[workspace]
+# Gate every release on cargo-semver-checks against the last published version:
+# a breaking change without the matching version bump fails the release PR rather
+# than shipping silently. release-plz proposes the correct bump (for 0.x, a
+# breaking change moves the minor: 0.1 -> 0.2).
+semver_check = true
+# One GitHub release + git tag per crate. The default tag is
+# `{{ package }}-v{{ version }}` (e.g. `protoc-gen-prost-aip-v0.1.0`); the
+# plugin-binary workflow keys off the `protoc-gen-prost-aip-v*` tag.
+git_release_enable = true
+git_tag_enable = true
+
+# The test harness and the example server never publish. Both are already
+# `publish = false` in their manifests (so release-plz skips them regardless);
+# restated here so the release surface is legible from one file.
+[[package]]
+name = "test-fixtures"
+release = false
+
+[[package]]
+name = "freight-server"
+release = false

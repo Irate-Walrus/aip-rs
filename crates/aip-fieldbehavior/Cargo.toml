@@ -3,6 +3,7 @@ name = "aip-fieldbehavior"
 description = "AIP-161/AIP-203 field behavior: read/clear/copy by annotation, validate REQUIRED/IMMUTABLE"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true

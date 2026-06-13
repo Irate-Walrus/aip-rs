@@ -1,0 +1,66 @@
+# Prebuilt `protoc-gen-prost-aip` binaries attached to its release (issue #100).
+#
+# ADR-0011's buf pipeline is only adoptable off-the-shelf if the resource-name
+# plugin ships as a binary: without this, `buf generate` users must build the
+# plugin from source. This builds it for linux + macos (x86_64 + aarch64) and
+# uploads a tarball (+ sha256) to the matching GitHub release.
+#
+# Trigger: when release-plz publishes the plugin's GitHub release. That event
+# only fires if release-plz created the release with a PAT / App token
+# (RELEASE_PLZ_TOKEN) — releases made with the default GITHUB_TOKEN do not
+# trigger workflows. `workflow_dispatch` is the manual fallback: run it against
+# the plugin's tag (e.g. `protoc-gen-prost-aip-v0.1.0`) to attach binaries by hand.
+name: release-plugin-binaries
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Plugin release tag to attach binaries to (e.g. protoc-gen-prost-aip-v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  upload:
+    # Only the plugin's own release carries binaries; library-crate releases
+    # (`aip-...-v*`) share this `release: published` event and must skip.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      startsWith(github.event.release.tag_name, 'protoc-gen-prost-aip-v')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      # Check out the released tag (not the default branch), so the binary is
+      # built from exactly the published source.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+      # Builds `protoc-gen-prost-aip` for the target (cross-compiling the aarch64
+      # linux target automatically), tars it up with a sha256, and uploads it to
+      # the release identified by the tag.
+      - uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: protoc-gen-prost-aip
+          target: ${{ matrix.target }}
+          archive: protoc-gen-prost-aip-$tag-$target
+          ref: refs/tags/${{ github.event.release.tag_name || inputs.tag }}
+          include: LICENSE
+          tar: unix
+          checksum: sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

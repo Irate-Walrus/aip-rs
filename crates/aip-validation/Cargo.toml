@@ -3,6 +3,7 @@ name = "aip-validation"
 description = "AIP-193 field-violation accumulator: collect per-field failures into one aggregated error"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true

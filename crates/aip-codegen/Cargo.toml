@@ -3,6 +3,7 @@ name = "aip-codegen"
 description = "AIP code generation: codegen-only helpers (MethodType / GrammaticalName / strcase) and generate(), which emits typed resource-name wrappers layered on aip-resourcename plus field-shape-keyed request-trait impls"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true

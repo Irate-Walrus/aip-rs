@@ -3,6 +3,7 @@ name = "aip-softdelete"
 description = "AIP-164 soft delete / undelete state rules and the AIP-165 purge contract"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true

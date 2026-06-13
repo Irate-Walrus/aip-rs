@@ -63,6 +63,9 @@ aip = { git = "https://github.com/irate-walrus/aip-rs", default-features = false
 aip = { git = "https://github.com/irate-walrus/aip-rs", features = ["tonic"] }
 ```
 
+The minimum supported Rust version (MSRV) is **1.95**, declared in
+`Cargo.toml` and enforced in CI.
+
 ## Quick start
 
 Parse, match, and format an [AIP-122](https://google.aip.dev/122) resource
@@ -106,6 +109,33 @@ cargo run -p freight-server
 Its [README](examples/freight-server/README.md) has copy-paste `grpcurl`
 commands and a status table of implemented RPCs.
 
+## Code generation plugin
+
+`protoc-gen-prost-aip` is the buf/`protoc` plugin that generates typed
+resource-name wrappers (and the field-shape-keyed request-trait impls) from your
+`google.api.resource` annotations — the Rust analog of
+[`protoc-gen-go-aip`](https://github.com/einride/aip-go) (ADR-0011). You only
+need it to *regenerate* code; consumers of the generated crates need nothing.
+
+Install the prebuilt binary for your platform from a
+[release](https://github.com/irate-walrus/aip-rs/releases) (tags
+`protoc-gen-prost-aip-v*`, with binaries for linux and macOS on x86_64 and
+aarch64), and put it on `PATH` so `buf` can find it:
+
+```sh
+# Pick the asset for your platform, then:
+tar xzf protoc-gen-prost-aip-*-x86_64-unknown-linux-gnu.tar.gz
+install -m755 protoc-gen-prost-aip ~/.local/bin/   # anywhere on $PATH
+
+# buf discovers `protoc-gen-prost-aip` on PATH via a `local:` plugin entry.
+buf generate
+```
+
+Or build it from source with `cargo install --git
+https://github.com/irate-walrus/aip-rs protoc-gen-prost-aip`. See
+[`examples/freight-server/buf.gen.yaml`](examples/freight-server/buf.gen.yaml)
+for a worked plugin invocation.
+
 ## Documentation
 
 - API docs: `cargo doc --open -p aip` (not yet on docs.rs)
@@ -129,6 +159,16 @@ Issues and pull requests are welcome. Before changing a subsystem, read the
 relevant ADR in [`docs/adr/`](docs/adr) and use the terminology from
 [`CONTEXT.md`](CONTEXT.md). A change is complete when
 [`examples/freight-server`](examples/freight-server) exercises it.
+
+### Releasing
+
+Releases are automated with [release-plz](https://release-plz.dev). Merging
+conventional-commit changes to `main` keeps an open release PR with the version
+bumps and changelog entries; merging that PR publishes the changed crates to
+crates.io in dependency order, cuts a GitHub release + tag per crate, and (for
+`protoc-gen-prost-aip`) attaches the prebuilt plugin binaries. cargo-semver-checks
+gates each release and an MSRV job pins the floor. The required repo secrets are
+documented in [`.github/workflows/release-plz.yml`](.github/workflows/release-plz.yml).
 
 ## Credits
 
