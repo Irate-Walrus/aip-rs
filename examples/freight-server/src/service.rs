@@ -211,6 +211,14 @@ impl FreightService for FreightServer {
         if let Some(existing) = idempotent_lookup::<_, Shipper>(&self.storage, &request_id, &req)? {
             return Ok(Response::new(existing));
         }
+        // AIP-203 REQUIRED-field validation runs reflectively over the whole
+        // request, the same request-rooted shape `create_site` / `create_shipment`
+        // use: the `BadRequest` paths read `shipper.display_name`, and every
+        // missing field comes back in one response.
+        aip::fieldbehavior::validate_required(&req)?;
+        // `shipper` is REQUIRED, so `validate_required` already rejected a missing
+        // one above; keep the explicit guard rather than unwrapping, so this never
+        // panics on a malformed request even if that annotation changes.
         let mut shipper = req
             .shipper
             .ok_or_else(|| Status::invalid_argument("shipper is required"))?;
@@ -219,8 +227,6 @@ impl FreightService for FreightServer {
             &mut shipper,
             &[FieldBehavior::OutputOnly, FieldBehavior::Immutable],
         );
-        // Validate that all REQUIRED fields are populated (AIP-203).
-        aip::fieldbehavior::validate_required(&shipper)?;
         // Mint a system-assigned resource ID (a UUIDv4) per AIP-148.
         // `CreateShipperRequest` has no `shipper_id` field, so there is no
         // user-supplied id to validate here; `validate_user_settable` guards
@@ -1814,8 +1820,9 @@ mod tests {
         use tonic_types::StatusExt as _;
 
         // The fieldbehavior primitive validates REQUIRED fields and emits AIP-193
-        // details: a `BadRequest` naming the field path and an `ErrorInfo` with
-        // domain `"aip-rs"` (the primitive's own domain, not the service domain).
+        // details: a `BadRequest` naming the request-rooted field path and an
+        // `ErrorInfo` with domain `"aip-rs"` (the primitive's own domain, not the
+        // service domain).
         let server = FreightServer::default();
         let status = server
             .create_shipper(Request::new(CreateShipperRequest {
@@ -1830,7 +1837,7 @@ mod tests {
             .get_details_bad_request()
             .expect("a BadRequest field violation is attached");
         assert_eq!(bad.field_violations.len(), 1);
-        assert_eq!(bad.field_violations[0].field, "display_name");
+        assert_eq!(bad.field_violations[0].field, "shipper.display_name");
 
         let info = status
             .get_details_error_info()

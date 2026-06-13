@@ -474,7 +474,7 @@ fn reconstruct(conn: &rusqlite::Connection, resource: &str) -> Policy {
     let version = if bindings.iter().any(|b| b.condition.is_some()) {
         3
     } else {
-        0
+        1
     };
     let mut policy = Policy {
         version,

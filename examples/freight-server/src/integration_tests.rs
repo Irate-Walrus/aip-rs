@@ -344,7 +344,7 @@ async fn create_shipper_missing_display_name_aip193_details() {
         .get_details_bad_request()
         .expect("BadRequest is attached");
     assert_eq!(bad.field_violations.len(), 1);
-    assert_eq!(bad.field_violations[0].field, "display_name");
+    assert_eq!(bad.field_violations[0].field, "shipper.display_name");
 }
 
 // ─── ListSites ordering / pagination / checksum guard ─────────────────────────
