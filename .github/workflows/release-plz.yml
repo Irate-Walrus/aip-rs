@@ -1,15 +1,17 @@
-# Publish automation (issue #100). Two halves, both on push to `main`:
+# Release management (issue #100), GIT-ONLY for now. Two halves, both on push to
+# `main`:
 #
 #   * release-pr — opens/refreshes a "release" PR carrying the version bumps and
-#     changelog entries for everything that changed since the last release. It
-#     runs cargo-semver-checks, so a breaking change without the matching bump is
-#     caught here, in CI.
-#   * release   — after that PR merges (the bump lands on `main`), publishes the
-#     changed crates to crates.io in dependency order and cuts a GitHub release +
-#     tag per crate.
+#     changelog entries for everything that changed since the last release.
+#   * release   — after that PR merges (the bump lands on `main`), cuts a GitHub
+#     release + git tag per crate (which feeds `release-plugin-binaries.yml`). It
+#     does NOT publish to crates.io: `release-plz.toml` sets `publish = false`
+#     because the `aip` / `aip-filtering` names are owned by others there. See
+#     that file for how to turn crates.io publishing on.
 #
-# Required repo secrets:
-#   * CARGO_REGISTRY_TOKEN — a crates.io token, for publishing.
+# Repo secrets:
+#   * CARGO_REGISTRY_TOKEN — unused while `publish = false`; wired and ready for
+#     when crates.io publishing is enabled.
 #   * RELEASE_PLZ_TOKEN    — optional PAT or GitHub App token. Use one if you want
 #     the release PR to trigger the other CI workflows, and (crucially) if you
 #     want the GitHub release that `release` creates to fire the
@@ -43,10 +45,9 @@ jobs:
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
-      # release-plz runs cargo-semver-checks when the binary is on PATH.
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-semver-checks
+      # No cargo-semver-checks install: `semver_check = false` while git-only
+      # (the crates.io baselines for our two colliding names are third-party
+      # crates). Re-add it when crates.io publishing is turned on.
       - uses: Swatinem/rust-cache@v2
       - uses: release-plz/action@v0.5
         with:
