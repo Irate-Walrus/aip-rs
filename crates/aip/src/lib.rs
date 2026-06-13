@@ -104,7 +104,7 @@ pub use aip_resourcename as resourcename;
 /// AIP-122 resource IDs: validate user-settable IDs and generate system IDs.
 ///
 /// Key fn: [`validate_user_settable`](aip_resourceid::validate_user_settable),
-/// [`generate`](aip_resourceid::generate).
+/// [`generate_system`](aip_resourceid::generate_system).
 ///
 /// See <https://google.aip.dev/122> and <https://google.aip.dev/148>.
 #[cfg(feature = "resourceid")]
@@ -220,7 +220,7 @@ pub use aip_preview as preview;
 /// AIP-193 field-violation accumulator: collect per-field validation failures
 /// into one rich gRPC status with `BadRequest` + `ErrorInfo` details.
 ///
-/// Key type: [`Violations`](aip_validation::Violations).
+/// Key type: [`Validator`](aip_validation::Validator).
 ///
 /// See <https://google.aip.dev/193>.
 #[cfg(feature = "validation")]

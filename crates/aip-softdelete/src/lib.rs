@@ -296,7 +296,7 @@ const ERROR_DOMAIN: &str = "aip-rs";
 impl From<Error> for tonic::Status {
     /// Maps to a canonical gRPC code with AIP-193 standard details: an `ErrorInfo`
     /// carrying a machine-readable `SOFT_DELETE_*` / `PURGE_*` `reason` +
-    /// [`domain`](ERROR_DOMAIN) and the error's dynamic values as `metadata`.
+    /// `domain` (`aip-rs`) and the error's dynamic values as `metadata`.
     ///
     /// A hidden soft-deleted read ([`Deleted`](Error::Deleted)) maps to
     /// `NOT_FOUND`; an undelete of a live resource

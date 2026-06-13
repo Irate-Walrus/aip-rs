@@ -1,4 +1,4 @@
-//! aip-sql: transpile an AIP-160 [`Filter`] into a parameterized, dialect-rendered
+//! aip-sql: transpile an AIP-160 [`Filter`](aip_filtering::Filter) into a parameterized, dialect-rendered
 //! SQL [`Predicate`].
 //!
 //! The native Filter AST is the integration point: [`transpile_filter`] walks it
@@ -36,6 +36,28 @@
 //!
 //! [`check`]: aip_filtering::check
 //! [`Declarations`]: aip_filtering::Declarations
+//!
+//! # Example
+//!
+//! ```
+//! use aip_filtering::{check, Declarations, Type};
+//! use aip_sql::{transpile_filter, Query, Schema, Sqlite};
+//!
+//! // one declaration list feeds the checker and the column schema
+//! let declarations = Declarations::builder()
+//!     .standard_functions()
+//!     .ident("display_name", Type::String)
+//!     .ident("region", Type::String)
+//!     .build();
+//! let schema = Schema::for_declarations(&declarations).build();
+//!
+//! let filter = check("display_name = 'Acme' AND region != 'emea'", &declarations).unwrap();
+//! let predicate = transpile_filter(&filter, &declarations, &schema).unwrap();
+//!
+//! let (sql, binds) = Query::new().filter(predicate).render(&Sqlite);
+//! assert!(sql.contains("WHERE"));
+//! assert_eq!(binds.len(), 2); // 'Acme' and 'emea', parameterized
+//! ```
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod dialect;
@@ -89,7 +111,7 @@ impl From<Error> for tonic::Status {
     ///   [`InvalidDuration`](Error::InvalidDuration) are bad client input — an
     ///   unlowerable filter construct or a malformed `duration(...)` literal — so
     ///   they map to `INVALID_ARGUMENT` with an AIP-193 `ErrorInfo` under the
-    ///   library sentinel [`ERROR_DOMAIN`] (`aip-rs`), which a deploying service
+    ///   library sentinel `aip-rs` domain, which a deploying service
     ///   rewrites to its own domain at the serving boundary with the
     ///   `aip-errordomain` layer. A filter expression / duration literal is an
     ///   opaque value the library validates without knowing which request field

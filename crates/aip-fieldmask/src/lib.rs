@@ -14,6 +14,33 @@
 //! [`Error::TypeMismatch`] where aip-go panics.
 //!
 //! See <https://google.aip.dev/161> and <https://google.aip.dev/134>.
+//!
+//! # Example
+//!
+//! ```
+//! use aip_fieldmask::update_dynamic;
+//! use prost_types::FieldMask;
+//!
+//! let mut dst = test_fixtures::from_json(
+//!     "einride.example.freight.v1.Shipper",
+//!     r#"{"name": "shippers/acme", "displayName": "Acme"}"#,
+//! )
+//! .unwrap();
+//! let src = test_fixtures::from_json(
+//!     "einride.example.freight.v1.Shipper",
+//!     r#"{"displayName": "Acme Freight"}"#,
+//! )
+//! .unwrap();
+//!
+//! let mask = FieldMask { paths: vec!["display_name".into()] };
+//! update_dynamic(&mask, &mut dst, &src).unwrap();
+//!
+//! // masked field updated, unmasked field untouched
+//! let display_name = dst.get_field_by_name("display_name").unwrap();
+//! assert_eq!(display_name.as_str(), Some("Acme Freight"));
+//! let name = dst.get_field_by_name("name").unwrap();
+//! assert_eq!(name.as_str(), Some("shippers/acme"));
+//! ```
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 use prost::Message as _;
@@ -272,7 +299,7 @@ const ERROR_DOMAIN: &str = "aip-rs";
 #[cfg(feature = "tonic")]
 impl From<Error> for tonic::Status {
     /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details: an `ErrorInfo`
-    /// (machine-readable `reason` + [`domain`](ERROR_DOMAIN), with the error's
+    /// (machine-readable `reason` + `domain` (`aip-rs`), with the error's
     /// dynamic values as `metadata`) and, when the error names a mask path, a
     /// `BadRequest` field violation keyed on that path.
     /// See `docs/adr/0007-aip193-error-details.md`.

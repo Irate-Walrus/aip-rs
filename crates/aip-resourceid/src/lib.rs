@@ -1,6 +1,20 @@
 //! AIP-122 resource IDs: validate user-settable IDs and generate system IDs.
 //!
 //! Pure string work plus UUID generation; no protobuf dependency.
+//!
+//! # Example
+//!
+//! ```
+//! use aip_resourceid::{generate_system, validate_user_settable};
+//!
+//! // user-settable id: RFC-1034 shape (or UUID)
+//! validate_user_settable("acme-01").unwrap();
+//! assert!(validate_user_settable("-bad-").is_err());
+//!
+//! // system-assigned id: UUIDv4, AIP-148
+//! let id = generate_system();
+//! validate_user_settable(&id).unwrap();
+//! ```
 #![cfg_attr(docsrs, feature(doc_cfg))]
 //!
 //! A user-settable [`Resource ID`](validate_user_settable) conforms to
@@ -96,7 +110,7 @@ const ERROR_DOMAIN: &str = "aip-rs";
 #[cfg(feature = "tonic")]
 impl From<Error> for tonic::Status {
     /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details: an `ErrorInfo`
-    /// carrying a machine-readable `reason` + [`domain`](ERROR_DOMAIN) and the
+    /// carrying a machine-readable `reason` + `domain` (`aip-rs`) and the
     /// error's dynamic values as `metadata`. A resource ID is an opaque value
     /// rather than a request field path, so no `BadRequest` is attached.
     /// See `docs/adr/0007-aip193-error-details.md`.

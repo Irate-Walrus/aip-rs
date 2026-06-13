@@ -23,6 +23,28 @@
 //! Each `google.*` package is behind a Cargo feature so a consumer compiles only
 //! what it uses (`api`, `type`, `iam`, `cel`); see `Cargo.toml`. The pool is
 //! always present and always import-complete regardless of which are enabled.
+//!
+//! # Example
+//!
+//! The pool is present in every build, package features or not:
+//!
+//! ```
+//! use aip_proto::DESCRIPTOR_POOL;
+//!
+//! let descriptor = DESCRIPTOR_POOL
+//!     .get_message_by_name("google.iam.v1.Policy")
+//!     .unwrap();
+//! assert_eq!(descriptor.full_name(), "google.iam.v1.Policy");
+//! ```
+//!
+//! The generated types ride their package feature (here `iam`):
+//!
+//! ```ignore
+//! use aip_proto::google;
+//!
+//! let policy = google::iam::v1::Policy::default();
+//! assert!(policy.bindings.is_empty());
+//! ```
 
 use std::sync::LazyLock;
 
@@ -37,7 +59,7 @@ static FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("descriptor_set.binpb");
 /// The shared [`DescriptorPool`] every generated message reflects against
 /// (referenced by the `ReflectMessage` derive as `crate::DESCRIPTOR_POOL`).
 ///
-/// Decoded once from [`FILE_DESCRIPTOR_SET`]. Cheaply cloned (reference-counted
+/// Decoded once from `FILE_DESCRIPTOR_SET`. Cheaply cloned (reference-counted
 /// internally); the pool is self-contained per ADR-0009's per-crate footnote.
 pub static DESCRIPTOR_POOL: LazyLock<DescriptorPool> = LazyLock::new(|| {
     DescriptorPool::decode(FILE_DESCRIPTOR_SET)

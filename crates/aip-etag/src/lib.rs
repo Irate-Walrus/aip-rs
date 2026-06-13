@@ -2,8 +2,8 @@
 //! concurrency, over any resource.
 //!
 //! This generalizes the `etag` cycle `aip-iam` built for the IAM **Policy**
-//! ([`aip_iam::policy::compute`](aip_iam::policy::compute) /
-//! [`aip_iam::policy::check`](aip_iam::policy::check)) into a primitive any resource can
+//! (`aip_iam::policy::compute` /
+//! `aip_iam::policy::check`) into a primitive any resource can
 //! use. [`compute`] derives a deterministic content digest of a resource
 //! that a server returns to clients; [`check`] verifies the etag a client
 //! sends back on update/delete before acting, so a concurrent writer can no
@@ -36,13 +36,13 @@
 //! deterministic. A resource carrying an unordered map should be normalised
 //! before hashing (as `aip-iam` normalises a Policy's bindings) so that
 //! semantically-equal values compare equal — the same caveat
-//! [`aip_pagination::request_checksum`] carries.
+//! `aip_pagination::request_checksum` carries.
 //!
 //! # Reflection
 //!
 //! This is a **Reflective primitive**: it needs a message's **Descriptor** to
 //! find the `etag` field and the `OUTPUT_ONLY` annotations. Like
-//! [`aip_pagination::request_checksum`] — and unlike the field-mask primitive —
+//! `aip_pagination::request_checksum` — and unlike the field-mask primitive —
 //! it is a pair of *single generic functions* over [`ReflectMessage`], not a
 //! Typed-facade / Dynamic-core split: both only read the resource (no
 //! decode-back, so no `Default` bound), and because [`DynamicMessage`] itself
@@ -50,6 +50,25 @@
 //! ingestion, a generic gateway) calls them directly.
 //!
 //! See <https://google.aip.dev/154>.
+//!
+//! # Example
+//!
+//! ```
+//! use aip_etag::{check, compute};
+//!
+//! let shipper = test_fixtures::from_json(
+//!     "einride.example.freight.v1.Shipper",
+//!     r#"{"name": "shippers/acme", "displayName": "Acme"}"#,
+//! )
+//! .unwrap();
+//!
+//! // server computes the etag on read, client sends it back on write
+//! let etag = compute(&shipper);
+//! check(&etag, &shipper).unwrap();
+//!
+//! // stale etag -> Err (maps to ABORTED at the boundary)
+//! assert!(check("\"stale\"", &shipper).is_err());
+//! ```
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 use prost::Message as _;
@@ -157,7 +176,7 @@ const ERROR_DOMAIN: &str = "aip-rs";
 #[cfg(feature = "tonic")]
 impl From<Error> for tonic::Status {
     /// Maps to a canonical gRPC code with AIP-193 standard details: an `ErrorInfo`
-    /// carrying a machine-readable `ETAG_*` `reason` + [`domain`](ERROR_DOMAIN)
+    /// carrying a machine-readable `ETAG_*` `reason` + `domain` (`aip-rs`)
     /// and the error's dynamic values as `metadata`.
     ///
     /// A stale [`Mismatch`](Error::Mismatch) maps to `ABORTED` — the AIP-154

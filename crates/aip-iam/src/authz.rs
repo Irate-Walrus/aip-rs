@@ -3,11 +3,11 @@
 //! The two helpers a server reaches for at an authorization boundary, once it has
 //! *decided* a caller is not authorized:
 //!
-//! - [`permission_denied`] builds the canonical non-leaking `PERMISSION_DENIED` —
+//! - [`permission_denied`](crate::authz::permission_denied) builds the canonical non-leaking `PERMISSION_DENIED` —
 //!   message *"Permission '{p}' denied on resource '{r}' (or it might not
 //!   exist)."* — so an unauthorized caller learns neither that the **Permission**
 //!   was the gate nor whether the **Resource name** exists.
-//! - [`not_found_via_parent`] implements the AIP-211 fallback for a resource that
+//! - [`not_found_via_parent`](crate::authz::not_found_via_parent) implements the AIP-211 fallback for a resource that
 //!   does *not* exist: reveal the non-existence with `NOT_FOUND` only when the
 //!   caller is authorized to read the parent's children, and otherwise fall back
 //!   to the same non-leaking `PERMISSION_DENIED`.
@@ -41,7 +41,7 @@ const RESOURCE_NOT_FOUND_REASON: &str = "IAM_RESOURCE_NOT_FOUND";
 /// '{resource}' (or it might not exist)."* — the "(or it might not exist)" tail is
 /// what keeps a caller who lacks the **Permission** from distinguishing a denial
 /// from a missing resource. An `IAM_*` `ErrorInfo` carries the machine-readable
-/// reason + [`domain`](ERROR_DOMAIN) and mirrors the message's `permission` /
+/// reason + `domain` (`aip-rs`) and mirrors the message's `permission` /
 /// `resource` values as `metadata` (AIP-193), so a machine actor never parses the
 /// prose.
 pub fn permission_denied(permission: &Permission, resource: &str) -> tonic::Status {

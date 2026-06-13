@@ -11,6 +11,24 @@
 //!
 //! See <https://google.aip.dev/211> (authorization checks) and
 //! <https://google.aip.dev/213> (which blesses `google.iam.v1` for re-use).
+//!
+//! # Example
+//!
+//! ```
+//! use aip_iam::{Member, Permission, Role};
+//!
+//! let member: Member = "user:alice@example.com".parse().unwrap();
+//! let role: Role = "roles/storage.objectAdmin".parse().unwrap();
+//! let permission: Permission = "freight.shippers.get".parse().unwrap();
+//!
+//! // each renders back to its `google.iam.v1` text form
+//! assert_eq!(member.to_string(), "user:alice@example.com");
+//! assert_eq!(role.to_string(), "roles/storage.objectAdmin");
+//! assert_eq!(permission.to_string(), "freight.shippers.get");
+//!
+//! // malformed input is rejected, not guessed at
+//! assert!("robot:r2d2".parse::<Member>().is_err());
+//! ```
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod member;
@@ -57,7 +75,7 @@ pub mod eval;
 /// add/remove, dedupe, the `etag` cycle) build on; the parse/validate core
 /// above stays proto-free, so a default build pulls in no proto runtime.
 ///
-/// [`Policy`] / [`Binding`] are re-exported for convenience; the remaining
+/// [`Policy`](proto::Policy) / [`Binding`](proto::Binding) are re-exported for convenience; the remaining
 /// `policy.proto` messages (audit config, deltas) and the `google.type.Expr`
 /// condition live under [`google`](proto::google).
 #[cfg_attr(docsrs, doc(cfg(feature = "iam-proto")))]
@@ -163,7 +181,7 @@ const ERROR_DOMAIN: &str = "aip-rs";
 #[cfg(feature = "tonic")]
 impl From<Error> for tonic::Status {
     /// Maps to a canonical gRPC code with AIP-193 standard details: an `ErrorInfo`
-    /// carrying a machine-readable `IAM_*` `reason` + [`domain`](ERROR_DOMAIN) and
+    /// carrying a machine-readable `IAM_*` `reason` + `domain` (`aip-rs`) and
     /// the error's dynamic values as `metadata`.
     ///
     /// Most are *validation* errors and map to `INVALID_ARGUMENT`; the

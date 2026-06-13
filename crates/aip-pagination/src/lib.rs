@@ -5,6 +5,38 @@
 //! wire-compatible with `aip-go`'s gob tokens.
 //!
 //! See <https://google.aip.dev/158>.
+//!
+//! # Example
+//!
+//! ```
+//! use aip_pagination::{PageRequest, PageToken};
+//!
+//! struct ListReq {
+//!     page_token: String,
+//!     page_size: i32,
+//! }
+//! impl PageRequest for ListReq {
+//!     fn page_token(&self) -> &str {
+//!         &self.page_token
+//!     }
+//!     fn page_size(&self) -> i32 {
+//!         self.page_size
+//!     }
+//! }
+//!
+//! // first page: empty token (checksum from `request_checksum` for
+//! // reflective requests; constant here for brevity)
+//! let checksum = 42;
+//! let first = ListReq { page_token: String::new(), page_size: 10 };
+//! let token = PageToken::parse(&first, checksum).unwrap();
+//!
+//! // mint the next-page token, verify it on the follow-up request
+//! let follow_up = ListReq { page_token: token.next(10).encode(), page_size: 10 };
+//! PageToken::parse(&follow_up, checksum).unwrap();
+//!
+//! // a request that changed mid-pagination is rejected
+//! assert!(PageToken::parse(&follow_up, 7).is_err());
+//! ```
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -216,7 +248,7 @@ impl Page {
     }
 
     /// The effective page size as an unsigned `u64` — the AIP-158 size after the
-    /// [`SizeLimits`] default/cap, floored at zero by [`resolve_size`].
+    /// [`SizeLimits`] default/cap, floored at zero by the internal size resolution.
     ///
     /// The unsigned partner to [`offset`](Self::offset): the width a handler passes
     /// to a store or compares a result length against, cast-free.
@@ -415,7 +447,7 @@ const ERROR_DOMAIN: &str = "aip-rs";
 #[cfg(feature = "tonic")]
 impl From<Error> for tonic::Status {
     /// Maps to `INVALID_ARGUMENT` with AIP-193 standard details: an `ErrorInfo`
-    /// carrying a machine-readable `reason` + [`domain`](ERROR_DOMAIN) and the
+    /// carrying a machine-readable `reason` + `domain` (`aip-rs`) and the
     /// error's dynamic values as `metadata`. A page token is an opaque value
     /// rather than a request field path, so the token variants attach no
     /// `BadRequest`; [`NegativePageSize`](Error::NegativePageSize) is the lone

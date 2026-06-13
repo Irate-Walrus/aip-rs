@@ -371,7 +371,7 @@ impl PolicyStore {
     /// The policy attached to `resource`, or `None` when none is set — the caller
     /// turns that into the empty `Policy` `GetIamPolicy` returns (AIP / IAM: an
     /// unset policy is not an error). The reconstructed policy carries the content
-    /// `etag` ([`aip::iam::policy::compute`](aip::iam::policy::compute)), so a client can
+    /// `etag` ([`aip::iam::policy::compute`]), so a client can
     /// round-trip it back as its read-modify-write token.
     pub fn get(&self, resource: &str) -> Option<Policy> {
         let conn = self.bindings.lock().unwrap();
