@@ -54,37 +54,37 @@ ETAG=$(gc -d '{"name":"'"$ID"'"}' 127.0.0.1:50051 $SVC/GetShipper | jq -r .etag)
 # network retry can't double-create. `aip::requestid` validates the id and names
 # the replay/conflict contract; the demo keeps the seen ids in memory.
 RID=$(uuidgen)
-gc -d '{"shipper":{"display_name":"Acme"},"requestId":"'"$RID"'"}' 127.0.0.1:50051 $SVC/CreateShipper
-gc -d '{"shipper":{"display_name":"Acme"},"requestId":"'"$RID"'"}' 127.0.0.1:50051 $SVC/CreateShipper  # same name back
+gc -d '{"shipper":{"display_name":"Acme"},"request_id":"'"$RID"'"}' 127.0.0.1:50051 $SVC/CreateShipper
+gc -d '{"shipper":{"display_name":"Acme"},"request_id":"'"$RID"'"}' 127.0.0.1:50051 $SVC/CreateShipper  # same name back
 # Reusing that id with a DIFFERENT body is rejected with AlreadyExists +
 # AIP-193 details (reason REQUEST_ID_CONFLICT / domain freight.example.com —
 # the one service domain every error carries; see "Error domain" below).
-gc -d '{"shipper":{"display_name":"Other"},"requestId":"'"$RID"'"}' 127.0.0.1:50051 $SVC/CreateShipper
+gc -d '{"shipper":{"display_name":"Other"},"request_id":"'"$RID"'"}' 127.0.0.1:50051 $SVC/CreateShipper
 # A malformed (non-UUID) id is InvalidArgument (reason REQUEST_ID_INVALID).
-gc -d '{"shipper":{"display_name":"Acme"},"requestId":"not-a-uuid"}' 127.0.0.1:50051 $SVC/CreateShipper
+gc -d '{"shipper":{"display_name":"Acme"},"request_id":"not-a-uuid"}' 127.0.0.1:50051 $SVC/CreateShipper
 # AIP-163 validate_only: preview a create without committing. The full
 # validation pipeline runs and the would-be shipper comes back (a system-assigned
 # name + etag), but nothing is stored — ListShippers is unchanged afterwards, and
 # a request that would fail (here a missing display_name) fails identically with
 # the flag set.
-gc -d '{"shipper":{"display_name":"Preview"},"validateOnly":true}' 127.0.0.1:50051 $SVC/CreateShipper
-gc -d '{"shipper":{},"validateOnly":true}'                         127.0.0.1:50051 $SVC/CreateShipper
+gc -d '{"shipper":{"display_name":"Preview"},"validate_only":true}' 127.0.0.1:50051 $SVC/CreateShipper
+gc -d '{"shipper":{},"validate_only":true}'                         127.0.0.1:50051 $SVC/CreateShipper
 # UpdateShipper applies an AIP-134 update_mask via the typed `fieldmask::update`
 # facade: only `display_name` is masked, so it changes while the rest of the
 # stored shipper is left untouched. Omit `display_name` from the request with the
 # same mask and it is cleared instead. It also runs the AIP-154 read-modify-write:
 # the current etag permits the write and returns a *new* etag — capture that.
 OLD_ETAG=$ETAG
-ETAG=$(gc -d '{"shipper":{"name":"'"$ID"'","display_name":"Acme Corp","etag":"'"$OLD_ETAG"'"},"updateMask":{"paths":["display_name"]}}' \
+ETAG=$(gc -d '{"shipper":{"name":"'"$ID"'","display_name":"Acme Corp","etag":"'"$OLD_ETAG"'"},"update_mask":{"paths":["display_name"]}}' \
                                             127.0.0.1:50051 $SVC/UpdateShipper | jq -r .etag)
 # UpdateShipper honours validate_only too: preview the merged shipper —
 # etag check, update mask, REQUIRED re-validation all run — without persisting it.
-gc -d '{"shipper":{"name":"'"$ID"'","display_name":"Preview","etag":"'"$ETAG"'"},"updateMask":{"paths":["display_name"]},"validateOnly":true}' \
+gc -d '{"shipper":{"name":"'"$ID"'","display_name":"Preview","etag":"'"$ETAG"'"},"update_mask":{"paths":["display_name"]},"validate_only":true}' \
                                             127.0.0.1:50051 $SVC/UpdateShipper
 # Replaying the now-stale etag is rejected with ABORTED (reason ETAG_MISMATCH) —
 # the optimistic-concurrency guard against a racing writer. A garbage etag is
 # InvalidArgument (reason ETAG_MALFORMED) instead; omitting it writes unconditionally.
-gc -d '{"shipper":{"name":"'"$ID"'","display_name":"Clobber","etag":"'"$OLD_ETAG"'"},"updateMask":{"paths":["display_name"]}}' \
+gc -d '{"shipper":{"name":"'"$ID"'","display_name":"Clobber","etag":"'"$OLD_ETAG"'"},"update_mask":{"paths":["display_name"]}}' \
                                             127.0.0.1:50051 $SVC/UpdateShipper
 # DeleteShipper carries the etag on the request (it can't piggyback on the
 # resource): the current etag permits the delete, a stale one is ABORTED. The
@@ -96,9 +96,9 @@ ETAG=$(gc -d '{"name":"'"$ID"'","etag":"'"$ETAG"'"}' 127.0.0.1:50051 $SVC/Delete
 # visibility rule and its AIP-193 mapping.
 gc -d '{"name":"'"$ID"'"}'                127.0.0.1:50051 $SVC/GetShipper
 gc -d '{}'                                127.0.0.1:50051 $SVC/ListShippers
-# Pass `showDeleted` to see it again — on the Get and in the List.
-gc -d '{"name":"'"$ID"'","showDeleted":true}' 127.0.0.1:50051 $SVC/GetShipper
-gc -d '{"showDeleted":true}'                  127.0.0.1:50051 $SVC/ListShippers
+# Pass `show_deleted` to see it again — on the Get and in the List.
+gc -d '{"name":"'"$ID"'","show_deleted":true}' 127.0.0.1:50051 $SVC/GetShipper
+gc -d '{"show_deleted":true}'                  127.0.0.1:50051 $SVC/ListShippers
 # UndeleteShipper clears the stamp; the shipper is live and visible again.
 # Undeleting a shipper that is *not* deleted is ALREADY_EXISTS (reason
 # SOFT_DELETE_NOT_DELETED) — there is nothing to recover.
@@ -118,24 +118,24 @@ SITE_BRAVO=$(gc -d '{"parent":"'"$ID"'","site":{"display_name":"Bravo","state":"
                                            127.0.0.1:50051 $SVC/CreateSite | jq -r .name)
 SITE_ALPHA=$(gc -d '{"parent":"'"$ID"'","site":{"display_name":"Alpha","state":"STATE_INACTIVE","annotations":{"region":"west"},"tags":["bulk"]}}' \
                                            127.0.0.1:50051 $SVC/CreateSite | jq -r .name)
-gc -d '{"parent":"'"$ID"'","orderBy":"display_name"}'      127.0.0.1:50051 $SVC/ListSites
-gc -d '{"parent":"'"$ID"'","orderBy":"display_name desc"}' 127.0.0.1:50051 $SVC/ListSites
+gc -d '{"parent":"'"$ID"'","order_by":"display_name"}'      127.0.0.1:50051 $SVC/ListSites
+gc -d '{"parent":"'"$ID"'","order_by":"display_name desc"}' 127.0.0.1:50051 $SVC/ListSites
 
 # Sorting and paging happen in SQL: an ORDER BY plus a LIMIT/OFFSET derived
 # from the page size and the offset page token. Ask for one site per page, then
 # pass the returned `nextPageToken` back to get the next — the page boundaries
-# stay stable because the resource name breaks ties. (Changing `orderBy` or
+# stay stable because the resource name breaks ties. (Changing `order_by` or
 # `filter` mid-pagination flips the request checksum and rejects the token.)
-TOKEN=$(gc -d '{"parent":"'"$ID"'","orderBy":"display_name","pageSize":1}' \
+TOKEN=$(gc -d '{"parent":"'"$ID"'","order_by":"display_name","page_size":1}' \
                                            127.0.0.1:50051 $SVC/ListSites | jq -r '.nextPageToken // empty')
-gc -d '{"parent":"'"$ID"'","orderBy":"display_name","pageSize":1,"pageToken":"'"$TOKEN"'"}' \
+gc -d '{"parent":"'"$ID"'","order_by":"display_name","page_size":1,"page_token":"'"$TOKEN"'"}' \
                                            127.0.0.1:50051 $SVC/ListSites
 
 # Bad syntax or an unknown ordering field is rejected with InvalidArgument —
 # and the status carries AIP-193 details: an ErrorInfo with a
 # machine-readable reason (ORDER_BY_UNKNOWN_FIELD / domain freight.example.com)
 # plus a BadRequest naming the offending field. grpcurl prints the details block.
-gc -d '{"parent":"'"$ID"'","orderBy":"bogus_field"}' 127.0.0.1:50051 $SVC/ListSites
+gc -d '{"parent":"'"$ID"'","order_by":"bogus_field"}' 127.0.0.1:50051 $SVC/ListSites
 
 # AIP-160 filtering: the filter is type-checked, transpiled to parameterized
 # SQL by `aip::sql`, and run in the in-memory SQLite store, so only matching
