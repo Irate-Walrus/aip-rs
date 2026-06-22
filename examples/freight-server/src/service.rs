@@ -7,10 +7,11 @@
 //! `Unimplemented` until they follow the same pattern.
 
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use aip::fieldbehavior::FieldBehavior;
 use aip::iam::{Member, Permission};
+use aip::lro::{Operation as LroOperation, OperationName, WaitTimeout};
 use aip::pagination::{Page, SizeLimits};
 use aip::preview;
 use prost::Message as _;
@@ -19,15 +20,25 @@ use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status};
 
 use crate::proto::einride::example::freight::v1::{
-    freight_service_server::FreightService, BatchGetSitesRequest, BatchGetSitesResponse,
-    CreateShipmentRequest, CreateShipperRequest, CreateSiteRequest, DeleteShipmentRequest,
-    DeleteShipperRequest, DeleteSiteRequest, GetShipmentRequest, GetShipperRequest, GetSiteRequest,
-    ListShipmentsRequest, ListShipmentsResponse, ListShippersRequest, ListShippersResponse,
-    ListSitesRequest, ListSitesResponse, Shipment, ShipmentResourceName, Shipper,
-    ShipperResourceName, Site, SiteResourceName, UndeleteShipperRequest, UpdateShipmentRequest,
-    UpdateShipperRequest, UpdateSiteRequest,
+    freight_service_server::FreightService, BatchCreateShippersMetadata, BatchCreateShippersRequest,
+    BatchCreateShippersResponse, BatchGetSitesRequest, BatchGetSitesResponse, CreateShipmentRequest,
+    CreateShipperRequest, CreateSiteRequest, DeleteShipmentRequest, DeleteShipperRequest,
+    DeleteSiteRequest, GetShipmentRequest, GetShipperRequest, GetSiteRequest, ListShipmentsRequest,
+    ListShipmentsResponse, ListShippersRequest, ListShippersResponse, ListSitesRequest,
+    ListSitesResponse, Shipment, ShipmentResourceName, Shipper, ShipperResourceName, Site,
+    SiteResourceName, UndeleteShipperRequest, UpdateShipmentRequest, UpdateShipperRequest,
+    UpdateSiteRequest,
 };
-use crate::storage::{PolicyStore, Storage};
+use crate::proto::google::longrunning::{
+    operations_server::Operations, CancelOperationRequest, DeleteOperationRequest,
+    GetOperationRequest, ListOperationsRequest, ListOperationsResponse, Operation,
+    WaitOperationRequest,
+};
+use crate::storage::{OperationStore, PolicyStore, Storage};
+
+/// The metadata/response types the `BatchCreateShippers` [`LroOperation`] packs:
+/// progress in `metadata`, the created shippers in `response` (ADR-0015).
+type BatchOp = LroOperation<BatchCreateShippersMetadata, BatchCreateShippersResponse>;
 
 /// The shipper collection ID — the root segment of every shipper resource name,
 /// used as the collection-level IAM resource (the AIP-211 parent fallback). The
@@ -61,8 +72,13 @@ const PAGE_LIMITS: SizeLimits = SizeLimits {
 /// be shared with [`IamServer`](crate::iam::IamServer).
 #[derive(Default)]
 pub struct FreightServer {
-    storage: Storage,
+    storage: Arc<Storage>,
     policies: Arc<PolicyStore>,
+    /// The long-running [`Operation`] store the `BatchCreateShippers` handler and
+    /// its spawned task write to, shared with the [`OperationsService`] that serves
+    /// `GetOperation` / `CancelOperation` / … over it (ADR-0015). The library owns
+    /// no store, so this is the freight-side one.
+    operations: Arc<OperationStore>,
 }
 
 impl FreightServer {
@@ -71,9 +87,17 @@ impl FreightServer {
     /// freight authorization.
     pub fn with_policies(policies: Arc<PolicyStore>) -> Self {
         Self {
-            storage: Storage::new(),
+            storage: Arc::new(Storage::new()),
             policies,
+            operations: Arc::new(OperationStore::new()),
         }
+    }
+
+    /// The shared long-running [`Operation`] store, for building the
+    /// [`OperationsService`] that serves the `google.longrunning.Operations`
+    /// service over the very operations `BatchCreateShippers` creates (ADR-0015).
+    pub fn operations(&self) -> Arc<OperationStore> {
+        Arc::clone(&self.operations)
     }
 
     /// The example's AIP-211 authorization gate (step 1): may `caller` act on
@@ -210,47 +234,14 @@ impl FreightService for FreightServer {
         if let Some(existing) = idempotent_lookup::<_, Shipper>(&self.storage, &request_id, &req)? {
             return Ok(Response::new(existing));
         }
-        // AIP-203 REQUIRED-field validation runs reflectively over the whole
-        // request, the same request-rooted shape `create_site` / `create_shipment`
-        // use: the `BadRequest` paths read `shipper.display_name`, and every
-        // missing field comes back in one response.
-        aip::fieldbehavior::validate_required(&req)?;
-        // `shipper` is REQUIRED, so `validate_required` already rejected a missing
-        // one above; keep the explicit guard rather than unwrapping, so this never
-        // panics on a malformed request even if that annotation changes.
-        let mut shipper = req
-            .shipper
-            .ok_or_else(|| Status::invalid_argument("shipper is required"))?;
-        // Ignore any OUTPUT_ONLY or IMMUTABLE values the client sent (AIP-161).
-        aip::fieldbehavior::clear_fields(
-            &mut shipper,
-            &[FieldBehavior::OutputOnly, FieldBehavior::Immutable],
-        );
-        // Mint a system-assigned resource ID (a UUIDv4) per AIP-148.
-        // `CreateShipperRequest` has no `shipper_id` field, so there is no
-        // user-supplied id to validate here; `validate_user_settable` guards
-        // that path wherever a request later exposes one.
-        // Mint the canonical resource name `shippers/{shipper}` through the typed
-        // wrapper generated from shipper.proto's `google.api.resource` annotation
-        // (AIP-122 / ADR-0011). `ShipperResourceName::mint()` combines
-        // `generate_system()` with construction; a UUIDv4 is always a valid
-        // segment, so this is infallible. Keep the typed name as the storage key
-        // (issue #169) and copy its canonical string onto the resource.
-        let resource = ShipperResourceName::mint();
-        shipper.name = resource.as_str().to_owned();
-        let ts = now();
-        shipper.create_time = Some(ts);
-        shipper.update_time = Some(ts);
-        shipper.delete_time = None;
-        // Stamp the AIP-154 content etag the client will echo back on a later
-        // update/delete. `aip::etag::compute` digests the content — it ignores the
-        // OUTPUT_ONLY timestamps just stamped and the etag field itself — so the
-        // token tracks name/display_name, not server churn.
-        shipper.etag = aip::etag::compute(&shipper);
-        // AIP-163: a `validate_only` request previews the would-be shipper —
-        // system-assigned id and etag minted — without persisting it or recording
-        // an idempotency entry, so a later real create still mints a new shipper.
-        preview::commit_unless(req.validate_only, || {
+        // AIP-163: a `validate_only` request previews the would-be shipper without
+        // persisting it or recording an idempotency entry, so a later real create
+        // still mints a new shipper. Capture the flag before `req` moves out.
+        let validate_only = req.validate_only;
+        // The full AIP-203 validation + AIP-148 name minting + AIP-154 etag stamp,
+        // factored out so `BatchCreateShippers` creates identical shippers.
+        let (resource, shipper) = build_shipper(req)?;
+        preview::commit_unless(validate_only, || {
             self.storage.put_shipper(&resource, shipper.clone());
             // Record the result so a retry carrying the same `request_id` replays it.
             idempotent_record(&self.storage, &request_id, fingerprint, &shipper);
@@ -385,6 +376,56 @@ impl FreightService for FreightServer {
         shipper.update_time = Some(now());
         self.storage.put_shipper(&resource, shipper.clone());
         Ok(Response::new(shipper))
+    }
+
+    // ----- Shipper: batch create as a long-running operation (AIP-233 / AIP-151) -----
+
+    async fn batch_create_shippers(
+        &self,
+        request: Request<BatchCreateShippersRequest>,
+    ) -> Result<Response<Operation>, Status> {
+        let req = request.into_inner();
+        let total = req.requests.len() as i32;
+
+        // AIP-163: a `validate_only` batch runs the full per-shipper validation and
+        // returns an already-`done` operation carrying the shippers that *would* be
+        // created, persisting nothing. The operation has an empty `name` — the
+        // server keeps no state for a trivial validation (AIP-151) — which
+        // `Operation::validated` is the one constructor to allow (ADR-0015).
+        if req.validate_only {
+            let mut shippers = Vec::with_capacity(req.requests.len());
+            for create in req.requests {
+                let (_resource, shipper) = build_shipper(create)?;
+                shippers.push(shipper);
+            }
+            let response = BatchCreateShippersResponse { shippers };
+            return Ok(Response::new(BatchOp::validated(&response).into_inner()));
+        }
+
+        // Mint the operation name. The library never mints the id — no clock or RNG
+        // in the core (ADR-0015) — so the *caller* does: a system-assigned UUIDv4,
+        // always a valid resource id, which `OperationName` then validates.
+        let name = OperationName::parse(&format!("operations/{}", aip::resourceid::generate_system()))
+            .expect("a system-minted operation name is valid");
+
+        // Store the pending operation (progress 0 / total) and return it at once;
+        // the client polls `GetOperation` while the work runs.
+        let metadata = BatchCreateShippersMetadata { created: 0, total };
+        let pending = BatchOp::pending(&name, &metadata).into_inner();
+        self.operations.put(pending.clone());
+
+        // Execution is the caller's (ADR-0015): a background task creates the
+        // shippers, refreshes progress, and finally resolves the operation. It
+        // outlives this handler, so it holds its own `Arc`s into the shared stores.
+        tokio::spawn(run_batch_create(
+            Arc::clone(&self.storage),
+            Arc::clone(&self.operations),
+            name.to_string(),
+            req.requests,
+            total,
+        ));
+
+        Ok(Response::new(pending))
     }
 
     // ----- Site: not yet wired (will mirror the Shipper handlers) -----
@@ -862,6 +903,266 @@ fn idempotent_record(
         return;
     }
     storage.idempotent_put(request_id.to_owned(), fingerprint, response.encode_to_vec());
+}
+
+/// The shared create-shipper pipeline used by both `CreateShipper` and the
+/// `BatchCreateShippers` task: AIP-203 REQUIRED-field validation, clearing the
+/// OUTPUT_ONLY / IMMUTABLE inputs a client must not set (AIP-161), minting the
+/// system-assigned `shippers/{shipper}` name (AIP-148), stamping the OUTPUT_ONLY
+/// timestamps, and computing the AIP-154 content etag. Returns the typed storage
+/// key and the ready shipper but persists nothing — the caller decides whether to
+/// (a `validate_only` preview does not).
+fn build_shipper(req: CreateShipperRequest) -> Result<(ShipperResourceName, Shipper), Status> {
+    // Validate the whole request reflectively; the `BadRequest` paths read
+    // `shipper.display_name`, and every missing REQUIRED field returns at once.
+    aip::fieldbehavior::validate_required(&req)?;
+    // `shipper` is REQUIRED, so `validate_required` already rejected a missing one;
+    // keep the guard rather than unwrapping so this never panics even if that
+    // annotation changes.
+    let mut shipper = req
+        .shipper
+        .ok_or_else(|| Status::invalid_argument("shipper is required"))?;
+    // Ignore any OUTPUT_ONLY or IMMUTABLE values the client sent (AIP-161).
+    aip::fieldbehavior::clear_fields(
+        &mut shipper,
+        &[FieldBehavior::OutputOnly, FieldBehavior::Immutable],
+    );
+    // Mint the canonical name `shippers/{shipper}` through the typed wrapper
+    // generated from shipper.proto's `google.api.resource` annotation (AIP-122 /
+    // ADR-0011); a UUIDv4 is always a valid segment, so this is infallible. Keep
+    // the typed name as the storage key (issue #169).
+    let resource = ShipperResourceName::mint();
+    shipper.name = resource.as_str().to_owned();
+    let ts = now();
+    shipper.create_time = Some(ts);
+    shipper.update_time = Some(ts);
+    shipper.delete_time = None;
+    // Stamp the AIP-154 content etag the client echoes on a later update/delete;
+    // `compute` ignores the OUTPUT_ONLY timestamps and the etag field itself.
+    shipper.etag = aip::etag::compute(&shipper);
+    Ok((resource, shipper))
+}
+
+/// The `BatchCreateShippers` background task (ADR-0015): create the requested
+/// shippers one at a time, refreshing the operation's progress `metadata` after
+/// each, and resolve the operation to its `BatchCreateShippersResponse` when done.
+/// A small per-shipper delay makes the long-running shape observable in the
+/// README's poll loop.
+///
+/// Between steps it honors a `CancelOperation` by landing the operation in
+/// `CANCELLED`, and a per-shipper validation failure fails the whole operation
+/// with that AIP-193 status (AIP-151: execution errors go in `Operation.error`).
+/// Each transition reloads the stored operation through `aip-lro`'s `from_inner`
+/// and persists it with `into_inner`, so a `DeleteOperation` that removed it
+/// simply stops the task.
+async fn run_batch_create(
+    storage: Arc<Storage>,
+    operations: Arc<OperationStore>,
+    name: String,
+    requests: Vec<CreateShipperRequest>,
+    total: i32,
+) {
+    let mut shippers = Vec::with_capacity(requests.len());
+    for (index, create) in requests.into_iter().enumerate() {
+        // Cancellation is caller execution state (ADR-0015): the `CancelOperation`
+        // handler set a flag; notice it between steps and land the operation in
+        // CANCELLED via `aip-lro`'s terminal `cancel` transition.
+        if operations.is_cancel_requested(&name) {
+            update_operation(&operations, &name, |op| {
+                let _ = op.cancel();
+            });
+            return;
+        }
+
+        // Simulate slow work so the operation is genuinely long-running.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Reuse the exact CreateShipper pipeline. A validation failure fails the
+        // whole operation with its AIP-193 status.
+        let shipper = match build_shipper(create) {
+            Ok((resource, shipper)) => {
+                storage.put_shipper(&resource, shipper.clone());
+                shipper
+            }
+            Err(status) => {
+                update_operation(&operations, &name, |op| {
+                    let _ = op.fail_status(status);
+                });
+                return;
+            }
+        };
+        shippers.push(shipper);
+
+        // Refresh progress so every `GetOperation` poll sees it advance (AIP-151).
+        let created = (index + 1) as i32;
+        if !update_operation(&operations, &name, |op| {
+            let _ = op.set_metadata(&BatchCreateShippersMetadata { created, total });
+        }) {
+            // The operation vanished (a `DeleteOperation`): stop quietly.
+            return;
+        }
+    }
+
+    // Resolve the operation to its response.
+    update_operation(&operations, &name, |op| {
+        let _ = op.succeed(&BatchCreateShippersResponse { shippers });
+    });
+}
+
+/// Load the stored operation named `name`, apply `apply` to the typed [`BatchOp`]
+/// facade, and persist it back — the load/mutate/store dance every step of
+/// [`run_batch_create`] shares. Returns whether the operation was still present (a
+/// `DeleteOperation` may have removed it). `from_inner` validates the stored
+/// invariant; a pending operation always passes.
+fn update_operation(operations: &OperationStore, name: &str, apply: impl FnOnce(&mut BatchOp)) -> bool {
+    let Some(inner) = operations.get(name) else {
+        return false;
+    };
+    let Ok(mut op) = BatchOp::from_inner(inner) else {
+        return false;
+    };
+    apply(&mut op);
+    operations.put(op.into_inner());
+    true
+}
+
+/// Serves the `google.longrunning.Operations` service over the same
+/// [`OperationStore`] the `BatchCreateShippers` task writes to (ADR-0015). The
+/// `aip-lro` crate ships no service — each handler is the caller's — so this wires
+/// `aip-lro`'s `OperationName` / `WaitTimeout` / `Error` primitives to the store.
+pub struct OperationsService {
+    operations: Arc<OperationStore>,
+}
+
+impl OperationsService {
+    /// Serve operations over `operations` — the store shared with
+    /// [`FreightServer`] via [`FreightServer::operations`].
+    pub fn new(operations: Arc<OperationStore>) -> Self {
+        Self { operations }
+    }
+}
+
+/// The `WaitOperation` deadline policy: block up to 5s by default, capped at 30s
+/// (AIP-151). `aip-lro`'s [`WaitTimeout`] resolves the request's `timeout`; the
+/// blocking itself is this server's, since the library is runtime-free (ADR-0015).
+const WAIT_TIMEOUT: WaitTimeout = WaitTimeout::new(Duration::from_secs(5), Duration::from_secs(30));
+
+#[tonic::async_trait]
+impl Operations for OperationsService {
+    async fn list_operations(
+        &self,
+        request: Request<ListOperationsRequest>,
+    ) -> Result<Response<ListOperationsResponse>, Status> {
+        let req = request.into_inner();
+        // `name` is the operations *collection*; AIP-160 filtering over operations
+        // is deferred to a future slice (ADR-0015), so any `filter` is ignored.
+        let mut operations = self.operations.list(&req.name);
+        // A size-capped offset page over the in-memory collection. The full
+        // `aip::pagination` machinery (the request-checksum guard) needs a generated
+        // `PageRequest` impl, which the extern'd `ListOperationsRequest` does not
+        // carry; the demo keeps it to a plain offset and notes the gap (ADR-0015).
+        let limit = match req.page_size {
+            n if n < 0 => return Err(Status::invalid_argument("page_size must not be negative")),
+            0 => 50,
+            n => (n as usize).min(1000),
+        };
+        let offset: usize = req.page_token.parse().unwrap_or(0);
+        let next_page_token = if offset + limit < operations.len() {
+            (offset + limit).to_string()
+        } else {
+            String::new()
+        };
+        let page = operations.drain(..).skip(offset).take(limit).collect();
+        Ok(Response::new(ListOperationsResponse {
+            operations: page,
+            next_page_token,
+            unreachable: Vec::new(),
+        }))
+    }
+
+    async fn get_operation(
+        &self,
+        request: Request<GetOperationRequest>,
+    ) -> Result<Response<Operation>, Status> {
+        let name = request.into_inner().name;
+        // Validate the name shape (AIP-151) before the lookup.
+        OperationName::parse(&name)?;
+        let operation = self
+            .operations
+            .get(&name)
+            .ok_or_else(|| aip::lro::Error::not_found(name))?;
+        Ok(Response::new(operation))
+    }
+
+    async fn delete_operation(
+        &self,
+        request: Request<DeleteOperationRequest>,
+    ) -> Result<Response<()>, Status> {
+        let name = request.into_inner().name;
+        OperationName::parse(&name)?;
+        // Delete drops the record; it does not cancel the work (ADR-0015).
+        if !self.operations.remove(&name) {
+            return Err(aip::lro::Error::not_found(name).into());
+        }
+        Ok(Response::new(()))
+    }
+
+    async fn cancel_operation(
+        &self,
+        request: Request<CancelOperationRequest>,
+    ) -> Result<Response<()>, Status> {
+        let name = request.into_inner().name;
+        OperationName::parse(&name)?;
+        if self.operations.get(&name).is_none() {
+            return Err(aip::lro::Error::not_found(name).into());
+        }
+        // Best-effort (AIP-151): record the request and return. The operation stays
+        // pending until the task notices the flag and lands it in CANCELLED — the
+        // "cancel asked, work winding down" state is the caller's, not a field of
+        // the wire `Operation` (ADR-0015).
+        self.operations.request_cancel(&name);
+        Ok(Response::new(()))
+    }
+
+    async fn wait_operation(
+        &self,
+        request: Request<WaitOperationRequest>,
+    ) -> Result<Response<Operation>, Status> {
+        let req = request.into_inner();
+        OperationName::parse(&req.name)?;
+        // `aip-lro` resolves the deadline (default/cap); the blocking is ours.
+        let deadline = WAIT_TIMEOUT.resolve(req.timeout)?;
+        let started = Instant::now();
+        loop {
+            // Enrol for the next change *before* reading the operation, so a
+            // transition landing between the read and the await is not missed (it
+            // would otherwise cost a wait to the full deadline, not just a
+            // re-check). The loop re-reads `done` after every wake regardless.
+            let changed = self.operations.changed();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+
+            let operation = self
+                .operations
+                .get(&req.name)
+                .ok_or_else(|| aip::lro::Error::not_found(req.name.clone()))?;
+            if operation.done {
+                return Ok(Response::new(operation));
+            }
+            let Some(remaining) = deadline.checked_sub(started.elapsed()) else {
+                return Ok(Response::new(operation));
+            };
+            // Await the change under the remaining deadline; on timeout, return
+            // the latest state (AIP-151).
+            if tokio::time::timeout(remaining, changed).await.is_err() {
+                let latest = self
+                    .operations
+                    .get(&req.name)
+                    .ok_or_else(|| aip::lro::Error::not_found(req.name.clone()))?;
+                return Ok(Response::new(latest));
+            }
+        }
+    }
 }
 
 /// The standard `Unimplemented` status for a method that hasn't been wired yet.

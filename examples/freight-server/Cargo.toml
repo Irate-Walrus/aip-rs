@@ -41,13 +41,19 @@ publish = false
 # `Layer` `main.rs` installs once so every library error reaches clients under
 # the one service domain (`freight.example.com`) instead of the `aip-rs`
 # sentinel (ADR-0007).
-aip = { workspace = true, features = ["tonic", "sql", "iam", "iam-proto", "iam-eval"] }
+# The `lro` feature exposes `aip::lro` — the AIP-151 Operation state machine the
+# `BatchCreateShippers` handler + the `Operations` service are built on (ADR-0015);
+# the umbrella `tonic` feature forwards `aip-lro/tonic` for the `OPERATION_*` error
+# mapping and the `fail_status` convenience.
+aip = { workspace = true, features = ["tonic", "sql", "iam", "iam-proto", "iam-eval", "lro"] }
 
 # The shared `google.*` types the generated code references by `extern_path`
 # (ADR-0011): `google.iam.v1` (the one `Policy` the IAMPolicy service and the
 # `aip::iam` helpers share — `iam` implies `type`, which carries the Site's
-# `google.type.LatLng`).
-aip-proto = { workspace = true, features = ["iam"] }
+# `google.type.LatLng`), and `google.longrunning` (the one `Operation` the
+# `BatchCreateShippers` method returns and the `Operations` service speaks,
+# ADR-0015).
+aip-proto = { workspace = true, features = ["iam", "longrunning"] }
 
 # gRPC runtime: tonic core (server + transport), the Prost codec the generated
 # service uses, and the protobuf message runtime. `tonic-types` lets the handlers

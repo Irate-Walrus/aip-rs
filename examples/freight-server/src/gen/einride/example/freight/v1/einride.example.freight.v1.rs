@@ -270,6 +270,40 @@ pub struct UndeleteShipperRequest {
     #[prost(string, tag="1")]
     pub name: ::prost::alloc::string::String,
 }
+/// Request message for FreightService.BatchCreateShippers.
+/// See: <https://google.aip.dev/233> (Batch methods: Create).
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BatchCreateShippersRequest {
+    /// The shippers to create. Each is the same payload `CreateShipper` accepts;
+    /// the batch runs the same per-shipper validation and minting.
+    #[prost(message, repeated, tag="1")]
+    pub requests: ::prost::alloc::vec::Vec<CreateShipperRequest>,
+    /// If set, run the full validation pipeline over every request and return an
+    /// already-`done` operation carrying the shippers that would be created, but
+    /// persist nothing. The operation's `name` is empty (no state is kept).
+    /// See: <https://google.aip.dev/163.>
+    #[prost(bool, tag="2")]
+    pub validate_only: bool,
+}
+/// Response message for FreightService.BatchCreateShippers — the operation's
+/// `response` once it is `done`.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BatchCreateShippersResponse {
+    /// The shippers created, in request order.
+    #[prost(message, repeated, tag="1")]
+    pub shippers: ::prost::alloc::vec::Vec<Shipper>,
+}
+/// Operation metadata for FreightService.BatchCreateShippers — carried in the
+/// operation's `metadata` and refreshed on every poll (AIP-151).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BatchCreateShippersMetadata {
+    /// How many shippers have been created so far.
+    #[prost(int32, tag="1")]
+    pub created: i32,
+    /// How many shippers the batch will create in total.
+    #[prost(int32, tag="2")]
+    pub total: i32,
+}
 /// Request message for FreightService.GetSite.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetSiteRequest {

@@ -8,14 +8,16 @@
 //! table the way iam-go's `iamspanner` stores them (see [`PolicyStore`], aip #65).
 //! State lives for the life of the process and resets on restart.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
 use prost::Message as _;
+use tokio::sync::Notify;
 
 use crate::proto::einride::example::freight::v1::{
     site::State, Shipment, Shipper, ShipperResourceName, Site,
 };
+use crate::proto::google::longrunning::Operation;
 // `Policy` / `Binding` are aip-proto's generated `google.iam.v1` types (ADR-0011)
 // — the very ones the `aip::iam` structural helpers operate on and the `IAMPolicy`
 // service trait speaks, so there is one `Policy` type by construction (aip #65,
@@ -557,6 +559,109 @@ fn read_bindings(conn: &rusqlite::Connection, resource: &str) -> Vec<Binding> {
             .push(member);
     }
     bindings
+}
+
+/// Process-lifetime store of long-running [`Operation`]s, backing the demo's
+/// `google.longrunning.Operations` service and the `BatchCreateShippers` task
+/// (ADR-0015). The `aip-lro` crate owns no store — it deliberately leaves storage
+/// to the caller — so this is the freight-side store, keyed by operation name.
+///
+/// The stored value is the wire [`Operation`] message (`aip-lro`'s
+/// `into_inner`/`from_inner` round-trip it), so durability would be a matter of
+/// persisting these bytes; the demo keeps them in memory like the rest of
+/// [`Storage`].
+///
+/// Two things live alongside the operations and are deliberately *not* the
+/// library's concern (ADR-0015): the set of operations a `CancelOperation` has
+/// requested cancellation of — caller execution state the batch task polls, since
+/// "cancel asked, work still winding down" has no field in the wire `Operation` —
+/// and a [`Notify`] pulsed on every change so `WaitOperation` can block until the
+/// operation moves instead of busy-polling.
+pub struct OperationStore {
+    operations: Mutex<BTreeMap<String, Operation>>,
+    cancels: Mutex<BTreeSet<String>>,
+    changed: Notify,
+}
+
+impl Default for OperationStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl OperationStore {
+    /// An empty operation store.
+    pub fn new() -> Self {
+        Self {
+            operations: Mutex::new(BTreeMap::new()),
+            cancels: Mutex::new(BTreeSet::new()),
+            changed: Notify::new(),
+        }
+    }
+
+    /// Insert or overwrite an operation, keyed by its own `name`, and wake any
+    /// `WaitOperation` waiters. The batch task calls this after every transition
+    /// (progress, success, cancellation).
+    pub fn put(&self, operation: Operation) {
+        self.operations
+            .lock()
+            .unwrap()
+            .insert(operation.name.clone(), operation);
+        self.changed.notify_waiters();
+    }
+
+    /// The operation named `name`, or `None` if the store has none.
+    pub fn get(&self, name: &str) -> Option<Operation> {
+        self.operations.lock().unwrap().get(name).cloned()
+    }
+
+    /// Every operation in `collection` (the `operations` collection a
+    /// `ListOperations` names), in name order — those whose name sits directly
+    /// under `{collection}/`.
+    pub fn list(&self, collection: &str) -> Vec<Operation> {
+        let prefix = format!("{collection}/");
+        self.operations
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|operation| operation.name.starts_with(&prefix))
+            .cloned()
+            .collect()
+    }
+
+    /// Remove the operation named `name` (a `DeleteOperation`); returns whether it
+    /// was present. Deletion drops the record — it does **not** cancel the work
+    /// (ADR-0015).
+    pub fn remove(&self, name: &str) -> bool {
+        let removed = self.operations.lock().unwrap().remove(name).is_some();
+        if removed {
+            self.changed.notify_waiters();
+        }
+        removed
+    }
+
+    /// Record that cancellation was requested for `name` (a best-effort
+    /// `CancelOperation`). This is caller execution state: it does not flip
+    /// `done`; the batch task notices the flag and lands the operation in
+    /// `CANCELLED` (ADR-0015).
+    pub fn request_cancel(&self, name: &str) {
+        self.cancels.lock().unwrap().insert(name.to_owned());
+    }
+
+    /// Whether cancellation has been requested for `name`.
+    pub fn is_cancel_requested(&self, name: &str) -> bool {
+        self.cancels.lock().unwrap().contains(name)
+    }
+
+    /// A future that resolves the next time any operation changes. The concrete
+    /// [`Notified`](tokio::sync::futures::Notified) is returned (not an opaque
+    /// future) so `WaitOperation` can `enable()` it — enrol it in the waiter list
+    /// *before* re-reading the operation, so a change landing between the read and
+    /// the await cannot be missed (`tokio::sync::Notify` only enrols a `Notified`
+    /// on poll otherwise).
+    pub fn changed(&self) -> tokio::sync::futures::Notified<'_> {
+        self.changed.notified()
+    }
 }
 
 /// Map an aip-sql bind [`Value`](aip::sql::Value) onto rusqlite's owned value type

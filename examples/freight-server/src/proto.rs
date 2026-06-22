@@ -77,6 +77,17 @@ pub mod google {
             include!("gen/google/iam/v1/google.iam.v1.tonic.rs");
         }
     }
+
+    pub mod longrunning {
+        // Every `google.longrunning` *message* (`Operation`, the
+        // `GetOperationRequest` / `ListOperationsResponse` / … types) comes from
+        // aip-proto — the one `Operation` the `BatchCreateShippers` method returns
+        // and the `Operations` service speaks (ADR-0015) — and only the
+        // `Operations` service trait is generated here, referencing those types.
+        pub use aip_proto::google::longrunning::*;
+
+        include!("gen/google/longrunning/google.longrunning.tonic.rs");
+    }
 }
 
 #[cfg(test)]
