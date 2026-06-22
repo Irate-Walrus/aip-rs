@@ -920,32 +920,26 @@ fn idempotent_record(
 /// key and the ready shipper but persists nothing — the caller decides whether to
 /// (a `validate_only` preview does not).
 fn build_shipper(req: CreateShipperRequest) -> Result<(ShipperResourceName, Shipper), Status> {
-    // Validate the whole request reflectively; the `BadRequest` paths read
-    // `shipper.display_name`, and every missing REQUIRED field returns at once.
+    // AIP-203 REQUIRED check; reports every missing field at once.
     aip::fieldbehavior::validate_required(&req)?;
-    // `shipper` is REQUIRED, so `validate_required` already rejected a missing one;
-    // keep the guard rather than unwrapping so this never panics even if that
-    // annotation changes.
+    // `shipper` is REQUIRED — guard not unwrap, so a changed annotation can't panic.
     let mut shipper = req
         .shipper
         .ok_or_else(|| Status::invalid_argument("shipper is required"))?;
-    // Ignore any OUTPUT_ONLY or IMMUTABLE values the client sent (AIP-161).
+    // Drop client-set OUTPUT_ONLY / IMMUTABLE values (AIP-161).
     aip::fieldbehavior::clear_fields(
         &mut shipper,
         &[FieldBehavior::OutputOnly, FieldBehavior::Immutable],
     );
-    // Mint the canonical name `shippers/{shipper}` through the typed wrapper
-    // generated from shipper.proto's `google.api.resource` annotation (AIP-122 /
-    // ADR-0011); a UUIDv4 is always a valid segment, so this is infallible. Keep
-    // the typed name as the storage key (issue #169).
+    // Mint `shippers/{shipper}` via the typed wrapper (AIP-122 / ADR-0011); a UUIDv4
+    // is always a valid segment, so infallible. Typed name is the storage key (#169).
     let resource = ShipperResourceName::mint();
     shipper.name = resource.as_str().to_owned();
     let ts = now();
     shipper.create_time = Some(ts);
     shipper.update_time = Some(ts);
     shipper.delete_time = None;
-    // Stamp the AIP-154 content etag the client echoes on a later update/delete;
-    // `compute` ignores the OUTPUT_ONLY timestamps and the etag field itself.
+    // AIP-154 content etag; `compute` skips the OUTPUT_ONLY timestamps and etag field.
     shipper.etag = aip::etag::compute(&shipper);
     Ok((resource, shipper))
 }
@@ -971,24 +965,20 @@ async fn run_batch_create(
 ) {
     let mut shippers = Vec::with_capacity(requests.len());
     for (index, create) in requests.into_iter().enumerate() {
-        // Cancellation is caller execution state (ADR-0015): the `CancelOperation`
-        // handler set a flag; notice it between steps and land the operation in
-        // CANCELLED via `aip-lro`'s terminal `cancel` transition.
+        // Cancellation is caller state (ADR-0015): notice the flag between steps,
+        // land the operation in CANCELLED, then consume the flag.
         if operations.is_cancel_requested(&name) {
             update_operation(&operations, &name, |op| {
                 let _ = op.cancel();
             });
-            // The flag is consumed: clear it so it does not linger on the
-            // now-terminal operation.
             operations.clear_cancel(&name);
             return;
         }
 
-        // Simulate slow work so the operation is genuinely long-running.
+        // Slow work so the operation is genuinely long-running.
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        // Reuse the exact CreateShipper pipeline. A validation failure fails the
-        // whole operation with its AIP-193 status.
+        // Same CreateShipper pipeline; a validation failure fails the op (AIP-193).
         let shipper = match build_shipper(create) {
             Ok((resource, shipper)) => {
                 storage.put_shipper(&resource, shipper.clone());
@@ -1003,17 +993,16 @@ async fn run_batch_create(
         };
         shippers.push(shipper);
 
-        // Refresh progress so every `GetOperation` poll sees it advance (AIP-151).
+        // Advance progress for each `GetOperation` poll (AIP-151).
         let created = (index + 1) as i32;
         if !update_operation(&operations, &name, |op| {
             let _ = op.set_metadata(&BatchCreateShippersMetadata { created, total });
         }) {
-            // The operation vanished (a `DeleteOperation`): stop quietly.
-            return;
+            return; // operation deleted — stop quietly
         }
     }
 
-    // Resolve the operation to its response.
+    // Resolve to the response.
     update_operation(&operations, &name, |op| {
         let _ = op.succeed(&BatchCreateShippersResponse { shippers });
     });
@@ -1078,22 +1067,19 @@ impl Operations for OperationsService {
         request: Request<ListOperationsRequest>,
     ) -> Result<Response<ListOperationsResponse>, Status> {
         let req = request.into_inner();
-        // `name` is the operations *collection*; AIP-160 filtering over operations
-        // is deferred to a future slice (ADR-0015), so any `filter` is ignored.
+        // `name` is the operations collection; AIP-160 `filter` is deferred (ADR-0015).
         let operations = self.operations.list(&req.name);
-        // A size-capped offset page over the in-memory collection. The full
-        // `aip::pagination` machinery (the request-checksum guard) needs a generated
-        // `PageRequest` impl, which the extern'd `ListOperationsRequest` does not
-        // carry; the demo keeps it to a plain offset and notes the gap (ADR-0015).
+        // Size-capped offset page. Full `aip::pagination` needs a generated
+        // `PageRequest` impl the extern'd `ListOperationsRequest` lacks, so the demo
+        // uses a plain offset and notes the gap (ADR-0015).
         let limit = match req.page_size {
             n if n < 0 => return Err(Status::invalid_argument("page_size must not be negative")),
             0 => 50,
             n => (n as usize).min(1000),
         };
-        // The page token is this handler's own offset; reject a non-numeric one
-        // rather than silently restarting at 0, and clamp it to the collection so
-        // a forged or oversized token cannot overflow the `offset + limit`
-        // arithmetic below (it yields an empty final page instead).
+        // Page token is our own offset; reject non-numeric rather than restart at 0,
+        // and clamp to the collection so a forged/oversized token can't overflow
+        // `offset + limit` (yields an empty final page instead).
         let offset: usize = if req.page_token.is_empty() {
             0
         } else {
@@ -1144,10 +1130,8 @@ impl Operations for OperationsService {
     ) -> Result<Response<()>, Status> {
         let name = request.into_inner().name;
         self.require(&name)?;
-        // Best-effort (AIP-151): record the request and return. The operation stays
-        // pending until the task notices the flag and lands it in CANCELLED — the
-        // "cancel asked, work winding down" state is the caller's, not a field of
-        // the wire `Operation` (ADR-0015).
+        // Best-effort (AIP-151): record the request; the operation stays pending
+        // until the task notices the flag and lands it in CANCELLED (ADR-0015).
         self.operations.request_cancel(&name);
         Ok(Response::new(()))
     }
@@ -1162,10 +1146,9 @@ impl Operations for OperationsService {
         let deadline = WAIT_TIMEOUT.resolve(req.timeout)?;
         let started = Instant::now();
         loop {
-            // Enrol for the next change *before* reading the operation, so a
-            // transition landing between the read and the await is not missed (it
-            // would otherwise cost a wait to the full deadline, not just a
-            // re-check). The loop re-reads `done` after every wake regardless.
+            // Enrol for the next change *before* reading, so a transition landing
+            // between read and await isn't missed (else it costs a full-deadline
+            // wait). The loop re-reads `done` after every wake regardless.
             let changed = self.operations.changed();
             tokio::pin!(changed);
             changed.as_mut().enable();

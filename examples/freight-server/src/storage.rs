@@ -563,20 +563,14 @@ fn read_bindings(conn: &rusqlite::Connection, resource: &str) -> Vec<Binding> {
 
 /// Process-lifetime store of long-running [`Operation`]s, backing the demo's
 /// `google.longrunning.Operations` service and the `BatchCreateShippers` task
-/// (ADR-0015). The `aip-lro` crate owns no store — it deliberately leaves storage
-/// to the caller — so this is the freight-side store, keyed by operation name.
+/// (ADR-0015). `aip-lro` owns no store — storage is the caller's — so this is the
+/// freight-side store, keyed by operation name; the stored value is the wire
+/// [`Operation`] (round-tripped via `into_inner`/`from_inner`), kept in memory.
 ///
-/// The stored value is the wire [`Operation`] message (`aip-lro`'s
-/// `into_inner`/`from_inner` round-trip it), so durability would be a matter of
-/// persisting these bytes; the demo keeps them in memory like the rest of
-/// [`Storage`].
-///
-/// Two things live alongside the operations and are deliberately *not* the
-/// library's concern (ADR-0015): the set of operations a `CancelOperation` has
-/// requested cancellation of — caller execution state the batch task polls, since
-/// "cancel asked, work still winding down" has no field in the wire `Operation` —
-/// and a [`Notify`] pulsed on every change so `WaitOperation` can block until the
-/// operation moves instead of busy-polling.
+/// Two things sit alongside, deliberately outside the library (ADR-0015): the set
+/// of cancel-requested names — caller execution state the batch task polls, since
+/// "cancel asked, work winding down" has no wire field — and a [`Notify`] pulsed
+/// on every change so `WaitOperation` blocks instead of busy-polling.
 pub struct OperationStore {
     operations: Mutex<BTreeMap<String, Operation>>,
     cancels: Mutex<BTreeSet<String>>,
