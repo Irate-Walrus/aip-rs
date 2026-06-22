@@ -3,7 +3,8 @@
 A runnable [tonic](https://github.com/hyperium/tonic) gRPC server that
 demonstrates aip-rs end-to-end and gives the workspace something real to test
 against. It implements einride's example `FreightService` (Shipper / Site /
-Shipment) and the `google.iam.v1.IAMPolicy` service over an in-memory store.
+Shipment), the `google.iam.v1.IAMPolicy` service, and the
+`google.longrunning.Operations` service over an in-memory store.
 
 > **Implementing an issue?** Extending this server is part of the definition of
 > done — see [`CLAUDE.md`](../../CLAUDE.md) at the repo root.
@@ -315,6 +316,49 @@ ic -d '{"resource":"shippers","policy":{"version":1,"bindings":[{"role":"roles/v
 gc -H 'x-freight-caller: user:bob@example.com' -d '{"name":"shippers/ghost"}' 127.0.0.1:50051 $SVC/GetShipper
 ```
 
+### Long-running operations (AIP-151)
+
+`BatchCreateShippers` is slow, so it returns a `google.longrunning.Operation`
+instead of blocking. The client polls `GetOperation` on the
+`google.longrunning.Operations` service until the operation is `done`; the
+operation then carries a `BatchCreateShippersResponse`, and its `metadata` shows
+progress on every poll. `aip-rs` owns the `Operation` state machine and its
+errors; the work, the store, and the service are the server's (ADR-0015).
+
+```sh
+gc() { grpcurl -plaintext "$@"; }
+SVC=einride.example.freight.v1.FreightService
+OPS=google.longrunning.Operations
+
+# Start the batch. It returns an Operation right away with `done` unset and a
+# server-minted `name` like `operations/3f2a…`. Capture the name to poll on.
+OP=$(gc -d '{"requests":[{"shipper":{"display_name":"Acme"}},{"shipper":{"display_name":"Globex"}}]}' \
+  127.0.0.1:50051 $SVC/BatchCreateShippers | grep -o '"name": *"[^"]*"' | head -1 | cut -d'"' -f4)
+echo "operation: $OP"
+
+# Poll. While it runs, `metadata` reports `created`/`total`; once `done` is true
+# the `response` carries the created shippers (each with a minted name + etag).
+gc -d '{"name":"'"$OP"'"}' 127.0.0.1:50051 $OPS/GetOperation
+# ... repeat until the response shows `"done": true` ...
+
+# WaitOperation blocks server-side until the operation finishes (or the capped
+# timeout elapses), so a client need not spin on GetOperation.
+gc -d '{"name":"'"$OP"'","timeout":"30s"}' 127.0.0.1:50051 $OPS/WaitOperation
+
+# Cancel flow: start another batch and cancel it mid-flight. Cancellation is
+# best-effort — CancelOperation returns immediately, and the operation soon polls
+# back `done` with an `error` of CANCELLED (code 1).
+OP2=$(gc -d '{"requests":[{"shipper":{"display_name":"A"}},{"shipper":{"display_name":"B"}},{"shipper":{"display_name":"C"}},{"shipper":{"display_name":"D"}},{"shipper":{"display_name":"E"}}]}' \
+  127.0.0.1:50051 $SVC/BatchCreateShippers | grep -o '"name": *"[^"]*"' | head -1 | cut -d'"' -f4)
+gc -d '{"name":"'"$OP2"'"}' 127.0.0.1:50051 $OPS/CancelOperation
+gc -d '{"name":"'"$OP2"'"}' 127.0.0.1:50051 $OPS/GetOperation
+
+# validate_only previews the would-be shippers in an already-`done` operation
+# with an empty `name` (no state kept) and persists nothing (AIP-163).
+gc -d '{"requests":[{"shipper":{"display_name":"Acme"}}],"validate_only":true}' \
+  127.0.0.1:50051 $SVC/BatchCreateShippers
+```
+
 ## Error domain
 
 Every error a client sees carries one AIP-193 `ErrorInfo.domain`:
@@ -360,4 +404,6 @@ wired up.
 | `ListShipments`   | `pagination` (`Page::parse` preamble: checksum guard + offset token + `SizeLimits` size policy, then `fetch_limit`/`split_overfetch` drive the store overfetch probe at the unsigned `offset()` and mint the follow-on token; read through the generated `PageRequest` impl) + `filtering`/`aip-sql` (filter declarations derived from the `Shipment` descriptor + server-composed scope/soft-delete → in-memory SQLite) | wired |
 | `IAMPolicy.GetIamPolicy` / `SetIamPolicy` | `iam` (Member validation + structural read-modify-write: dedupe/normalise, `etag` optimistic concurrency, conditions⟹version-3) over a decomposed SQLite policy store (iam-go's `iam_policy_bindings` schema), with `version` recovered on read by `policy::canonical_version` (the invariant `validate` enforces, read backwards) | wired |
 | `IAMPolicy.TestIamPermissions` | `iam` + the opt-in cel-backed `eval` adapter (`aip::iam::eval`): role→permission expansion via an example-owned catalogue built on `aip::iam::RoleSet` (the library ships the mechanism, never role definitions), Member matching through `aip::iam::grant_admits`, Condition evaluation against a `RequestContext` whose `request.time` defaults to now | wired |
+| `BatchCreateShippers` | `lro` (AIP-151 / AIP-233): `Operation<M, R>` packs progress `metadata` + the created shippers `response` into `Any` by descriptor; a `tokio` task steps `set_metadata` → `succeed`, honouring a `CancelOperation` flag with the terminal `cancel`; `OperationName` mints the flat name; `preview` (AIP-163 `validate_only` → `Operation::validated`, empty name). Reuses the `CreateShipper` pipeline per shipper | wired |
+| `Operations.GetOperation` / `ListOperations` / `WaitOperation` / `CancelOperation` / `DeleteOperation` | `lro`: `OperationName` (validate), the `not_found` shaping, `WaitTimeout` (default/cap, the block is the server's), `into_inner`/`from_inner` round-tripping the stored `Operation`. AIP-160 filtering + full `pagination` over operations deferred (ADR-0015) | wired |
 | `GetSite` / `UpdateSite` / `DeleteSite`, `BatchGetSites`, `GetShipment` / `UpdateShipment` / `DeleteShipment` | the same primitives | `Unimplemented` |

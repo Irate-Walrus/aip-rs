@@ -1,9 +1,10 @@
 //! A runnable tonic gRPC server demonstrating aip-rs.
 //!
-//! It serves einride's example `FreightService` (Shipper / Site / Shipment) and
-//! the `google.iam.v1.IAMPolicy` service over an in-memory store, and grows to
-//! use each aip-rs crate as that crate's feature lands. See `src/service.rs` for
-//! the per-handler `TODO(aip #N)` seams.
+//! It serves einride's example `FreightService` (Shipper / Site / Shipment), the
+//! `google.iam.v1.IAMPolicy` service, and the `google.longrunning.Operations`
+//! service (which `BatchCreateShippers` resolves on, ADR-0015) over an in-memory
+//! store, and grows to use each aip-rs crate as that crate's feature lands. See
+//! `src/service.rs` for the per-handler `TODO(aip #N)` seams.
 //!
 //! Run with `cargo run -p freight-server`; it listens on `127.0.0.1:50051` by
 //! default. Set `FREIGHT_ADDR` to override (e.g. `FREIGHT_ADDR=0.0.0.0:8080`).
@@ -24,8 +25,9 @@ use tonic_reflection::server::Builder as ReflectionBuilder;
 use crate::iam::IamServer;
 use crate::proto::einride::example::freight::v1::freight_service_server::FreightServiceServer;
 use crate::proto::google::iam::v1::iam_policy_server::IamPolicyServer;
+use crate::proto::google::longrunning::operations_server::OperationsServer;
 use crate::proto::FILE_DESCRIPTOR_SET;
-use crate::service::{FreightServer, SERVICE_DOMAIN};
+use crate::service::{FreightServer, OperationsService, SERVICE_DOMAIN};
 use crate::storage::PolicyStore;
 
 #[tokio::main]
@@ -39,6 +41,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `SetIamPolicy` actually governs who may `GetShipper`.
     let policies = Arc::new(PolicyStore::new());
     let server = FreightServer::with_policies(Arc::clone(&policies));
+    // The `google.longrunning.Operations` service over the *same* operation store
+    // `BatchCreateShippers` writes to, so a `GetOperation` poll sees the very
+    // operation the batch method created (ADR-0015). Take the shared store before
+    // `server` moves into its service wrapper below.
+    let operations = OperationsService::new(server.operations());
     // The `google.iam.v1.IAMPolicy` service over that shared store, served
     // alongside `FreightService`.
     let iam = IamServer::with_store(policies);
@@ -64,6 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(aip::errordomain::Layer::new(SERVICE_DOMAIN))
         .add_service(FreightServiceServer::new(server))
         .add_service(IamPolicyServer::new(iam))
+        .add_service(OperationsServer::new(operations))
         .add_service(reflection_v1)
         .add_service(reflection_v1alpha)
         .serve_with_shutdown(addr, async {

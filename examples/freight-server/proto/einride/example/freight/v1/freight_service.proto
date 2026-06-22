@@ -10,6 +10,7 @@ import "google/api/client.proto";
 import "google/api/field_behavior.proto";
 import "google/api/field_info.proto";
 import "google/api/resource.proto";
+import "google/longrunning/operations.proto";
 import "google/protobuf/field_mask.proto";
 
 // This API represents a simple freight service.
@@ -83,6 +84,28 @@ service FreightService {
       body: "*"
     };
     option (google.api.method_signature) = "name";
+  }
+
+  // Batch create shippers as a long-running operation.
+  //
+  // Creating many shippers can take a while, so this returns a
+  // `google.longrunning.Operation` the client polls instead of blocking. The
+  // operation resolves to a `BatchCreateShippersResponse`; its `metadata` carries
+  // `BatchCreateShippersMetadata` progress on every poll. A `validate_only`
+  // request returns an already-`done` operation with an empty `name` (the server
+  // keeps no state for a trivial validation).
+  //
+  // See: https://google.aip.dev/233 (Batch methods: Create).
+  // See: https://google.aip.dev/151 (Long-running operations).
+  rpc BatchCreateShippers(BatchCreateShippersRequest) returns (google.longrunning.Operation) {
+    option (google.api.http) = {
+      post: "/v1/shippers:batchCreate"
+      body: "*"
+    };
+    option (google.longrunning.operation_info) = {
+      response_type: "BatchCreateShippersResponse"
+      metadata_type: "BatchCreateShippersMetadata"
+    };
   }
 
   // Get a site.
@@ -288,6 +311,37 @@ message UndeleteShipperRequest {
     (google.api.field_behavior) = REQUIRED,
     (google.api.resource_reference).type = "freight-example.einride.tech/Shipper"
   ];
+}
+
+// Request message for FreightService.BatchCreateShippers.
+// See: https://google.aip.dev/233 (Batch methods: Create).
+message BatchCreateShippersRequest {
+  // The shippers to create. Each is the same payload `CreateShipper` accepts;
+  // the batch runs the same per-shipper validation and minting.
+  repeated CreateShipperRequest requests = 1 [(google.api.field_behavior) = REQUIRED];
+
+  // If set, run the full validation pipeline over every request and return an
+  // already-`done` operation carrying the shippers that would be created, but
+  // persist nothing. The operation's `name` is empty (no state is kept).
+  // See: https://google.aip.dev/163.
+  bool validate_only = 2;
+}
+
+// Response message for FreightService.BatchCreateShippers — the operation's
+// `response` once it is `done`.
+message BatchCreateShippersResponse {
+  // The shippers created, in request order.
+  repeated Shipper shippers = 1;
+}
+
+// Operation metadata for FreightService.BatchCreateShippers — carried in the
+// operation's `metadata` and refreshed on every poll (AIP-151).
+message BatchCreateShippersMetadata {
+  // How many shippers have been created so far.
+  int32 created = 1;
+
+  // How many shippers the batch will create in total.
+  int32 total = 2;
 }
 
 // Request message for FreightService.GetSite.

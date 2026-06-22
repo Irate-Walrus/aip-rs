@@ -329,6 +329,72 @@ plugin emits the impl for every `google.api.resource`-annotated message carrying
 resource without that field is simply not soft-deletable.
 _Avoid_: deletable, trashable, archivable.
 
+### Long-running operations
+
+The planned `aip-lro` crate (issue #101): the AIP-151 `google.longrunning`
+**Operation** state machine and its AIP-193 errors. Like the rest of the core it
+*owns the state rules and their errors*, not the execution or storage — running
+the work and persisting the **Operation** stay the caller's (ADR-0005/0010).
+
+**Operation**:
+A client's promise for a method too slow to answer inline (AIP-151) — a
+`google.longrunning.Operation` carrying a server-assigned **Operation name**,
+**Operation metadata**, and, once done, exactly one **Operation result**.
+_Avoid_: job, task, future, promise (the analogy, not the resource).
+
+**Operation name**:
+The **Resource name** of an **Operation**: an optional parent **Resource name**,
+the `operations` **Collection ID**, and a caller-minted **Operation ID**. Flat
+(`operations/{op}`) when the parent is absent — the AIP-151 default — or
+parent-scoped (`workspaces/{w}/operations/{op}`) for tenant isolation. The library
+*validates* it; it never mints the **Operation ID** (no clock or RNG in the core).
+_Avoid_: operation id (only the trailing **Resource ID**), handle, token.
+
+**Operation ID**:
+The trailing **Resource ID** of an **Operation name** — the segment after
+`operations/`. Caller-supplied.
+
+**Operation state**:
+Which of three states an **Operation** is in, derived from `done` plus which
+result field is set: **Pending** (not done; no result), **Succeeded** (done with a
+**Response**), or **Failed** (done with an error). Terminal-once: a done
+**Operation** never re-opens.
+_Avoid_: status (the error payload), phase, stage (a **Metadata** field).
+
+**Operation result**:
+The terminal payload of a done **Operation**: exactly one of a **Response** or an
+error, never both. A **Pending Operation** has neither.
+_Avoid_: outcome, return value.
+
+**Response**:
+The `Any`-packed message an **Operation** resolves to on success (VIGIL's `Build`,
+freight's batch result).
+_Avoid_: result (the umbrella term — a result is a **Response** *or* an error),
+output.
+
+**Operation metadata**:
+A caller-defined, `Any`-packed message carrying progress/stage while an
+**Operation** is **Pending**; readable on every poll. Distinct from the
+**Operation result**.
+_Avoid_: status, progress (one field of it), details.
+
+**Cancellation**:
+A best-effort request that a **Pending Operation** stop. It resolves the
+**Operation** to **Failed** with a `CANCELLED` error; whether a cancel was
+*requested* is caller execution state, not a fourth **Operation state** and not a
+field of the **Operation**.
+_Avoid_: abort (the AIP-151 parallel-operation rejection), delete (removing the
+**Operation** record, which does not stop the work).
+
+**Wait timeout**:
+The AIP-151 `WaitOperation` deadline policy: the duration the server blocks for an
+**Operation** to become done — the default it picks when the client leaves
+`timeout` unset, and the max it caps a client's requested timeout to. The library
+resolves the value (default/cap); the blocking itself is the caller's. The LRO
+analog of **Size limits**.
+_Avoid_: deadline (the resolved value), expiry (AIP-151 operation expiry, a
+different clock), TTL.
+
 ## Relationships
 
 - An **Order by** is an ordered list of **Ordering fields**.
@@ -366,6 +432,16 @@ _Avoid_: deletable, trashable, archivable.
   back through wire bytes.
 - A **Typed message** carries its own **Descriptor**; a **Dynamic message** is
   paired with one.
+- An **Operation name** is an optional parent **Resource name**, the `operations`
+  **Collection ID**, and an **Operation ID** (a **Resource ID**); flat when the
+  parent is absent.
+- An **Operation** is in exactly one **Operation state**, derived from `done` and
+  which **Operation result** field is set.
+- A done **Operation** carries exactly one **Operation result** — a **Response**
+  or an error, never both; a **Pending Operation** carries neither.
+- **Cancellation** drives a **Pending Operation** to **Failed** with a `CANCELLED`
+  error; whether a cancel was requested is caller execution state, outside the
+  **Operation**.
 
 ## Example dialogue
 

@@ -33,6 +33,10 @@ aip-reflect       = { workspace = true, optional = true }
 # Optional IAM primitives (ADR-0010): off by default while the slice matures, like
 # `sql` — only `aip = { features = ["iam"] }` pulls it in as `aip::iam`.
 aip-iam           = { workspace = true, optional = true }
+# Optional AIP-151 long-running operations (ADR-0015): off by default while the
+# slice matures, like `iam` — only `aip = { features = ["lro"] }` pulls it in as
+# `aip::lro`.
+aip-lro           = { workspace = true, optional = true }
 # Optional SQL adapter (ADR-0005 / ADR-0008): not part of the core, so it stays
 # off by default — only `aip = { features = ["sql"] }` pulls it in as `aip::sql`.
 aip-sql           = { workspace = true, optional = true }
@@ -65,6 +69,9 @@ errordomain   = ["dep:aip-errordomain"]
 # Deliberately not in `default` (ADR-0010): the IAM primitives are opt-in while
 # the slice matures.
 iam           = ["dep:aip-iam"]
+# Deliberately not in `default` (ADR-0015): long-running operations are opt-in
+# while the slice matures, surfaced as `aip::lro`.
+lro           = ["dep:aip-lro"]
 # Deliberately not in `default` (ADR-0005): the SQL adapter is opt-in.
 sql           = ["dep:aip-sql"]
 
@@ -86,6 +93,7 @@ tonic = [
     "aip-validation?/tonic",
     "aip-reflect?/tonic",
     "aip-iam?/tonic",
+    "aip-lro?/tonic",
     "aip-sql?/tonic",
 ]
 cel-proto = ["aip-filtering?/cel-proto"]

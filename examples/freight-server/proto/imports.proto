@@ -18,3 +18,11 @@ import "google/iam/v1/iam_policy.proto";
 // the handlers already use), but having them in the descriptor set lets grpcurl
 // decode the rich details block the README demonstrates.
 import "google/rpc/error_details.proto";
+
+// google.longrunning.Operations — the AIP-151 service `BatchCreateShippers`
+// returns Operations on. freight_service.proto imports operations.proto too (for
+// the Operation return type), so the service trait would generate regardless;
+// anchoring it here keeps the Operations service in the embedded descriptor set
+// for grpcurl reflection, the same reason iam_policy.proto is anchored. The
+// google.longrunning *messages* are extern-mapped onto aip-proto (buf.gen.yaml).
+import "google/longrunning/operations.proto";

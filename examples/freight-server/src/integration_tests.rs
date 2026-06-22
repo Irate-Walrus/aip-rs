@@ -16,18 +16,23 @@ use tonic::Request;
 
 use crate::iam::IamServer;
 use crate::proto::einride::example::freight::v1::{
-    freight_service_server::FreightService, CreateShipmentRequest, CreateShipperRequest,
-    CreateSiteRequest, DeleteShipperRequest, GetShipperRequest, ListShipmentsRequest,
-    ListShippersRequest, ListSitesRequest, Shipment, Shipper, Site, UndeleteShipperRequest,
-    UpdateShipperRequest,
+    freight_service_server::FreightService, BatchCreateShippersMetadata,
+    BatchCreateShippersRequest, BatchCreateShippersResponse, CreateShipmentRequest,
+    CreateShipperRequest, CreateSiteRequest, DeleteShipperRequest, GetShipperRequest,
+    ListShipmentsRequest, ListShippersRequest, ListSitesRequest, Shipment, Shipper, Site,
+    UndeleteShipperRequest, UpdateShipperRequest,
 };
 use crate::proto::google::iam::v1::{
     iam_policy_server::IamPolicy, GetIamPolicyRequest, SetIamPolicyRequest,
     TestIamPermissionsRequest,
 };
-use crate::service::{FreightServer, CALLER_METADATA_KEY};
+use crate::proto::google::longrunning::{
+    operations_server::Operations, CancelOperationRequest, GetOperationRequest, Operation,
+};
+use crate::service::{FreightServer, OperationsService, CALLER_METADATA_KEY};
 use crate::storage::PolicyStore;
 use aip::iam::proto::{google::r#type::Expr, Binding, Policy};
+use aip::lro::{Operation as LroOperation, State};
 
 // ─── Test fixtures ────────────────────────────────────────────────────────────
 
@@ -1241,4 +1246,232 @@ async fn error_domain_layer_rewrites_sentinel_to_service_domain() {
     assert_eq!(info.reason, "FIELD_REQUIRED");
     // The library stamped `aip-rs`; the boundary layer rewrote it on the way out.
     assert_eq!(info.domain, SERVICE_DOMAIN);
+}
+
+// ─── BatchCreateShippers: AIP-151 long-running operations ─────────────────────
+
+/// The typed `BatchCreateShippers` operation facade (ADR-0015): progress
+/// metadata, the created shippers in the response.
+type BatchOp = LroOperation<BatchCreateShippersMetadata, BatchCreateShippersResponse>;
+
+/// A `BatchCreateShippersRequest` creating one shipper per display name.
+fn batch_request(display_names: &[&str], validate_only: bool) -> BatchCreateShippersRequest {
+    BatchCreateShippersRequest {
+        requests: display_names
+            .iter()
+            .map(|name| CreateShipperRequest {
+                shipper: Some(Shipper {
+                    display_name: (*name).to_owned(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .collect(),
+        validate_only,
+    }
+}
+
+/// Poll `GetOperation` until the operation is `done`, the way the README's poll
+/// loop does. Bounded so a stuck operation fails the test rather than hanging.
+async fn poll_until_done(operations: &OperationsService, name: &str) -> Operation {
+    for _ in 0..200 {
+        let operation = operations
+            .get_operation(Request::new(GetOperationRequest {
+                name: name.to_owned(),
+            }))
+            .await
+            .expect("get_operation succeeds")
+            .into_inner();
+        if operation.done {
+            return operation;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("operation `{name}` did not complete in time");
+}
+
+/// README flow: `BatchCreateShippers` returns a pending operation, the client
+/// polls `GetOperation` until it is `done`, and the operation resolves to the
+/// created shippers. The background task does the work; the library owns the
+/// state machine (ADR-0015).
+#[tokio::test]
+async fn batch_create_shippers_start_poll_done() {
+    let (freight, _iam) = make_server();
+    let operations = OperationsService::new(freight.operations());
+
+    // Start: returns immediately with a pending, named operation.
+    let started = freight
+        .batch_create_shippers(Request::new(batch_request(&["Acme", "Globex"], false)))
+        .await
+        .expect("batch_create_shippers starts")
+        .into_inner();
+    assert!(!started.done, "the operation starts pending");
+    assert!(
+        started.name.starts_with("operations/"),
+        "the operation carries a flat name"
+    );
+
+    // Poll until done, then read the typed response off the facade.
+    let done = poll_until_done(&operations, &started.name).await;
+    let op = BatchOp::from_inner(done).expect("a stored operation is well-formed");
+    assert_eq!(op.state(), State::Succeeded);
+    let response = op
+        .response()
+        .expect("the response unpacks")
+        .expect("a succeeded operation has a response");
+    assert_eq!(response.shippers.len(), 2);
+    let display_names: Vec<&str> = response
+        .shippers
+        .iter()
+        .map(|shipper| shipper.display_name.as_str())
+        .collect();
+    assert_eq!(display_names, ["Acme", "Globex"]);
+    // Each created shipper got a minted name and a content etag — the same
+    // pipeline `CreateShipper` runs.
+    assert!(response
+        .shippers
+        .iter()
+        .all(|s| s.name.starts_with("shippers/")));
+    assert!(response.shippers.iter().all(|s| !s.etag.is_empty()));
+
+    // The created shippers are actually in the store, listable like any other.
+    let listed = freight
+        .list_shippers(Request::new(ListShippersRequest::default()))
+        .await
+        .expect("list_shippers succeeds")
+        .into_inner();
+    assert_eq!(listed.shippers.len(), 2);
+}
+
+/// README flow: `CancelOperation` on a running batch lands the operation in
+/// `Failed` with a `CANCELLED` error. Cancellation is best-effort — the handler
+/// only records the request; the task transitions the operation (ADR-0015).
+#[tokio::test]
+async fn batch_create_shippers_cancel() {
+    let (freight, _iam) = make_server();
+    let operations = OperationsService::new(freight.operations());
+
+    // Start a longer batch so the cancel lands mid-flight.
+    let started = freight
+        .batch_create_shippers(Request::new(batch_request(
+            &["A", "B", "C", "D", "E"],
+            false,
+        )))
+        .await
+        .expect("batch_create_shippers starts")
+        .into_inner();
+
+    // Request cancellation; the handler returns immediately without flipping done.
+    operations
+        .cancel_operation(Request::new(CancelOperationRequest {
+            name: started.name.clone(),
+        }))
+        .await
+        .expect("cancel_operation succeeds");
+
+    let done = poll_until_done(&operations, &started.name).await;
+    let op = BatchOp::from_inner(done).expect("a stored operation is well-formed");
+    assert_eq!(op.state(), State::Failed);
+    let error = op.error().expect("a cancelled operation carries an error");
+    assert_eq!(error.code, 1, "the error is google.rpc.Code.CANCELLED");
+}
+
+/// AIP-163: a `validate_only` batch returns an already-`done` operation with an
+/// empty `name` (no state kept) carrying the shippers that would be created, and
+/// persists nothing (ADR-0015).
+#[tokio::test]
+async fn batch_create_shippers_validate_only() {
+    use crate::proto::google::longrunning::operation::Result as OpResult;
+    use prost::Message as _;
+
+    let (freight, _iam) = make_server();
+
+    let operation = freight
+        .batch_create_shippers(Request::new(batch_request(&["Acme"], true)))
+        .await
+        .expect("a validate_only batch succeeds")
+        .into_inner();
+    assert!(operation.done, "a validate_only operation is already done");
+    assert!(
+        operation.name.is_empty(),
+        "a validate_only operation keeps no state, so it has no name"
+    );
+    // The response carries the would-be shipper, validated and minted.
+    let OpResult::Response(any) = operation.result.expect("a done operation has a result") else {
+        panic!("validation should succeed with a response, not an error");
+    };
+    let response = BatchCreateShippersResponse::decode(any.value.as_slice())
+        .expect("the response Any decodes");
+    assert_eq!(response.shippers.len(), 1);
+    assert_eq!(response.shippers[0].display_name, "Acme");
+
+    // Nothing was persisted — a validate_only preview never touches the store.
+    let listed = freight
+        .list_shippers(Request::new(ListShippersRequest::default()))
+        .await
+        .expect("list_shippers succeeds")
+        .into_inner();
+    assert!(listed.shippers.is_empty(), "validate_only persists nothing");
+}
+
+/// `ListOperations` must not trust the client's `page_token`: a huge numeric
+/// offset clamps to an empty page instead of overflowing the `offset + limit`
+/// arithmetic, and a non-numeric token is rejected rather than silently
+/// restarting at 0.
+#[tokio::test]
+async fn list_operations_handles_hostile_page_tokens() {
+    use crate::proto::google::longrunning::ListOperationsRequest;
+
+    let (freight, _iam) = make_server();
+    let operations = OperationsService::new(freight.operations());
+
+    // Seed one operation so the collection is non-empty.
+    freight
+        .batch_create_shippers(Request::new(batch_request(&["Acme"], false)))
+        .await
+        .expect("batch_create_shippers starts");
+
+    // `usize::MAX` as a token must not panic (debug) or wrap (release): it clamps
+    // to an empty final page.
+    let page = operations
+        .list_operations(Request::new(ListOperationsRequest {
+            name: "operations".to_owned(),
+            page_token: usize::MAX.to_string(),
+            ..Default::default()
+        }))
+        .await
+        .expect("an out-of-range offset is clamped, not an error")
+        .into_inner();
+    assert!(
+        page.operations.is_empty(),
+        "an out-of-range offset yields an empty page"
+    );
+    assert!(page.next_page_token.is_empty());
+
+    // A non-numeric token is INVALID_ARGUMENT, not a silent restart at offset 0.
+    let err = operations
+        .list_operations(Request::new(ListOperationsRequest {
+            name: "operations".to_owned(),
+            page_token: "not-an-offset".to_owned(),
+            ..Default::default()
+        }))
+        .await
+        .expect_err("a garbage page_token is rejected");
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+}
+
+/// `requests` is REQUIRED (AIP-203): an empty batch is rejected with
+/// `INVALID_ARGUMENT` rather than minting an operation that instantly succeeds
+/// with no shippers.
+#[tokio::test]
+async fn batch_create_shippers_rejects_empty_requests() {
+    let (freight, _iam) = make_server();
+    let err = freight
+        .batch_create_shippers(Request::new(BatchCreateShippersRequest {
+            requests: Vec::new(),
+            validate_only: false,
+        }))
+        .await
+        .expect_err("an empty batch is rejected");
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
 }
