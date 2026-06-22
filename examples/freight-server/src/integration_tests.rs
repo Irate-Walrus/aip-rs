@@ -1409,3 +1409,62 @@ async fn batch_create_shippers_validate_only() {
         .into_inner();
     assert!(listed.shippers.is_empty(), "validate_only persists nothing");
 }
+
+/// `ListOperations` must not trust the client's `page_token`: a huge numeric
+/// offset clamps to an empty page instead of overflowing the `offset + limit`
+/// arithmetic, and a non-numeric token is rejected rather than silently
+/// restarting at 0.
+#[tokio::test]
+async fn list_operations_handles_hostile_page_tokens() {
+    use crate::proto::google::longrunning::ListOperationsRequest;
+
+    let (freight, _iam) = make_server();
+    let operations = OperationsService::new(freight.operations());
+
+    // Seed one operation so the collection is non-empty.
+    freight
+        .batch_create_shippers(Request::new(batch_request(&["Acme"], false)))
+        .await
+        .expect("batch_create_shippers starts");
+
+    // `usize::MAX` as a token must not panic (debug) or wrap (release): it clamps
+    // to an empty final page.
+    let page = operations
+        .list_operations(Request::new(ListOperationsRequest {
+            name: "operations".to_owned(),
+            page_token: usize::MAX.to_string(),
+            ..Default::default()
+        }))
+        .await
+        .expect("an out-of-range offset is clamped, not an error")
+        .into_inner();
+    assert!(page.operations.is_empty(), "an out-of-range offset yields an empty page");
+    assert!(page.next_page_token.is_empty());
+
+    // A non-numeric token is INVALID_ARGUMENT, not a silent restart at offset 0.
+    let err = operations
+        .list_operations(Request::new(ListOperationsRequest {
+            name: "operations".to_owned(),
+            page_token: "not-an-offset".to_owned(),
+            ..Default::default()
+        }))
+        .await
+        .expect_err("a garbage page_token is rejected");
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+}
+
+/// `requests` is REQUIRED (AIP-203): an empty batch is rejected with
+/// `INVALID_ARGUMENT` rather than minting an operation that instantly succeeds
+/// with no shippers.
+#[tokio::test]
+async fn batch_create_shippers_rejects_empty_requests() {
+    let (freight, _iam) = make_server();
+    let err = freight
+        .batch_create_shippers(Request::new(BatchCreateShippersRequest {
+            requests: Vec::new(),
+            validate_only: false,
+        }))
+        .await
+        .expect_err("an empty batch is rejected");
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+}

@@ -634,6 +634,9 @@ impl OperationStore {
     /// (ADR-0015).
     pub fn remove(&self, name: &str) -> bool {
         let removed = self.operations.lock().unwrap().remove(name).is_some();
+        // Drop any cancel flag alongside the record, so the flag's lifetime is
+        // tied to the operation's rather than orphaned in the set after a delete.
+        self.cancels.lock().unwrap().remove(name);
         if removed {
             self.changed.notify_waiters();
         }
@@ -646,6 +649,13 @@ impl OperationStore {
     /// `CANCELLED` (ADR-0015).
     pub fn request_cancel(&self, name: &str) {
         self.cancels.lock().unwrap().insert(name.to_owned());
+    }
+
+    /// Clear a consumed cancel flag — the batch task calls this once it has
+    /// observed the request and landed the operation in `CANCELLED`, so the flag
+    /// does not linger on the now-terminal operation.
+    pub fn clear_cancel(&self, name: &str) {
+        self.cancels.lock().unwrap().remove(name);
     }
 
     /// Whether cancellation has been requested for `name`.

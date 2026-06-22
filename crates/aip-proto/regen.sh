@@ -37,13 +37,16 @@ buf generate --include-imports
 # anything but a `//` comment).
 grep -rLZ '^[^/]' src/gen --include='*.rs' | xargs -0r rm --
 
-# Drop the google.rpc artifacts. google/longrunning/operations.proto imports
-# google/rpc/status.proto (Operation.error), so --include-imports pulls it in;
-# neoeinstein-prost suppresses its structs (extern-mapped onto tonic-types in
-# buf.gen.yaml), but the aip plugin still emits a ReflectMessage orphan for the
-# extern'd Status. The google.rpc descriptors stay in the descriptor set below
-# (reflection on Operation needs them); only the dead Rust is removed.
-rm -rf src/gen/google/rpc
+# Drop the google.rpc ReflectMessage orphan. google/longrunning/operations.proto
+# imports google/rpc/status.proto (Operation.error), so --include-imports pulls it
+# in; neoeinstein-prost suppresses its structs (extern-mapped onto tonic-types in
+# buf.gen.yaml), but the aip plugin still emits a `.aip.rs` ReflectMessage orphan
+# for the extern'd Status (it has a body, so the no-code sweep above misses it).
+# Remove only that orphan reflect impl, not the whole package: a google.rpc type
+# that is later NOT extern-mapped would still get its struct generated and kept.
+# The google.rpc descriptors stay in the descriptor set below (reflection on
+# Operation needs them); the empty dir is swept away by the prune below.
+rm -f src/gen/google/rpc/*.aip.rs
 
 find src/gen -type d -empty -delete
 

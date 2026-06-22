@@ -603,7 +603,10 @@ impl WaitTimeout {
     ///
     /// # Errors
     ///
-    /// [`Error::WaitTimeoutInvalid`] when `requested` is negative.
+    /// [`Error::WaitTimeoutInvalid`] when `requested` is negative, or its `nanos`
+    /// is outside the `google.protobuf.Duration` range of `[0, 1_000_000_000)` —
+    /// a malformed value that would otherwise carry silently into the seconds when
+    /// converted, yielding a different wait than the client asked for.
     pub fn resolve(&self, requested: Option<prost_types::Duration>) -> Result<Duration, Error> {
         let Some(duration) = requested else {
             return Ok(self.default);
@@ -611,6 +614,16 @@ impl WaitTimeout {
         if duration.seconds < 0 || duration.nanos < 0 {
             return Err(Error::WaitTimeoutInvalid {
                 detail: "a wait timeout must not be negative".to_owned(),
+            });
+        }
+        // A well-formed `google.protobuf.Duration` keeps `nanos` in
+        // `[0, 1_000_000_000)`; rejecting an out-of-range value keeps the
+        // `Duration::new` conversion below from carrying excess nanos into the
+        // seconds (a `{seconds: 0, nanos: 1_500_000_000}` would otherwise resolve
+        // to 1.5s rather than being refused).
+        if duration.nanos >= 1_000_000_000 {
+            return Err(Error::WaitTimeoutInvalid {
+                detail: "a wait timeout's nanos must be less than 1,000,000,000".to_owned(),
             });
         }
         let requested = Duration::new(duration.seconds as u64, duration.nanos as u32);
@@ -859,6 +872,11 @@ mod tests {
         // Negative -> error.
         assert!(matches!(
             policy.resolve(Some(prost_types::Duration { seconds: -1, nanos: 0 })),
+            Err(Error::WaitTimeoutInvalid { .. })
+        ));
+        // Nanos at or past 1e9 (malformed) -> error, not a silent carry into secs.
+        assert!(matches!(
+            policy.resolve(Some(prost_types::Duration { seconds: 0, nanos: 1_500_000_000 })),
             Err(Error::WaitTimeoutInvalid { .. })
         ));
     }

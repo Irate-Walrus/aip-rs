@@ -385,6 +385,10 @@ impl FreightService for FreightServer {
         request: Request<BatchCreateShippersRequest>,
     ) -> Result<Response<Operation>, Status> {
         let req = request.into_inner();
+        // `requests` is REQUIRED (AIP-203): reject an empty batch up front, the
+        // same guard every sibling Create handler applies to its request, rather
+        // than minting an operation that instantly "succeeds" with no shippers.
+        aip::fieldbehavior::validate_required(&req)?;
         let total = req.requests.len() as i32;
 
         // AIP-163: a `validate_only` batch runs the full per-shipper validation and
@@ -971,6 +975,9 @@ async fn run_batch_create(
             update_operation(&operations, &name, |op| {
                 let _ = op.cancel();
             });
+            // The flag is consumed: clear it so it does not linger on the
+            // now-terminal operation.
+            operations.clear_cancel(&name);
             return;
         }
 
@@ -1040,6 +1047,16 @@ impl OperationsService {
     pub fn new(operations: Arc<OperationStore>) -> Self {
         Self { operations }
     }
+
+    /// Validate `name`'s shape (AIP-151) and fetch the operation, or the
+    /// `aip-lro`-shaped NOT_FOUND — the parse-then-look-up `get_operation` and
+    /// `cancel_operation` share, so both report a missing operation identically.
+    fn require(&self, name: &str) -> Result<Operation, Status> {
+        OperationName::parse(name)?;
+        self.operations
+            .get(name)
+            .ok_or_else(|| aip::lro::Error::not_found(name.to_owned()).into())
+    }
 }
 
 /// The `WaitOperation` deadline policy: block up to 5s by default, capped at 30s
@@ -1056,7 +1073,7 @@ impl Operations for OperationsService {
         let req = request.into_inner();
         // `name` is the operations *collection*; AIP-160 filtering over operations
         // is deferred to a future slice (ADR-0015), so any `filter` is ignored.
-        let mut operations = self.operations.list(&req.name);
+        let operations = self.operations.list(&req.name);
         // A size-capped offset page over the in-memory collection. The full
         // `aip::pagination` machinery (the request-checksum guard) needs a generated
         // `PageRequest` impl, which the extern'd `ListOperationsRequest` does not
@@ -1066,13 +1083,25 @@ impl Operations for OperationsService {
             0 => 50,
             n => (n as usize).min(1000),
         };
-        let offset: usize = req.page_token.parse().unwrap_or(0);
-        let next_page_token = if offset + limit < operations.len() {
-            (offset + limit).to_string()
+        // The page token is this handler's own offset; reject a non-numeric one
+        // rather than silently restarting at 0, and clamp it to the collection so
+        // a forged or oversized token cannot overflow the `offset + limit`
+        // arithmetic below (it yields an empty final page instead).
+        let offset: usize = if req.page_token.is_empty() {
+            0
+        } else {
+            req.page_token
+                .parse()
+                .map_err(|_| Status::invalid_argument("page_token is not a valid offset"))?
+        };
+        let offset = offset.min(operations.len());
+        let next_offset = offset.saturating_add(limit);
+        let next_page_token = if next_offset < operations.len() {
+            next_offset.to_string()
         } else {
             String::new()
         };
-        let page = operations.drain(..).skip(offset).take(limit).collect();
+        let page = operations.into_iter().skip(offset).take(limit).collect();
         Ok(Response::new(ListOperationsResponse {
             operations: page,
             next_page_token,
@@ -1085,12 +1114,7 @@ impl Operations for OperationsService {
         request: Request<GetOperationRequest>,
     ) -> Result<Response<Operation>, Status> {
         let name = request.into_inner().name;
-        // Validate the name shape (AIP-151) before the lookup.
-        OperationName::parse(&name)?;
-        let operation = self
-            .operations
-            .get(&name)
-            .ok_or_else(|| aip::lro::Error::not_found(name))?;
+        let operation = self.require(&name)?;
         Ok(Response::new(operation))
     }
 
@@ -1112,10 +1136,7 @@ impl Operations for OperationsService {
         request: Request<CancelOperationRequest>,
     ) -> Result<Response<()>, Status> {
         let name = request.into_inner().name;
-        OperationName::parse(&name)?;
-        if self.operations.get(&name).is_none() {
-            return Err(aip::lro::Error::not_found(name).into());
-        }
+        self.require(&name)?;
         // Best-effort (AIP-151): record the request and return. The operation stays
         // pending until the task notices the flag and lands it in CANCELLED — the
         // "cancel asked, work winding down" state is the caller's, not a field of
