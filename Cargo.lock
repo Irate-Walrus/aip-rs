@@ -21,6 +21,7 @@ dependencies = [
  "aip-fieldmask",
  "aip-filtering",
  "aip-iam",
+ "aip-lro",
  "aip-ordering",
  "aip-pagination",
  "aip-preview",
@@ -133,6 +134,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "aip-lro"
+version = "0.0.1"
+dependencies = [
+ "aip-proto",
+ "aip-resourceid",
+ "aip-resourcename",
+ "prost",
+ "prost-reflect",
+ "prost-types",
+ "thiserror 2.0.18",
+ "tonic",
+ "tonic-types",
+]
+
+[[package]]
 name = "aip-ordering"
 version = "0.0.1"
 dependencies = [
@@ -172,6 +188,7 @@ dependencies = [
  "prost",
  "prost-reflect",
  "prost-types",
+ "tonic-types",
 ]
 
 [[package]]

@@ -1,0 +1,43 @@
+[package]
+name = "aip-lro"
+description = "AIP-151 long-running Operation state machine + AIP-193 errors (ADR-0015)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+# The google.longrunning.Operation message + the Operations request/response
+# messages (ADR-0015). Pulls the `longrunning` feature, which carries the
+# google.rpc.Status (Operation.error) extern-mapped onto tonic-types.
+aip-proto = { workspace = true, features = ["longrunning"] }
+# An Operation name is a Resource name ending in `operations/{id}`: the parent is
+# validated as a Resource name, the trailing id as a Resource ID. Both pure,
+# proto-free.
+aip-resourcename = { workspace = true }
+aip-resourceid = { workspace = true }
+# The Typed facade packs/unpacks the metadata/response `Any` against a message's
+# own descriptor (ADR-0009): `prost` for encode/decode, `prost-reflect` for the
+# type URL, `prost-types` for `Any` / `Duration`.
+prost = { workspace = true }
+prost-types = { workspace = true }
+prost-reflect = { workspace = true }
+# `Operation.error` is a `google.rpc.Status` (`tonic_types::Status`) — the one
+# Status across the AIP-193 error stack (ADR-0007/0011), so this is a hard
+# dependency, not gated by the `tonic` feature.
+tonic-types = { workspace = true }
+thiserror = { workspace = true }
+tonic = { workspace = true, optional = true }
+
+[features]
+# Adds `From<Error> for tonic::Status` (the `OPERATION_*` AIP-193 mappings) and
+# the `fail_status(tonic::Status)` convenience. `tonic_types::Status` is present
+# regardless (the Operation.error type); this feature adds the error mapping and
+# the tonic::Status interop. See docs/adr/0007-aip193-error-details.md.
+tonic = ["dep:tonic"]

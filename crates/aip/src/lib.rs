@@ -247,6 +247,17 @@ pub use aip_reflect as reflect;
 #[cfg_attr(docsrs, doc(cfg(feature = "iam")))]
 pub use aip_iam as iam;
 
+/// AIP-151 long-running operations (opt-in via the non-default `lro` feature):
+/// the [`Operation`](aip_lro::Operation) state machine, the
+/// [`OperationName`](aip_lro::OperationName) grammar, and the
+/// [`WaitTimeout`](aip_lro::WaitTimeout) policy. Execution, storage, naming, and
+/// the `Operations` service are the caller's (ADR-0015).
+///
+/// See <https://google.aip.dev/151>.
+#[cfg(feature = "lro")]
+#[cfg_attr(docsrs, doc(cfg(feature = "lro")))]
+pub use aip_lro as lro;
+
 /// SQL adapter (opt-in via the non-default `sql` feature): transpile a
 /// [`Filter`](aip_filtering::Filter) or [`OrderBy`](aip_ordering::OrderBy)
 /// into a parameterized SQL clause tail via a pluggable

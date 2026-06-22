@@ -62,6 +62,12 @@ aip-preview      = { version = "0.0.1", path = "crates/aip-preview" }
 # Field-violation accumulator (issue #60): collects per-field failures into one
 # AIP-193 error. Default-on via the umbrella's `validation` feature.
 aip-validation   = { version = "0.0.1", path = "crates/aip-validation" }
+# AIP-151 long-running operations (ADR-0015): the Operation state machine, the
+# OperationName grammar, the WaitOperation timeout policy, and the OPERATION_*
+# AIP-193 errors — execution/storage/naming/service left to the caller. Reflective
+# (Typed facade over a Dynamic core, ADR-0009). Opt-in via the umbrella's `lro`
+# feature, off by default while the slice matures.
+aip-lro          = { version = "0.0.1", path = "crates/aip-lro" }
 # Resource-annotation reflection (issue #61): ResourceType parsing, google.api
 # resource descriptor iteration, and resource_reference validation. Default-on
 # via the umbrella's `reflect` feature.
