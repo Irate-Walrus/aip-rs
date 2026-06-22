@@ -16,10 +16,11 @@ use tonic::Request;
 
 use crate::iam::IamServer;
 use crate::proto::einride::example::freight::v1::{
-    freight_service_server::FreightService, BatchCreateShippersMetadata, BatchCreateShippersRequest,
-    BatchCreateShippersResponse, CreateShipmentRequest, CreateShipperRequest, CreateSiteRequest,
-    DeleteShipperRequest, GetShipperRequest, ListShipmentsRequest, ListShippersRequest,
-    ListSitesRequest, Shipment, Shipper, Site, UndeleteShipperRequest, UpdateShipperRequest,
+    freight_service_server::FreightService, BatchCreateShippersMetadata,
+    BatchCreateShippersRequest, BatchCreateShippersResponse, CreateShipmentRequest,
+    CreateShipperRequest, CreateSiteRequest, DeleteShipperRequest, GetShipperRequest,
+    ListShipmentsRequest, ListShippersRequest, ListSitesRequest, Shipment, Shipper, Site,
+    UndeleteShipperRequest, UpdateShipperRequest,
 };
 use crate::proto::google::iam::v1::{
     iam_policy_server::IamPolicy, GetIamPolicyRequest, SetIamPolicyRequest,
@@ -1327,7 +1328,10 @@ async fn batch_create_shippers_start_poll_done() {
     assert_eq!(display_names, ["Acme", "Globex"]);
     // Each created shipper got a minted name and a content etag — the same
     // pipeline `CreateShipper` runs.
-    assert!(response.shippers.iter().all(|s| s.name.starts_with("shippers/")));
+    assert!(response
+        .shippers
+        .iter()
+        .all(|s| s.name.starts_with("shippers/")));
     assert!(response.shippers.iter().all(|s| !s.etag.is_empty()));
 
     // The created shippers are actually in the store, listable like any other.
@@ -1438,7 +1442,10 @@ async fn list_operations_handles_hostile_page_tokens() {
         .await
         .expect("an out-of-range offset is clamped, not an error")
         .into_inner();
-    assert!(page.operations.is_empty(), "an out-of-range offset yields an empty page");
+    assert!(
+        page.operations.is_empty(),
+        "an out-of-range offset yields an empty page"
+    );
     assert!(page.next_page_token.is_empty());
 
     // A non-numeric token is INVALID_ARGUMENT, not a silent restart at offset 0.

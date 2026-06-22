@@ -20,14 +20,14 @@ use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status};
 
 use crate::proto::einride::example::freight::v1::{
-    freight_service_server::FreightService, BatchCreateShippersMetadata, BatchCreateShippersRequest,
-    BatchCreateShippersResponse, BatchGetSitesRequest, BatchGetSitesResponse, CreateShipmentRequest,
-    CreateShipperRequest, CreateSiteRequest, DeleteShipmentRequest, DeleteShipperRequest,
-    DeleteSiteRequest, GetShipmentRequest, GetShipperRequest, GetSiteRequest, ListShipmentsRequest,
-    ListShipmentsResponse, ListShippersRequest, ListShippersResponse, ListSitesRequest,
-    ListSitesResponse, Shipment, ShipmentResourceName, Shipper, ShipperResourceName, Site,
-    SiteResourceName, UndeleteShipperRequest, UpdateShipmentRequest, UpdateShipperRequest,
-    UpdateSiteRequest,
+    freight_service_server::FreightService, BatchCreateShippersMetadata,
+    BatchCreateShippersRequest, BatchCreateShippersResponse, BatchGetSitesRequest,
+    BatchGetSitesResponse, CreateShipmentRequest, CreateShipperRequest, CreateSiteRequest,
+    DeleteShipmentRequest, DeleteShipperRequest, DeleteSiteRequest, GetShipmentRequest,
+    GetShipperRequest, GetSiteRequest, ListShipmentsRequest, ListShipmentsResponse,
+    ListShippersRequest, ListShippersResponse, ListSitesRequest, ListSitesResponse, Shipment,
+    ShipmentResourceName, Shipper, ShipperResourceName, Site, SiteResourceName,
+    UndeleteShipperRequest, UpdateShipmentRequest, UpdateShipperRequest, UpdateSiteRequest,
 };
 use crate::proto::google::longrunning::{
     operations_server::Operations, CancelOperationRequest, DeleteOperationRequest,
@@ -409,8 +409,11 @@ impl FreightService for FreightServer {
         // Mint the operation name. The library never mints the id — no clock or RNG
         // in the core (ADR-0015) — so the *caller* does: a system-assigned UUIDv4,
         // always a valid resource id, which `OperationName` then validates.
-        let name = OperationName::parse(&format!("operations/{}", aip::resourceid::generate_system()))
-            .expect("a system-minted operation name is valid");
+        let name = OperationName::parse(&format!(
+            "operations/{}",
+            aip::resourceid::generate_system()
+        ))
+        .expect("a system-minted operation name is valid");
 
         // Store the pending operation (progress 0 / total) and return it at once;
         // the client polls `GetOperation` while the work runs.
@@ -1021,7 +1024,11 @@ async fn run_batch_create(
 /// [`run_batch_create`] shares. Returns whether the operation was still present (a
 /// `DeleteOperation` may have removed it). `from_inner` validates the stored
 /// invariant; a pending operation always passes.
-fn update_operation(operations: &OperationStore, name: &str, apply: impl FnOnce(&mut BatchOp)) -> bool {
+fn update_operation(
+    operations: &OperationStore,
+    name: &str,
+    apply: impl FnOnce(&mut BatchOp),
+) -> bool {
     let Some(inner) = operations.get(name) else {
         return false;
     };

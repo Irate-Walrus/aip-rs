@@ -187,7 +187,9 @@ impl OperationName {
             },
         };
         if id.is_empty() || id.contains('/') {
-            return Err(invalid("the operation id must be a single non-empty segment"));
+            return Err(invalid(
+                "the operation id must be a single non-empty segment",
+            ));
         }
         aip_resourceid::validate_user_settable(id).map_err(|e| invalid(&e.to_string()))?;
 
@@ -828,7 +830,10 @@ mod tests {
 
         // A stored operation must have a name (a validate-only op is not stored).
         let unnamed = Op::validated(&response()).into_inner();
-        assert!(matches!(Op::from_inner(unnamed), Err(Error::Malformed { .. })));
+        assert!(matches!(
+            Op::from_inner(unnamed),
+            Err(Error::Malformed { .. })
+        ));
     }
 
     #[test]
@@ -836,11 +841,9 @@ mod tests {
         // Pack an `OperationInfo` as metadata, then read it back as the wrong type
         // by viewing the same wire op through a facade expecting a different `M`.
         let stored = Op::pending(&name(), &metadata()).into_inner();
-        let wrong = Operation::<GetOperationRequest, GetOperationRequest>::from_inner(stored).unwrap();
-        assert!(matches!(
-            wrong.metadata(),
-            Err(Error::TypeMismatch { .. })
-        ));
+        let wrong =
+            Operation::<GetOperationRequest, GetOperationRequest>::from_inner(stored).unwrap();
+        assert!(matches!(wrong.metadata(), Err(Error::TypeMismatch { .. })));
     }
 
     #[test]
@@ -851,32 +854,47 @@ mod tests {
         // Capped at max.
         assert_eq!(
             policy
-                .resolve(Some(prost_types::Duration { seconds: 600, nanos: 0 }))
+                .resolve(Some(prost_types::Duration {
+                    seconds: 600,
+                    nanos: 0
+                }))
                 .unwrap(),
             Duration::from_secs(60)
         );
         // Under the cap, honored.
         assert_eq!(
             policy
-                .resolve(Some(prost_types::Duration { seconds: 5, nanos: 0 }))
+                .resolve(Some(prost_types::Duration {
+                    seconds: 5,
+                    nanos: 0
+                }))
                 .unwrap(),
             Duration::from_secs(5)
         );
         // Explicit zero -> immediate.
         assert_eq!(
             policy
-                .resolve(Some(prost_types::Duration { seconds: 0, nanos: 0 }))
+                .resolve(Some(prost_types::Duration {
+                    seconds: 0,
+                    nanos: 0
+                }))
                 .unwrap(),
             Duration::ZERO
         );
         // Negative -> error.
         assert!(matches!(
-            policy.resolve(Some(prost_types::Duration { seconds: -1, nanos: 0 })),
+            policy.resolve(Some(prost_types::Duration {
+                seconds: -1,
+                nanos: 0
+            })),
             Err(Error::WaitTimeoutInvalid { .. })
         ));
         // Nanos at or past 1e9 (malformed) -> error, not a silent carry into secs.
         assert!(matches!(
-            policy.resolve(Some(prost_types::Duration { seconds: 0, nanos: 1_500_000_000 })),
+            policy.resolve(Some(prost_types::Duration {
+                seconds: 0,
+                nanos: 1_500_000_000
+            })),
             Err(Error::WaitTimeoutInvalid { .. })
         ));
     }
