@@ -1,6 +1,6 @@
 # aip-lro: the AIP-151 Operation state machine as a primitive, execution left to the caller
 
-Status: proposed — needs human sign-off before implementation (issue #101).
+Status: accepted (issue #101) — implementation underway.
 
 AIP-151 long-running operations is the largest absent subsystem, and one neither
 `aip-go` ships in-tree nor `iam-go` does more than stub. "Add LRO" decomposes the
@@ -153,18 +153,25 @@ collide with the `tonic_types::Status` the error mapping already uses.
   trade), unlike the pure-string `aip-resourceid` / `aip-requestid`.
 - A new opt-in `lro` umbrella feature, **off by default** while the slice matures
   (like `iam`, `events`, `sql`); the proto types ride the `aip-proto`
-  `longrunning` feature and the error mapping the shared `tonic` feature, so a
-  default build pulls in neither `prost-reflect`-for-LRO nor `tonic`.
+  `longrunning` feature and the `From<Error>` mapping the crate's `tonic` feature.
+  With `lro` **off** (the umbrella default) a build pulls in none of it. With `lro`
+  **on**, `tonic-types` (and thus `tonic` core) comes in unconditionally, even
+  without the crate's own `tonic` feature: `Operation.error` *is*
+  `tonic_types::Status`, so holding an `Operation` requires it — the direct cost of
+  the "one `Status`" extern decision. The crate's `tonic` feature gates only the
+  `OPERATION_*` error mapping + `fail_status`, not the dependency weight.
 - `OPERATION_*` joins ADR-0007's `reason` prefixes under the shared `aip-rs`
   domain sentinel, rewritten at the boundary by `aip-errordomain`.
 - CONTEXT.md gains **Operation**, **Operation name**, **Operation ID**,
   **Operation state**, **Operation result**, **Response**, **Operation metadata**,
   **Cancellation**, and **Wait timeout** (done).
-- **Risk to verify in implementation:** cross-pool `Any`-packing — an `Operation`
-  lives in `aip-proto`'s descriptor pool while its `M`/`R` carry descriptors from
-  the consumer's pool. Packing is by value plus a type-URL string, so no shared
-  descriptor is resolved across pools; this is the same cross-crate-reflection risk
-  ADR-0011 verified for a freight message embedding a `Policy`.
+- **Cross-pool `Any`-packing — verified.** An `Operation` lives in `aip-proto`'s
+  descriptor pool while its `M`/`R` carry descriptors from the consumer's pool.
+  Packing is by value plus a type-URL string, so no shared descriptor is resolved
+  across pools — the crate's roundtrip and type-mismatch tests pin this within one
+  pool, and the freight slice exercises the genuine cross-*crate* case (freight's
+  `BatchCreateShippers*` messages packed into an `aip-proto` `Operation`), the same
+  risk ADR-0011 verified for a freight message embedding a `Policy`.
 
 ## Sequencing — tracer bullet first
 
