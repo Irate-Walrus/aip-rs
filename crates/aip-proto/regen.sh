@@ -36,6 +36,15 @@ buf generate --include-imports
 # Drop every generated file with no code line (no line that starts with
 # anything but a `//` comment).
 grep -rLZ '^[^/]' src/gen --include='*.rs' | xargs -0r rm --
+
+# Drop the google.rpc artifacts. google/longrunning/operations.proto imports
+# google/rpc/status.proto (Operation.error), so --include-imports pulls it in;
+# neoeinstein-prost suppresses its structs (extern-mapped onto tonic-types in
+# buf.gen.yaml), but the aip plugin still emits a ReflectMessage orphan for the
+# extern'd Status. The google.rpc descriptors stay in the descriptor set below
+# (reflection on Operation needs them); only the dead Rust is removed.
+rm -rf src/gen/google/rpc
+
 find src/gen -type d -empty -delete
 
 buf build --as-file-descriptor-set --exclude-source-info -o src/descriptor_set.binpb

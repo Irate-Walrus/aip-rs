@@ -29,6 +29,13 @@ plugins:
     out: src/gen
     opt:
       - disable_comments=.
+      # google.longrunning.Operation.error is a google.rpc.Status. Map google.rpc
+      # onto tonic-types — the one Status the AIP-193 error stack already uses
+      # (ADR-0007/0011) — so no second Status struct is generated here.
+      # neoeinstein-prost then emits nothing for google.rpc; only the aip plugin
+      # below would (a ReflectMessage orphan for the extern'd Status), which
+      # regen.sh drops.
+      - extern_path=.google.rpc=::tonic_types
   # The workspace's own AIP plugin (ADR-0011), run from source. aip-proto owns
   # the `google.*` types, so this follows regen.sh's `--include-imports` and
   # reflects every generated message (the `aip.proto` import anchor has none).
