@@ -248,8 +248,17 @@ impl FreightService for FreightServer {
             .list_shippers_page(&predicate, &order, page.fetch_limit());
         // The probe row's presence answers `has_more`; `split_overfetch` truncates it
         // and mints the next token from the last kept shipper's key.
-        let (shippers, next_page_token) =
-            page.split_overfetch(shippers, |shipper| shipper_cursor(shipper, &cursor_columns));
+        let views = cursor_views(&cursor_columns);
+        let (shippers, next_page_token) = page.split_overfetch(shippers, |shipper| {
+            let name = ShipperResourceName::parse(&shipper.name)
+                .expect("a stored shipper has a valid name");
+            let keys: Vec<(&str, &str)> = ShipperResourceName::KEY_COLUMNS
+                .iter()
+                .copied()
+                .zip(name.key_values())
+                .collect();
+            encode_cursor(shipper, &views, &keys)
+        });
         Ok(Response::new(ListShippersResponse {
             shippers,
             next_page_token,
@@ -520,8 +529,16 @@ impl FreightService for FreightServer {
         let sites = self
             .storage
             .list_sites_page(&predicate, &order, page.fetch_limit());
-        let (sites, next_page_token) =
-            page.split_overfetch(sites, |site| site_cursor(site, &cursor_columns));
+        let views = cursor_views(&cursor_columns);
+        let (sites, next_page_token) = page.split_overfetch(sites, |site| {
+            let name = SiteResourceName::parse(&site.name).expect("a stored site has a valid name");
+            let keys: Vec<(&str, &str)> = SiteResourceName::KEY_COLUMNS
+                .iter()
+                .copied()
+                .zip(name.key_values())
+                .collect();
+            encode_cursor(site, &views, &keys)
+        });
         Ok(Response::new(ListSitesResponse {
             sites,
             next_page_token,
@@ -651,8 +668,16 @@ impl FreightService for FreightServer {
         let shipments = self
             .storage
             .list_shipments_page(&predicate, &order, page.fetch_limit());
+        let views = cursor_views(&cursor_columns);
         let (shipments, next_page_token) = page.split_overfetch(shipments, |shipment| {
-            shipment_cursor(shipment, &cursor_columns)
+            let name = ShipmentResourceName::parse(&shipment.name)
+                .expect("a stored shipment has a valid name");
+            let keys: Vec<(&str, &str)> = ShipmentResourceName::KEY_COLUMNS
+                .iter()
+                .copied()
+                .zip(name.key_values())
+                .collect();
+            encode_cursor(shipment, &views, &keys)
         });
         Ok(Response::new(ListShipmentsResponse {
             shipments,
@@ -913,14 +938,16 @@ fn cursor_seek(
         ));
     }
     let mut items = Vec::with_capacity(cursor.len());
-    for ((entry, (column, ty)), order) in cursor.iter().zip(columns).zip(orders) {
-        if &entry.column != column || !cursor_value_matches(&entry.value, ty) {
+    for ((entry, seek_column), order) in cursor.iter().zip(columns).zip(orders) {
+        if entry.column != seek_column.column
+            || !cursor_value_matches(&entry.value, &seek_column.ty)
+        {
             return Err(Status::invalid_argument(
                 "page token does not match the ordering",
             ));
         }
         items.push((
-            column.clone(),
+            seek_column.column.clone(),
             order.direction(),
             cursor_value_to_sql(&entry.value),
         ));
@@ -955,71 +982,46 @@ fn cursor_value_to_sql(value: &CursorValue) -> aip::sql::Value {
     }
 }
 
-/// A timestamp rendered exactly as the store holds it, so a cursor value compares
-/// against the stored column. Absent timestamps never reach a cursor column.
-fn timestamp_cursor(ts: Option<&prost_types::Timestamp>) -> String {
-    ts.map(crate::storage::store_timestamp).unwrap_or_default()
+/// Map a column's declared type to the cursor variant the encoder emits. It mirrors
+/// the variants [`cursor_value_matches`] accepts. A seek column only ever carries a
+/// comparable type — the sortable scalars, a timestamp, or an enum — and for each the
+/// chosen variant is one the decode accepts, so encode and decode cannot drift.
+fn cursor_kind(ty: &aip::filtering::Type) -> aip::pagination::CursorKind {
+    use aip::filtering::Type;
+    use aip::pagination::CursorKind;
+    match ty {
+        Type::Bool => CursorKind::Bool,
+        Type::Int | Type::Uint => CursorKind::Int,
+        Type::Double => CursorKind::Double,
+        _ => CursorKind::Text,
+    }
 }
 
-/// Mint cursor entries for the resolved seek columns, reading each column's value
-/// from `value_of`. The per-resource builders below supply the column→value map.
-fn build_cursor(
-    columns: &aip::sql::CursorColumns,
-    value_of: impl Fn(&str) -> CursorValue,
-) -> Vec<CursorEntry> {
+/// The reflective encoder's view of the resolved seek columns, built once per page:
+/// each column's SQL name, the field path to reflect from, and the variant to emit.
+fn cursor_views(columns: &aip::sql::CursorColumns) -> Vec<aip::pagination::CursorColumn<'_>> {
     columns
         .iter()
-        .map(|(column, _)| CursorEntry {
-            column: column.clone(),
-            value: value_of(column),
+        .map(|column| aip::pagination::CursorColumn {
+            column: &column.column,
+            field_path: &column.field_path,
+            kind: cursor_kind(&column.ty),
         })
         .collect()
 }
 
-/// Build a shipper's cursor entries for the resolved seek columns (the key alone).
-fn shipper_cursor(shipper: &Shipper, columns: &aip::sql::CursorColumns) -> Vec<CursorEntry> {
-    let name =
-        ShipperResourceName::parse(&shipper.name).expect("a stored shipper has a valid name");
-    build_cursor(columns, |column| match column {
-        "shipper" => CursorValue::Text(name.shipper().to_owned()),
-        other => unreachable!("unexpected shipper cursor column {other}"),
-    })
-}
-
-/// Build a site's cursor entries for the resolved seek columns — the order_by
-/// columns plus the key tie-break.
-fn site_cursor(site: &Site, columns: &aip::sql::CursorColumns) -> Vec<CursorEntry> {
-    let name = SiteResourceName::parse(&site.name).expect("a stored site has a valid name");
-    build_cursor(columns, |column| match column {
-        "shipper" => CursorValue::Text(name.shipper().to_owned()),
-        "site" => CursorValue::Text(name.site().to_owned()),
-        "display_name" => CursorValue::Text(site.display_name.clone()),
-        "create_time" => CursorValue::Text(timestamp_cursor(site.create_time.as_ref())),
-        "update_time" => CursorValue::Text(timestamp_cursor(site.update_time.as_ref())),
-        "latitude" => CursorValue::Double(
-            site.lat_lng
-                .as_ref()
-                .map(|ll| ll.latitude)
-                .unwrap_or_default(),
-        ),
-        "longitude" => CursorValue::Double(
-            site.lat_lng
-                .as_ref()
-                .map(|ll| ll.longitude)
-                .unwrap_or_default(),
-        ),
-        other => unreachable!("unexpected site cursor column {other}"),
-    })
-}
-
-/// Build a shipment's cursor entries for the resolved seek columns (the key alone).
-fn shipment_cursor(shipment: &Shipment, columns: &aip::sql::CursorColumns) -> Vec<CursorEntry> {
-    let name =
-        ShipmentResourceName::parse(&shipment.name).expect("a stored shipment has a valid name");
-    build_cursor(columns, |column| match column {
-        "shipper" => CursorValue::Text(name.shipper().to_owned()),
-        "shipment" => CursorValue::Text(name.shipment().to_owned()),
-        other => unreachable!("unexpected shipment cursor column {other}"),
+/// Mint a row's cursor entries for the resolved seek `views`: the reflective encoder
+/// reads each order_by column off `message` by its field path, while the resource's
+/// `keys` (the key tie-break columns, parsed from the name) supply the rest.
+/// Injecting [`store_timestamp`](crate::storage::store_timestamp) keeps a timestamp
+/// cursor value byte-identical to the stored column.
+fn encode_cursor<M: ReflectMessage>(
+    message: &M,
+    views: &[aip::pagination::CursorColumn<'_>],
+    keys: &[(&str, &str)],
+) -> Vec<CursorEntry> {
+    aip::pagination::cursor_entries(message, views, keys, |seconds, nanos| {
+        crate::storage::store_timestamp(&prost_types::Timestamp { seconds, nanos })
     })
 }
 
@@ -1413,6 +1415,97 @@ mod tests {
             ShipperResourceName::PATTERN.split_once('/'),
             Some((SHIPPERS_COLLECTION, "{shipper}")),
         );
+    }
+
+    #[test]
+    fn cursor_round_trips_through_encode_and_decode() {
+        // Encoding a fully-populated row and feeding the entries straight back through
+        // the shared decode validates them and builds a seek. Encode and decode read
+        // the one seek-column list, so a representation gap cannot slip between them.
+        let site = Site {
+            name: "shippers/acme/sites/dock-1".to_owned(),
+            display_name: "Oslo Dock".to_owned(),
+            lat_lng: Some(LatLng {
+                latitude: 59.91,
+                longitude: 10.75,
+            }),
+            create_time: Some(prost_types::Timestamp {
+                seconds: 1_710_502_496,
+                nanos: 0,
+            }),
+            ..Default::default()
+        };
+
+        // A mixed-shape, mixed-direction ordering: a string, a renamed nested double,
+        // and a timestamp, with the key tie-break trailing.
+        let order_by: OrderBy = "display_name, lat_lng.latitude desc, create_time"
+            .parse()
+            .expect("order_by parses");
+        let (cursor_columns, order) =
+            aip::sql::transpile_order_by(&order_by, &site_schema(), SiteResourceName::KEY_COLUMNS)
+                .expect("order_by transpiles");
+
+        let name = SiteResourceName::parse(&site.name).expect("a valid site name");
+        let keys: Vec<(&str, &str)> = SiteResourceName::KEY_COLUMNS
+            .iter()
+            .copied()
+            .zip(name.key_values())
+            .collect();
+        let entries = encode_cursor(&site, &cursor_views(&cursor_columns), &keys);
+
+        // The minted entries name exactly the resolved seek columns, in clause order.
+        let columns: Vec<&str> = entries.iter().map(|entry| entry.column.as_str()).collect();
+        assert_eq!(
+            columns,
+            ["display_name", "latitude", "create_time", "shipper", "site"],
+        );
+        // The reflected values carry the right variants and the store's timestamp text.
+        assert_eq!(
+            entries.iter().map(|entry| &entry.value).collect::<Vec<_>>(),
+            vec![
+                &CursorValue::Text("Oslo Dock".to_owned()),
+                &CursorValue::Double(59.91),
+                &CursorValue::Text("2024-03-15T11:34:56Z".to_owned()),
+                &CursorValue::Text("acme".to_owned()),
+                &CursorValue::Text("dock-1".to_owned()),
+            ],
+        );
+
+        // The shared decode accepts the round-tripped cursor and builds a keyset seek
+        // (not the first page).
+        let seek = cursor_seek(Some(&entries), &cursor_columns, &order)
+            .expect("the round-tripped cursor validates");
+        assert!(seek.is_some(), "a non-empty cursor builds a keyset seek");
+    }
+
+    #[test]
+    fn cursor_kind_and_decode_agree_for_every_seek_column_type() {
+        use aip::filtering::Type;
+        use aip::pagination::CursorKind;
+        // A seek column only ever holds a comparable type: the sortable scalars plus
+        // the enum the decode also accepts as text. For each, the variant the encoder
+        // picks must be one the decode accepts, or paging breaks on the second page.
+        let comparable = [
+            Type::String,
+            Type::Int,
+            Type::Uint,
+            Type::Double,
+            Type::Bool,
+            Type::Timestamp,
+            Type::Enum("example.State".to_owned()),
+        ];
+        for ty in comparable {
+            let sample = match cursor_kind(&ty) {
+                CursorKind::Bool => CursorValue::Bool(true),
+                CursorKind::Int => CursorValue::Int(1),
+                CursorKind::Double => CursorValue::Double(1.0),
+                CursorKind::Text => CursorValue::Text("x".to_owned()),
+            };
+            assert!(
+                cursor_value_matches(&sample, &ty),
+                "encode kind and decode disagree for {ty:?}",
+            );
+        }
     }
 
     /// Creates a site under `PARENT` with the given display name and latitude. The

@@ -76,6 +76,15 @@ A **Page token** whose state is a numeric offset into the result set.
 A **Page token** whose state is an arbitrary, caller-defined payload (e.g. the
 last-seen key) rather than an offset.
 
+**Cursor kind**:
+The reflected shape of a **Seek column**'s value — bool / int / double / text —
+fixing which cursor variant the encoder mints for it. The encoder reads each
+order-by column off the row by its field path and chooses the variant from the kind,
+so the encode side cannot drift from a decode validating the same column types;
+timestamps and proto enums ride as text. `aip-pagination`'s own kind, carrying no
+dependency on the SQL **Type** layer.
+_Avoid_: type (that is the **Filter** term), variant, cursor shape.
+
 **Page size**:
 The maximum number of results a single page may contain, requested by the client.
 
@@ -257,6 +266,16 @@ To walk a primitive's native AST — a **Filter**, an **Order by** — into a
 **Predicate**. The `aip-sql` operation; distinct from **Filter** parsing and
 checking, which stay reflection-free and datastore-free.
 _Avoid_: compile, translate, convert.
+
+**Seek column**:
+One resolved cursor seek key: the SQL column to compare, the proto field path the
+value is read from, and the column's **Type**. Transpiling an **Order by** builds
+the ordered list of these — the order-by columns plus the key tie-break — once, and
+both pagination sides read it: the encode side reflects the value off the field path
+and picks the cursor variant from the **Type**, the decode side validates each value
+against the same column and **Type**, so they cannot drift. A key tie-break column's
+field path equals its column (the resource-name variable, read off the typed name).
+_Avoid_: order column, sort key, cursor column.
 
 **Query**:
 The clause tail of a list query, rendered by a **Dialect** in one pass: the WHERE

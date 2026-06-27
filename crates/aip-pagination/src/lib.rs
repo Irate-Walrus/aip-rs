@@ -48,7 +48,7 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use prost::Message as _;
-use prost_reflect::{DynamicMessage, ReflectMessage};
+use prost_reflect::{DynamicMessage, FieldDescriptor, Kind, ReflectMessage, Value};
 use serde::{Deserialize, Serialize};
 
 /// Version byte prepended to every encoded page token. Bump it whenever the
@@ -131,6 +131,210 @@ pub struct CursorEntry {
     pub column: String,
     /// The last row's value in that column.
     pub value: CursorValue,
+}
+
+/// The reflected shape of a seek column's value, fixing which [`CursorValue`]
+/// variant [`cursor_entries`] emits. Pagination's own kind, not the SQL type layer,
+/// so the encoder stays a leaf with no dependency on `aip-sql`; the caller maps its
+/// column types onto these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorKind {
+    /// A boolean column → [`CursorValue::Bool`].
+    Bool,
+    /// An integer column, signed or unsigned → [`CursorValue::Int`].
+    Int,
+    /// A floating-point column → [`CursorValue::Double`].
+    Double,
+    /// A text column → [`CursorValue::Text`]. Also a proto enum (rides as its value
+    /// name) and a timestamp (RFC3339 text), told apart by the reflected field shape.
+    Text,
+}
+
+/// One seek column for [`cursor_entries`]: the SQL `column` to label the entry, the
+/// proto `field_path` to reflect the value from, and the [`CursorKind`] fixing the
+/// emitted variant.
+///
+/// A key column — one the message carries no field for, e.g. a resource-name
+/// variable — takes its value from the encoder's `keys` argument instead of
+/// `field_path`.
+#[derive(Debug, Clone, Copy)]
+pub struct CursorColumn<'a> {
+    /// The SQL column name; labels the [`CursorEntry`] and looks the value up among
+    /// the encoder's key columns.
+    pub column: &'a str,
+    /// The proto field path the value is reflected from.
+    pub field_path: &'a str,
+    /// The cursor variant to emit.
+    pub kind: CursorKind,
+}
+
+/// Mint the cursor entries for `columns` off a message, deriving each value's
+/// variant from the column's [`CursorKind`] so the encode side cannot drift from a
+/// decode that validates against the same column types.
+///
+/// A proto-field column is read off `message` by reflecting its `field_path`: a
+/// scalar lands in the matching variant, a proto enum in [`Text`](CursorValue::Text)
+/// as its value name (matching how the store sorts enums), and a timestamp in `Text`
+/// via `format_timestamp`. `format_timestamp` is injected — and receives the
+/// timestamp's seconds and nanos rather than a `prost-types` value — so the minted
+/// text byte-matches whatever the store wrote without this leaf crate depending on
+/// `prost-types`. A **key column**, named in `keys`, takes its value there as
+/// `Text`; the resource name it comes from is not a message field to reflect.
+///
+/// An absent message field along a path yields the variant's default (an empty
+/// string, a zero), matching the non-null columns the store writes.
+pub fn cursor_entries<M, F>(
+    message: &M,
+    columns: &[CursorColumn<'_>],
+    keys: &[(&str, &str)],
+    format_timestamp: F,
+) -> Vec<CursorEntry>
+where
+    M: ReflectMessage,
+    F: Fn(i64, i32) -> String,
+{
+    // Transcode to a dynamic message so fields can be read by path; the round-trip
+    // can only fail if a message and its descriptor disagree, a build invariant.
+    let dynamic = DynamicMessage::decode(message.descriptor(), message.encode_to_vec().as_slice())
+        .expect("a message round-trips through its own descriptor");
+    columns
+        .iter()
+        .map(|column| {
+            let value = match keys.iter().find(|(name, _)| *name == column.column) {
+                Some((_, key)) => CursorValue::Text((*key).to_owned()),
+                None => reflect_value(&dynamic, column.field_path, column.kind, &format_timestamp),
+            };
+            CursorEntry {
+                column: column.column.to_owned(),
+                value,
+            }
+        })
+        .collect()
+}
+
+/// Reflect a column value off a (possibly nested) `field_path`, coercing it into the
+/// [`CursorValue`] variant `kind` names. An absent field folds to the variant's
+/// default.
+fn reflect_value<F>(
+    message: &DynamicMessage,
+    field_path: &str,
+    kind: CursorKind,
+    format_timestamp: &F,
+) -> CursorValue
+where
+    F: Fn(i64, i32) -> String,
+{
+    let resolved = resolve_path(message, field_path);
+    match kind {
+        CursorKind::Bool => CursorValue::Bool(match resolved {
+            Some((_, Value::Bool(boolean))) => boolean,
+            _ => false,
+        }),
+        CursorKind::Int => {
+            CursorValue::Int(resolved.and_then(|(_, value)| as_i64(&value)).unwrap_or(0))
+        }
+        CursorKind::Double => CursorValue::Double(
+            resolved
+                .and_then(|(_, value)| as_f64(&value))
+                .unwrap_or(0.0),
+        ),
+        CursorKind::Text => CursorValue::Text(match resolved {
+            Some((descriptor, value)) => text_value(&descriptor, &value, format_timestamp),
+            None => String::new(),
+        }),
+    }
+}
+
+/// A proto integer value widened to `i64`, covering the signed and unsigned 32/64-bit
+/// kinds; a `u64` past `i64::MAX` wraps, the same narrowing the SQL bind applies.
+fn as_i64(value: &Value) -> Option<i64> {
+    match value {
+        Value::I32(int) => Some(i64::from(*int)),
+        Value::I64(int) => Some(*int),
+        Value::U32(uint) => Some(i64::from(*uint)),
+        Value::U64(uint) => Some(*uint as i64),
+        _ => None,
+    }
+}
+
+/// A proto floating-point value widened to `f64`.
+fn as_f64(value: &Value) -> Option<f64> {
+    match value {
+        Value::F32(float) => Some(f64::from(*float)),
+        Value::F64(float) => Some(*float),
+        _ => None,
+    }
+}
+
+/// Render a [`Text`](CursorValue::Text) column: a string verbatim, a proto enum as
+/// its value name (an unknown number falls back to its decimal text), and a
+/// `google.protobuf.Timestamp` through `format_timestamp`.
+fn text_value<F>(descriptor: &FieldDescriptor, value: &Value, format_timestamp: &F) -> String
+where
+    F: Fn(i64, i32) -> String,
+{
+    match value {
+        Value::String(string) => string.clone(),
+        Value::EnumNumber(number) => match descriptor.kind() {
+            Kind::Enum(enum_descriptor) => enum_descriptor
+                .get_value(*number)
+                .map(|value| value.name().to_owned())
+                .unwrap_or_else(|| number.to_string()),
+            _ => number.to_string(),
+        },
+        Value::Message(message)
+            if message.descriptor().full_name() == "google.protobuf.Timestamp" =>
+        {
+            let seconds = message
+                .get_field_by_name("seconds")
+                .and_then(|value| value.as_i64())
+                .unwrap_or(0);
+            let nanos = message
+                .get_field_by_name("nanos")
+                .and_then(|value| value.as_i32())
+                .unwrap_or(0);
+            format_timestamp(seconds, nanos)
+        }
+        _ => String::new(),
+    }
+}
+
+/// Walk a dotted `field_path` through `message`, descending one singular message per
+/// non-leaf segment. Returns the leaf's descriptor and value, or `None` when a
+/// message along the path (or the leaf) is unset or the path names no field.
+fn resolve_path(message: &DynamicMessage, field_path: &str) -> Option<(FieldDescriptor, Value)> {
+    let segments: Vec<&str> = field_path.split('.').collect();
+    resolve_segments(message, &segments)
+}
+
+/// The recursive worker behind [`resolve_path`], threading the remaining path
+/// segments down through nested messages.
+fn resolve_segments(
+    message: &DynamicMessage,
+    segments: &[&str],
+) -> Option<(FieldDescriptor, Value)> {
+    let (segment, rest) = segments.split_first()?;
+    let field = message.descriptor().get_field_by_name(segment)?;
+    if rest.is_empty() {
+        // A singular message leaf has presence; an unset one reads as absent.
+        if is_singular_message(&field) && !message.has_field(&field) {
+            return None;
+        }
+        return Some((field.clone(), message.get_field(&field).into_owned()));
+    }
+    // An interior segment must descend through a present singular message.
+    if !is_singular_message(&field) || !message.has_field(&field) {
+        return None;
+    }
+    let value = message.get_field(&field);
+    let submessage = value.as_message()?;
+    resolve_segments(submessage, rest)
+}
+
+/// Whether `field` is a singular message field — the only kind with proto3 presence,
+/// so the only kind a path can find unset.
+fn is_singular_message(field: &FieldDescriptor) -> bool {
+    matches!(field.kind(), Kind::Message(_)) && !field.is_list() && !field.is_map()
 }
 
 /// A cursor page token: the last row's ordered key values, in `ORDER BY` clause
@@ -570,6 +774,124 @@ mod tests {
         let encoded = PageToken::encode(token.cursor.clone(), token.request_checksum);
         let decoded: PageToken = decode_page_token(&encoded).expect("round-trips");
         assert_eq!(decoded, token);
+    }
+
+    /// Builds a `Site` fixture — a string, a nested double, and a timestamp — for the
+    /// reflective encoder.
+    fn site(json: &str) -> DynamicMessage {
+        test_fixtures::from_json("einride.example.freight.v1.Site", json)
+            .expect("Site fixture builds")
+    }
+
+    #[test]
+    fn cursor_entries_reflects_each_kind_and_keys() {
+        // The encoder reads a string verbatim, a nested double by path, and a
+        // timestamp through the injected formatter; a key column takes its value from
+        // `keys` rather than the message.
+        let row = site(
+            r#"{
+                "name": "shippers/acme/sites/dock-1",
+                "displayName": "Oslo Dock",
+                "latLng": {"latitude": 59.91, "longitude": 10.75},
+                "createTime": "2024-03-15T11:34:56Z"
+            }"#,
+        );
+        let columns = [
+            CursorColumn {
+                column: "display_name",
+                field_path: "display_name",
+                kind: CursorKind::Text,
+            },
+            CursorColumn {
+                column: "latitude",
+                field_path: "lat_lng.latitude",
+                kind: CursorKind::Double,
+            },
+            CursorColumn {
+                column: "create_time",
+                field_path: "create_time",
+                kind: CursorKind::Text,
+            },
+            CursorColumn {
+                column: "shipper",
+                field_path: "shipper",
+                kind: CursorKind::Text,
+            },
+            CursorColumn {
+                column: "site",
+                field_path: "site",
+                kind: CursorKind::Text,
+            },
+        ];
+        let keys = [("shipper", "acme"), ("site", "dock-1")];
+
+        let entries = cursor_entries(&row, &columns, &keys, |seconds, _nanos| {
+            format!("ts:{seconds}")
+        });
+
+        assert_eq!(
+            entries,
+            vec![
+                entry("display_name", CursorValue::Text("Oslo Dock".to_owned())),
+                entry("latitude", CursorValue::Double(59.91)),
+                entry("create_time", CursorValue::Text("ts:1710502496".to_owned())),
+                entry("shipper", CursorValue::Text("acme".to_owned())),
+                entry("site", CursorValue::Text("dock-1".to_owned())),
+            ],
+        );
+    }
+
+    #[test]
+    fn cursor_entries_reads_a_proto_enum_as_its_value_name() {
+        // A Text column over a proto enum field rides as the enum value *name*,
+        // matching how the store sorts enums.
+        let message = test_fixtures::from_json(
+            "einride.example.syntax.v1.Message",
+            r#"{"enum": "ENUM_ONE"}"#,
+        )
+        .expect("syntax Message fixture builds");
+        let columns = [CursorColumn {
+            column: "enum",
+            field_path: "enum",
+            kind: CursorKind::Text,
+        }];
+
+        let entries = cursor_entries(&message, &columns, &[], |seconds, _| seconds.to_string());
+
+        assert_eq!(
+            entries,
+            vec![entry("enum", CursorValue::Text("ENUM_ONE".to_owned()))]
+        );
+    }
+
+    #[test]
+    fn cursor_entries_absent_field_folds_to_the_variant_default() {
+        // A message with no `create_time` and no `lat_lng` yields the variant
+        // defaults — an empty string and a zero — matching the non-null columns the
+        // store writes for set rows.
+        let row = site(r#"{"name": "shippers/acme/sites/dock-1"}"#);
+        let columns = [
+            CursorColumn {
+                column: "create_time",
+                field_path: "create_time",
+                kind: CursorKind::Text,
+            },
+            CursorColumn {
+                column: "latitude",
+                field_path: "lat_lng.latitude",
+                kind: CursorKind::Double,
+            },
+        ];
+
+        let entries = cursor_entries(&row, &columns, &[], |seconds, _| format!("ts:{seconds}"));
+
+        assert_eq!(
+            entries,
+            vec![
+                entry("create_time", CursorValue::Text(String::new())),
+                entry("latitude", CursorValue::Double(0.0)),
+            ],
+        );
     }
 
     #[test]

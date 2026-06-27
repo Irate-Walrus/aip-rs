@@ -11,7 +11,7 @@ use aip_filtering::{function, Declarations, Overload, Type};
 use aip_ordering::OrderBy;
 use aip_sql::{
     transpile_filter, transpile_order_by, Dialect, Direction, Order, Predicate, Query, Schema,
-    Sqlite, Value,
+    SeekColumn, Sqlite, Value,
 };
 
 /// The enum type both the `category` field and its bare value names share.
@@ -625,10 +625,26 @@ fn transpile_order_by_returns_cursor_columns_with_types_and_key_tie_break() {
     assert_eq!(
         columns,
         vec![
-            ("display_name".to_owned(), Type::String),
-            ("size".to_owned(), Type::Int),
-            ("shipper".to_owned(), Type::String),
-            ("site".to_owned(), Type::String),
+            SeekColumn {
+                column: "display_name".to_owned(),
+                field_path: "display_name".to_owned(),
+                ty: Type::String,
+            },
+            SeekColumn {
+                column: "size".to_owned(),
+                field_path: "size".to_owned(),
+                ty: Type::Int,
+            },
+            SeekColumn {
+                column: "shipper".to_owned(),
+                field_path: "shipper".to_owned(),
+                ty: Type::String,
+            },
+            SeekColumn {
+                column: "site".to_owned(),
+                field_path: "site".to_owned(),
+                ty: Type::String,
+            },
         ],
     );
     assert_eq!(
