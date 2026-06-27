@@ -34,4 +34,4 @@ When you implement (or extend) a feature crate as part of an issue:
 See [`docs/adr/0006-example-freight-server.md`](docs/adr/0006-example-freight-server.md)
 for why the demo exists and how it is meant to evolve.
 
-Always use the /ponytail ultra skill including in inline code documentation.
+Always use the /caveman skill including in inline code documentation.
