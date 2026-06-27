@@ -482,7 +482,7 @@ impl FreightService for FreightServer {
         // the schema maps it, so transpilation can only fail on an allow-list/schema
         // drift, an internal inconsistency rather than bad input — which `aip-sql`'s
         // `From<Error>` maps to `INTERNAL`, so a bare `?` carries the right fault.
-        let order = aip::sql::transpile_order_by(&order_by, &schema)?;
+        let (_cursor_columns, order) = aip::sql::transpile_order_by(&order_by, &schema, &["name"])?;
 
         // Overfetch probe: fetch one row past the page (`page.fetch_limit()`) at the
         // page offset, both unsigned off `Page` — the forged-token clamp and the
@@ -599,7 +599,8 @@ impl FreightService for FreightServer {
         // empty `order_by` transpiles to exactly the `[name ASC]` tie-break, so
         // this leans on the same always-on tie-break `ListSites` does rather than
         // hand-spelling the order.
-        let order = aip::sql::transpile_order_by(&aip::ordering::OrderBy::default(), &schema)?;
+        let (_cursor_columns, order) =
+            aip::sql::transpile_order_by(&aip::ordering::OrderBy::default(), &schema, &["name"])?;
         // The same overfetch probe as `ListSites`: fetch `fetch_limit()` rows at the
         // unsigned page offset, then `split_overfetch` truncates the probe row and
         // mints the `next_page_token` — no integer casts in the handler.
