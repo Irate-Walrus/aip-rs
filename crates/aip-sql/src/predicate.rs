@@ -221,6 +221,50 @@ impl Predicate {
         }
     }
 
+    /// A direction-aware keyset cursor seek: the comparison selecting the rows
+    /// strictly after the cursor under a multi-column ordering. Each item is a seek
+    /// column, its descending flag, and the cursor value, in `ORDER BY` priority
+    /// order.
+    ///
+    /// All-ascending collapses to the efficient row-value comparison
+    /// [`tuple_gt`](Predicate::tuple_gt). With any descending column it expands to
+    /// the lexicographic OR-of-ANDs — each column `>` when ascending and `<` when
+    /// descending, under equality on the columns before it — so paging is correct in
+    /// either direction. Empty `items` is the always-true empty conjunction.
+    pub fn keyset_seek(items: impl IntoIterator<Item = (impl Into<String>, bool, Value)>) -> Self {
+        let items: Vec<(String, bool, Value)> = items
+            .into_iter()
+            .map(|(column, desc, value)| (column.into(), desc, value))
+            .collect();
+        if items.is_empty() {
+            return Predicate::all([]);
+        }
+        if items.iter().all(|(_, desc, _)| !desc) {
+            let (columns, values): (Vec<String>, Vec<Value>) = items
+                .into_iter()
+                .map(|(column, _, value)| (column, value))
+                .unzip();
+            return Predicate::tuple_gt(columns, values);
+        }
+        // Lexicographic OR-of-ANDs: each branch is equality on every earlier column
+        // and a strict comparison on this one, oriented by its sort direction.
+        let branches = (0..items.len()).map(|i| {
+            let mut conjuncts: Vec<Predicate> = items[..i]
+                .iter()
+                .map(|(column, _, value)| Predicate::eq(column.clone(), value.clone()))
+                .collect();
+            let (column, desc, value) = &items[i];
+            let op = if *desc { CmpOp::Lt } else { CmpOp::Gt };
+            conjuncts.push(Predicate::Compare {
+                column: Column::Plain(column.clone()),
+                op,
+                value: value.clone(),
+            });
+            Predicate::all(conjuncts)
+        });
+        Predicate::any(branches)
+    }
+
     /// A verbatim boolean SQL fragment — the escape hatch for a server predicate
     /// the typed builders don't cover. `sql` must carry no bind placeholders (it
     /// does not participate in the shared numbering); anything needing a bound

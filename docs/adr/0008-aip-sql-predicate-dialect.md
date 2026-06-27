@@ -226,3 +226,32 @@ that depends on both crates — `aip-sql` gains no dependency on `aip-pagination
 The parameterize-never-interpolate and executor-agnostic invariants hold
 throughout: every change is either a bound comparison or an allowlisted-column
 order term.
+
+## Amendment: direction-aware keyset seek (`keyset_seek`)
+
+The ADR-0016 amendment above rejected the lexicographic OR-of-ANDs in favour of a
+single row-value `tuple_gt`. That seek is `>` on every column, so it only resumes a
+page correctly when every order column sorts **ascending**: a descending `order_by`
+pages correctly on the first page, then the `>` seeks the wrong direction. A new
+hard requirement — descending and mixed-direction `order_by` must page correctly —
+overrides that rejection.
+
+**Decision.** Add `Predicate::keyset_seek(items)`, taking decoupled
+`(column, desc, value)` triples (no coupling to the ordering type). All-ascending
+collapses to `tuple_gt` — the efficient row-value form is unchanged, so the only
+queries that pay for the expansion are the ones that need it. With any descending
+column it expands to the lexicographic OR-of-ANDs: one branch per column, equality
+on every earlier column and a strict comparison on this one — `>` ascending, `<`
+descending. It composes the existing `Compare` / `All` / `Any` arms, so no
+**Dialect** arm changes; `AND` binds tighter than `OR`, so the branches render
+without parens and the whole seek is parenthesized by the renderer when it sits
+under a server's scope conjunction.
+
+**Consequences.** `tuple_gt` stays the public builder for an all-ascending composite
+cursor; `keyset_seek` is the direction-aware builder a handler uses when an
+`order_by` may carry a descending column. New goldens pin both the all-ascending
+collapse and the OR-of-ANDs expansion, including the parenthesization under a scope.
+The "worse optimizer plans" cost noted in the ADR-0016 amendment is real but paid
+only by descending queries; correctness for those queries is the higher priority.
+Nullable sortable columns are still out of scope — the seek assumes each order
+column is non-null.

@@ -113,3 +113,24 @@ freight tests that hard-delete a **Shipper** without first clearing its **Sites*
 now rely on the cascade rather than asserting orphans. As freight is the sole
 consumer of the superseded scoping/paging surfaces, the old offset paging and
 `scope_to_parent` usage are deleted here, not kept behind a flag.
+
+## Amendment: correct descending and mixed-direction paging
+
+The cursor paging above seeked with a single ascending row-value comparison, so a
+descending `order_by` paged correctly only on the first page; the second page
+seeked the wrong direction. That is fixed here.
+
+`ListSites` routes its cursor through `Predicate::keyset_seek` (ADR-0008
+amendment), which collapses to the efficient row-value comparison when every order
+column is ascending and expands to the lexicographic disjunction — each column `>`
+ascending, `<` descending — when any column is descending. `ListShippers` and
+`ListShipments` order only by the ascending key, so they keep the row-value form
+unchanged; only `ListSites`, which accepts an `order_by`, can take the descending
+path.
+
+**Consequences.** New freight tests page a descending and a mixed-direction
+`order_by` across multiple pages. The README pagination note and `grpcurl` flows
+gain a descending-paging example. Nullable sortable columns remain out of scope —
+the seek still assumes each order column is non-null. `ListSites`' `skip` field
+stays unapplied: the cursor token supersedes an offset for continuation, so honoring
+`skip` is deferred.

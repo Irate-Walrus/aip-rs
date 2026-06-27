@@ -233,7 +233,7 @@ impl FreightService for FreightServer {
             &aip::sql::Schema::builder().build(),
             ShipperResourceName::KEY_COLUMNS,
         )?;
-        let seek = cursor_seek(page.cursor(), &cursor_columns)?;
+        let seek = cursor_seek(page.cursor(), &cursor_columns, &order)?;
         // Soft-deleted shippers are dropped in SQL unless `show_deleted` was set;
         // `show_deleted` rides the request checksum, so flipping it mid-pagination
         // rejects the stale token. The keyset seek resumes past the last row.
@@ -506,7 +506,7 @@ impl FreightService for FreightServer {
         // decoded cursor into the keyset seek.
         let (cursor_columns, order) =
             aip::sql::transpile_order_by(&order_by, &schema, SiteResourceName::KEY_COLUMNS)?;
-        let seek = cursor_seek(page.cursor(), &cursor_columns)?;
+        let seek = cursor_seek(page.cursor(), &cursor_columns, &order)?;
 
         // Compose the server's own predicates with the user filter: one equality per
         // concrete parent variable (omitted per wildcard), the soft-delete filter,
@@ -643,7 +643,7 @@ impl FreightService for FreightServer {
             &schema,
             ShipmentResourceName::KEY_COLUMNS,
         )?;
-        let seek = cursor_seek(page.cursor(), &cursor_columns)?;
+        let seek = cursor_seek(page.cursor(), &cursor_columns, &order)?;
         let predicate = scoped_predicate(&req.parent, user_filter, seek)?;
 
         // Fetch one row past the page; the seek is in the predicate. `split_overfetch`
@@ -891,35 +891,41 @@ fn scoped_predicate(
 /// stale token, so it is `INVALID_ARGUMENT`. This is the one boundary that depends
 /// on both the pagination and SQL crates.
 ///
-/// The seek is a single ascending row-value comparison, so it assumes every order
-/// column sorts ascending and is non-null: a descending `order_by` paginates
-/// correctly only on the first page, and the demo's seeds keep the sortable columns
-/// non-null. Mixed-direction or nullable keyset paging needs a richer seek than the
-/// store offers.
+/// The seek is direction-aware: each column is compared in its own `order_by`
+/// direction (the parallel `orders` supply it), so descending and mixed-direction
+/// orderings page correctly, not just the first page. It still assumes each order
+/// column is non-null — the demo's seeds keep the sortable columns non-null;
+/// nullable keyset paging needs a richer seek than the store offers.
 fn cursor_seek(
     cursor: Option<&[CursorEntry]>,
     columns: &aip::sql::CursorColumns,
+    orders: &[aip::sql::Order],
 ) -> Result<Option<aip::sql::Predicate>, Status> {
     let Some(cursor) = cursor else {
         return Ok(None);
     };
-    if cursor.len() != columns.len() {
+    // `columns` and `orders` are the same seek key built together, so they stay the
+    // same length; checking it here keeps the triple-zip below from silently dropping
+    // a trailing key column if that ever stops holding.
+    if cursor.len() != columns.len() || orders.len() != columns.len() {
         return Err(Status::invalid_argument(
             "page token does not match the ordering",
         ));
     }
-    let mut values = Vec::with_capacity(cursor.len());
-    for (entry, (column, ty)) in cursor.iter().zip(columns) {
+    let mut items = Vec::with_capacity(cursor.len());
+    for ((entry, (column, ty)), order) in cursor.iter().zip(columns).zip(orders) {
         if &entry.column != column || !cursor_value_matches(&entry.value, ty) {
             return Err(Status::invalid_argument(
                 "page token does not match the ordering",
             ));
         }
-        values.push(cursor_value_to_sql(&entry.value));
+        items.push((
+            column.clone(),
+            order.desc,
+            cursor_value_to_sql(&entry.value),
+        ));
     }
-    let seek =
-        aip::sql::Predicate::tuple_gt(columns.iter().map(|(column, _)| column.clone()), values);
-    Ok(Some(seek))
+    Ok(Some(aip::sql::Predicate::keyset_seek(items)))
 }
 
 /// Whether a cursor value's variant matches a column's declared type. Key columns
@@ -1625,6 +1631,67 @@ mod tests {
             .await
             .expect_err("changing order_by mid-pagination invalidates the token");
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    /// Pages through every site under `PARENT` with the given `order_by` and
+    /// `page_size`, returning the display names in the order the server produced them
+    /// across pages.
+    async fn page_through_sites(
+        server: &FreightServer,
+        order_by: &str,
+        page_size: i32,
+    ) -> Vec<String> {
+        let mut collected = Vec::new();
+        let mut page_token = String::new();
+        loop {
+            let resp = server
+                .list_sites(Request::new(ListSitesRequest {
+                    parent: PARENT.to_owned(),
+                    order_by: order_by.to_owned(),
+                    page_size,
+                    page_token: page_token.clone(),
+                    ..Default::default()
+                }))
+                .await
+                .expect("list_sites page succeeds")
+                .into_inner();
+            collected.extend(resp.sites.into_iter().map(|s| s.display_name));
+            page_token = resp.next_page_token;
+            if page_token.is_empty() {
+                break;
+            }
+        }
+        collected
+    }
+
+    #[tokio::test]
+    async fn paginates_a_descending_order_across_pages() {
+        let server = FreightServer::default();
+        for name in ["a", "b", "c", "d", "e"] {
+            seed_site(&server, name, 0.0).await;
+        }
+        // A descending sort must page past the first page: the keyset seek compares
+        // the descending column with `<`, so the cursor resumes downward.
+        assert_eq!(
+            page_through_sites(&server, "display_name desc", 2).await,
+            ["e", "d", "c", "b", "a"],
+        );
+    }
+
+    #[tokio::test]
+    async fn paginates_a_mixed_direction_order_across_pages() {
+        let server = FreightServer::default();
+        // Three sites share a latitude so the descending secondary key decides their
+        // order; one sits at a higher latitude.
+        seed_site(&server, "a", 0.0).await;
+        seed_site(&server, "b", 0.0).await;
+        seed_site(&server, "c", 0.0).await;
+        seed_site(&server, "d", 1.0).await;
+        // latitude ascending, display_name descending within the tie: c, b, a, then d.
+        assert_eq!(
+            page_through_sites(&server, "lat_lng.latitude, display_name desc", 2).await,
+            ["c", "b", "a", "d"],
+        );
     }
 
     // The AIP-158 size-resolution rules (negative rejected, zero → default,
