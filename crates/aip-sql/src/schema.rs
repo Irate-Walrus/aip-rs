@@ -37,6 +37,9 @@ pub struct Schema {
     columns: HashMap<String, String>,
     /// The subset of [`columns`](Self::columns) keys an `order_by` may sort on.
     sortable: HashSet<String>,
+    /// SQL column → its declared [`Type`], for columns derived from
+    /// [`Declarations`]. Feeds the cursor page token's per-column type check.
+    types: HashMap<String, Type>,
 }
 
 impl Schema {
@@ -85,6 +88,7 @@ impl Schema {
         let mut builder = SchemaBuilder::default();
         for (path, ty) in declarations.field_paths() {
             builder.columns.insert(path.to_string(), path.to_string());
+            builder.types.insert(path.to_string(), ty.clone());
             if is_sortable_type(ty) {
                 builder.sortable.insert(path.to_string());
             }
@@ -98,6 +102,14 @@ impl Schema {
     /// [`sortable_paths`](Self::sortable_paths), applied upstream.
     pub(crate) fn column(&self, identifier: &str) -> Option<&str> {
         self.columns.get(identifier).map(String::as_str)
+    }
+
+    /// The declared [`Type`] of a SQL `column`, for columns derived from
+    /// [`Declarations`]. The cursor page token decoder checks each cursor value's
+    /// variant against this; a hand-built or key column returns `None` (key
+    /// columns are uniformly text by AIP-122).
+    pub fn column_type(&self, column: &str) -> Option<&Type> {
+        self.types.get(column)
     }
 
     /// The field paths an `order_by` is allowed to sort on, sorted for a stable
@@ -138,6 +150,9 @@ fn is_sortable_type(ty: &Type) -> bool {
 pub struct SchemaBuilder {
     columns: HashMap<String, String>,
     sortable: HashSet<String>,
+    /// Declared type per filter path, seeded by [`Schema::for_declarations`];
+    /// resolved to a column-keyed map in [`build`](Self::build).
+    types: HashMap<String, Type>,
 }
 
 impl SchemaBuilder {
@@ -173,9 +188,18 @@ impl SchemaBuilder {
 
     /// Finalize the schema.
     pub fn build(self) -> Schema {
+        // Re-key the per-path types onto their SQL columns, so a renamed path
+        // (`lat_lng.latitude` → `latitude`) carries its type to the column.
+        let mut types = HashMap::new();
+        for (path, column) in &self.columns {
+            if let Some(ty) = self.types.get(path) {
+                types.insert(column.clone(), ty.clone());
+            }
+        }
         Schema {
             columns: self.columns,
             sortable: self.sortable,
+            types,
         }
     }
 }

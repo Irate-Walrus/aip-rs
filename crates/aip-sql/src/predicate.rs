@@ -169,6 +169,15 @@ pub enum Predicate {
         /// render time, never spliced into SQL text.
         parent: String,
     },
+    /// A keyset cursor seek: the row-value comparison `(col_a, col_b, …) > (?, …)`,
+    /// binding each value positionally to its column. Seeks past the last row of a
+    /// page (a composite-key cursor), portable across SQLite and Postgres.
+    TupleGt {
+        /// The ordered seek columns.
+        columns: Vec<String>,
+        /// The last row's values, one per column, in the same order.
+        values: Vec<Value>,
+    },
     /// A verbatim boolean SQL fragment — the escape hatch for a server predicate
     /// the typed builders don't cover. It carries no bind values (so it never
     /// perturbs the shared placeholder numbering) and is rendered as-is; because
@@ -223,6 +232,19 @@ impl Predicate {
         }
     }
 
+    /// A keyset cursor seek (`(col_a, col_b, …) > (?, …)`), binding each value
+    /// positionally to its column. The columns are the ordered seek key, the
+    /// values the last row of the current page.
+    pub fn tuple_gt(
+        columns: impl IntoIterator<Item = impl Into<String>>,
+        values: impl IntoIterator<Item = Value>,
+    ) -> Self {
+        Predicate::TupleGt {
+            columns: columns.into_iter().map(Into::into).collect(),
+            values: values.into_iter().collect(),
+        }
+    }
+
     /// A verbatim boolean SQL fragment — the escape hatch for a server predicate
     /// the typed builders don't cover. `sql` must carry no bind placeholders (it
     /// does not participate in the shared numbering); anything needing a bound
@@ -244,7 +266,8 @@ impl Predicate {
             Predicate::Compare { .. }
             | Predicate::Has { .. }
             | Predicate::IsNull(_)
-            | Predicate::Scope { .. } => 4,
+            | Predicate::Scope { .. }
+            | Predicate::TupleGt { .. } => 4,
             Predicate::Not(_) => 3,
             Predicate::All(_) => 2,
             Predicate::Any(_) => 1,

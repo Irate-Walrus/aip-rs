@@ -387,10 +387,13 @@ fn unknown_identifier_is_rejected() {
     }
 }
 
-/// Parse an `order_by` string and transpile it against [`schema`].
+/// Parse an `order_by` string and transpile it against [`schema`], with `name`
+/// as the key tie-break; returns just the SQL `ORDER BY` items.
 fn order(order_by: &str) -> Vec<Order> {
     let parsed: OrderBy = order_by.parse().expect("order_by parses");
-    transpile_order_by(&parsed, &schema()).expect("order_by transpiles")
+    let (_columns, orders) =
+        transpile_order_by(&parsed, &schema(), &["name"]).expect("order_by transpiles");
+    orders
 }
 
 #[test]
@@ -454,11 +457,93 @@ fn order_by_unmapped_path_is_rejected() {
     // A path the schema does not map is rejected, the same gate the filter
     // transpiler applies to an unmapped identifier.
     let parsed: OrderBy = "ghost".parse().expect("order_by parses");
-    let err = transpile_order_by(&parsed, &schema()).expect_err("unmapped path");
+    let err = transpile_order_by(&parsed, &schema(), &["name"]).expect_err("unmapped path");
     match err {
         aip_sql::Error::UnknownIdentifier(path) => assert_eq!(path, "ghost"),
         other => panic!("expected UnknownIdentifier, got {other:?}"),
     }
+}
+
+#[test]
+fn tuple_gt_renders_a_row_value_keyset_seek() {
+    // The cursor seek: a row-value comparison over the ordered seek columns, each
+    // value bound in column order so the placeholders stay left-to-right.
+    let seek = Predicate::tuple_gt(
+        ["display_name", "shipper", "site"],
+        [
+            Value::Text("Oslo Dock".to_owned()),
+            Value::Text("acme".to_owned()),
+            Value::Text("dock-1".to_owned()),
+        ],
+    );
+    let (sql, binds) = Sqlite.render(&seek);
+    assert_eq!(sql, "(display_name, shipper, site) > (?1, ?2, ?3)");
+    assert_eq!(
+        binds,
+        vec![
+            Value::Text("Oslo Dock".to_owned()),
+            Value::Text("acme".to_owned()),
+            Value::Text("dock-1".to_owned()),
+        ],
+    );
+}
+
+#[test]
+fn tuple_gt_composes_under_and_keeping_one_placeholder_pass() {
+    // Composed with a scope equality and a soft-delete test, the whole predicate
+    // numbers placeholders in one left-to-right pass; the seek is an atom (no
+    // parens needed for precedence, only the row-value's own parens).
+    let predicate = Predicate::all([
+        Predicate::eq("shipper", Value::Text("acme".to_owned())),
+        Predicate::is_null("delete_time"),
+        Predicate::tuple_gt(
+            ["display_name", "site"],
+            [
+                Value::Text("Oslo Dock".to_owned()),
+                Value::Text("dock-1".to_owned()),
+            ],
+        ),
+    ]);
+    let (sql, binds) = Sqlite.render(&predicate);
+    assert_eq!(
+        sql,
+        "shipper = ?1 AND delete_time IS NULL AND (display_name, site) > (?2, ?3)",
+    );
+    assert_eq!(binds.len(), 3);
+}
+
+#[test]
+fn transpile_order_by_returns_cursor_columns_with_types_and_key_tie_break() {
+    // Against a declared schema, the seek list pairs each ordered column with its
+    // declared Type and appends the key columns (uniformly text) as the tie-break.
+    let declarations = Declarations::builder()
+        .ident("display_name", Type::String)
+        .ident("size", Type::Int)
+        .build();
+    let schema = Schema::for_declarations(&declarations).build();
+
+    let parsed: OrderBy = "display_name, size desc".parse().expect("order_by parses");
+    let (columns, orders) =
+        transpile_order_by(&parsed, &schema, &["shipper", "site"]).expect("transpiles");
+
+    assert_eq!(
+        columns,
+        vec![
+            ("display_name".to_owned(), Type::String),
+            ("size".to_owned(), Type::Int),
+            ("shipper".to_owned(), Type::String),
+            ("site".to_owned(), Type::String),
+        ],
+    );
+    assert_eq!(
+        orders,
+        vec![
+            Order::asc("display_name"),
+            Order::desc("size"),
+            Order::asc("shipper"),
+            Order::asc("site"),
+        ],
+    );
 }
 
 // ----- The unified `Query`: WHERE + ORDER BY + LIMIT/OFFSET in one render -----
