@@ -27,12 +27,14 @@
 //! `TryFrom<String>` (same `Error`, for `.try_into()` and generic bounds), and
 //! `From<Self> for String` (moving out the stored name). The stored name is
 //! redundant with the variables, so `Eq` / `Hash` are unchanged. The wrapper also
-//! implements `Ord` / `PartialOrd` **over that stored name** — string order, the
-//! same a `BTreeMap<String, _>` or SQL `ORDER BY name` gives — not a field-tuple
-//! derive (the two diverge when one variable value is a prefix of another). The compiled
-//! [`Pattern`] is built once per wrapper in a `LazyLock`, shared by `parse` and
-//! `Display`. The generator does **not** reimplement the runtime; the emitted
-//! code calls into it.
+//! implements `Ord` / `PartialOrd` **over the variable-tuple** — the key-column
+//! order — not the stored-name string (the two diverge when one variable value is
+//! a prefix of another). It exposes that tuple as `key_values`, its variable names
+//! as the `KEY_COLUMNS` const, and the compiled `pattern()` — the key surface the
+//! typed-key store reads. The compiled
+//! [`Pattern`] is built once per wrapper in a `LazyLock`, shared by `parse`,
+//! `pattern`, and `Display`. The generator does **not** reimplement the runtime;
+//! the emitted code calls into it.
 //!
 //! A multi-segment wrapper also gets a [`parent`] accessor returning the parent
 //! pattern's typed wrapper when that parent pattern is generated in the same
@@ -585,6 +587,31 @@ fn write_resource_name(
     ));
     line("");
 
+    // `KEY_COLUMNS` — the pattern's variable names, verbatim, in order. The store
+    // keys its table on these and names its key columns the same.
+    let key_columns = variables
+        .iter()
+        .map(|var| format!("\"{var}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    line("    /// The key columns — the pattern variables, in order.");
+    line(&format!(
+        "    pub const KEY_COLUMNS: &'static [&'static str] = &[{key_columns}];"
+    ));
+    line("");
+
+    // `pattern()` — the compiled pattern. A handler scopes a list from its
+    // per-variable wildcard bindings (`match_with_wildcards`).
+    line("    /// The compiled resource-name pattern.");
+    line(&format!(
+        "    pub fn pattern() -> &'static {rn}::Pattern {{"
+    ));
+    line(&format!(
+        "        ::std::sync::LazyLock::force(&{pattern_const})"
+    ));
+    line("    }");
+    line("");
+
     // `from_parts` — the one place the canonical name is formatted. Every public
     // constructor funnels its already-valid variables through here, so the name
     // is built exactly once (per construction) and the format logic lives once.
@@ -688,6 +715,22 @@ fn write_resource_name(
     line("    /// The canonical resource name as a string slice — no allocation.");
     line("    pub fn as_str(&self) -> &str {");
     line("        &self.name");
+    line("    }");
+
+    // `key_values` — the variable values in pattern order, the row's key binds
+    // and the tuple `Ord` sorts on.
+    line("");
+    line("    /// The key column values, in pattern order.");
+    line(&format!(
+        "    pub fn key_values(&self) -> [&str; {}] {{",
+        variables.len()
+    ));
+    let key_vals = variables
+        .iter()
+        .map(|var| format!("self.{var}.as_str()"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    line(&format!("        [{key_vals}]"));
     line("    }");
 
     line("");
@@ -829,21 +872,18 @@ fn write_resource_name(
     line("    }");
     line("}");
 
-    // `Ord` / `PartialOrd` — ordered by the canonical resource name's *string*
-    // order, NOT a field-tuple derive. The two diverge when one variable value is
-    // a prefix of another: `a` vs `a-b` has `'-' < '/'`, so `…/a-b/…` sorts before
-    // `…/a/…` as strings, while a `(var, …)` tuple sorts `a` first. String order
-    // matches `BTreeMap<String, _>` and SQL `ORDER BY name`, so a wrapper-keyed
-    // map lists in the same order the demo's name-keyed map did. Consistent with
-    // the derived `Eq` (the stored name determines the variables 1:1).
+    // `Ord` / `PartialOrd` — ordered by the variable-tuple (the key columns), NOT
+    // the canonical name string. The two diverge when one value is a prefix of
+    // another: the tuple sorts `a` before `a-b`, while the name string sorts
+    // `…/a-b/…` first (`'-' 0x2D < '/' 0x2F`). Consistent with the derived `Eq`
+    // (the variables determine the stored name 1:1).
     line("");
     line(&format!("impl Ord for {struct_name} {{"));
-    line("    /// Orders by the canonical resource name string — the order a");
-    line("    /// `BTreeMap<String, _>` or SQL `ORDER BY name` produces, not the");
-    line("    /// variable-tuple order (which diverges when one value is a prefix of");
-    line("    /// another, e.g. `a` vs `a-b`).");
+    line("    /// Orders by the variable-tuple — the key-column order — not the");
+    line("    /// canonical name string (which diverges when one value is a prefix");
+    line("    /// of another, e.g. `a` vs `a-b`).");
     line("    fn cmp(&self, other: &Self) -> ::std::cmp::Ordering {");
-    line("        self.name.cmp(&other.name)");
+    line("        self.key_values().cmp(&other.key_values())");
     line("    }");
     line("}");
     line("");

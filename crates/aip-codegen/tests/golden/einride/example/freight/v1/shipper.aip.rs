@@ -24,6 +24,14 @@ impl ShipperResourceName {
     /// The resource name pattern, `shippers/{shipper}`.
     pub const PATTERN: &'static str = "shippers/{shipper}";
 
+    /// The key columns — the pattern variables, in order.
+    pub const KEY_COLUMNS: &'static [&'static str] = &["shipper"];
+
+    /// The compiled resource-name pattern.
+    pub fn pattern() -> &'static ::aip_resourcename::Pattern {
+        ::std::sync::LazyLock::force(&SHIPPER_RESOURCE_NAME_PATTERN)
+    }
+
     /// Build from already-validated variables, formatting the canonical
     /// resource name once and storing it. Private: callers go through the
     /// validating/parsing constructors that guarantee the variables hold.
@@ -50,6 +58,11 @@ impl ShipperResourceName {
     /// The canonical resource name as a string slice — no allocation.
     pub fn as_str(&self) -> &str {
         &self.name
+    }
+
+    /// The key column values, in pattern order.
+    pub fn key_values(&self) -> [&str; 1] {
+        [self.shipper.as_str()]
     }
 
     /// Parse a resource name string into its typed variables.
@@ -98,12 +111,11 @@ impl AsRef<str> for ShipperResourceName {
 }
 
 impl Ord for ShipperResourceName {
-    /// Orders by the canonical resource name string — the order a
-    /// `BTreeMap<String, _>` or SQL `ORDER BY name` produces, not the
-    /// variable-tuple order (which diverges when one value is a prefix of
-    /// another, e.g. `a` vs `a-b`).
+    /// Orders by the variable-tuple — the key-column order — not the
+    /// canonical name string (which diverges when one value is a prefix
+    /// of another, e.g. `a` vs `a-b`).
     fn cmp(&self, other: &Self) -> ::std::cmp::Ordering {
-        self.name.cmp(&other.name)
+        self.key_values().cmp(&other.key_values())
     }
 }
 
