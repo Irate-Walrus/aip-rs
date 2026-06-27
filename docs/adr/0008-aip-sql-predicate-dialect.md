@@ -226,3 +226,67 @@ that depends on both crates — `aip-sql` gains no dependency on `aip-pagination
 The parameterize-never-interpolate and executor-agnostic invariants hold
 throughout: every change is either a bound comparison or an allowlisted-column
 order term.
+
+## Amendment: direction-aware keyset seek (`keyset_seek`)
+
+The ADR-0016 amendment above rejected the lexicographic OR-of-ANDs in favour of a
+single row-value `tuple_gt`. That seek is `>` on every column, so it only resumes a
+page correctly when every order column sorts **ascending**: a descending `order_by`
+pages correctly on the first page, then the `>` seeks the wrong direction. A new
+hard requirement — descending and mixed-direction `order_by` must page correctly —
+overrides that rejection.
+
+**Decision.** Add `Predicate::keyset_seek(items)`, taking decoupled
+`(column, Direction, value)` triples (no coupling to the ordering type), where
+`Direction` is the crate's own `Asc` / `Desc` enum rather than a bare flag.
+All-ascending collapses to `tuple_gt` — the efficient row-value form is unchanged,
+so the only queries that pay for the expansion are the ones that need it. With any
+descending column it expands to the lexicographic OR-of-ANDs: one branch per
+column, equality on every earlier column and a strict comparison on this one —
+`>` ascending, `<` descending. It composes the existing `Compare` / `All` / `Any`
+arms, so no
+**Dialect** arm changes; `AND` binds tighter than `OR`, so the branches render
+without parens and the whole seek is parenthesized by the renderer when it sits
+under a server's scope conjunction.
+
+**Consequences.** `tuple_gt` stays the public builder for an all-ascending composite
+cursor; `keyset_seek` is the direction-aware builder a handler uses when an
+`order_by` may carry a descending column. New goldens pin both the all-ascending
+collapse and the OR-of-ANDs expansion, including the parenthesization under a scope.
+The "worse optimizer plans" cost noted in the ADR-0016 amendment is real but paid
+only by descending queries; correctness for those queries is the higher priority.
+Nullable sortable columns are still out of scope — the seek assumes each order
+column is non-null.
+
+## Amendment: one source of truth for the cursor encode side
+
+The ADR-0016 amendment above made `transpile_order_by` return the seek column list
+that *both* pagination sides read, so the decode validates against the same list the
+order renders from. The **encode** side stayed hand-written: each resource had its
+own builder mapping a column name to a `CursorValue` variant by hand
+(`"latitude" => Double`, `"create_time" => Text(format_timestamp(…))`). Those
+builders could pick a variant the decode would then reject — exactly the drift the
+shared list was meant to remove, left open on the write path.
+
+**Decision.** Replace the per-resource builders with one generic, reflection-driven
+encoder, and deepen the seek column so it carries what the encoder needs.
+
+- **`transpile_order_by` returns `Vec<SeekColumn>`**, where a `SeekColumn` is the SQL
+  `column`, the proto `field_path` the value is read from, and its `Type`. The
+  function already had both `field.path` and the mapped `column` in hand; it now keeps
+  both. A key tie-break column's `field_path` equals its `column` (the resource-name
+  variable). The `Type` is unchanged from the prior `(column, Type)` pair.
+- **The encoder lives in `aip-pagination`** (the leaf crate), reflecting each
+  order-by column off the row by its `field_path` and choosing the cursor variant from
+  a pagination-local `CursorKind` the handler maps the `Type` onto. A timestamp's text
+  comes from an injected formatter so it byte-matches the stored column; a proto enum
+  rides as its value name. Key columns are supplied by the handler from the typed
+  resource name. `aip-sql` gains no `prost-reflect` and no `aip-pagination`
+  dependency — it only exposes the `Type`; the `Type → CursorKind` map and the
+  `CursorValue → Value` decode both live at the freight boundary that already depends
+  on both crates.
+
+**Consequences.** The encode side now picks each variant from the same `Type` the
+decode validates against, so the two cannot drift by construction. The
+`transpile_order_by` goldens carry the new `SeekColumn` shape; behaviour is otherwise
+identical. The three hand-written resource cursor builders are deleted.

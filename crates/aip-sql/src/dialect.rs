@@ -69,17 +69,6 @@ fn write_node<D: Dialect + ?Sized>(
             sql.push_str(column);
             sql.push_str(" IS NULL");
         }
-        // A parent scope is a `LIKE` prefix: standard SQL across SQLite and
-        // Postgres, so it is rendered directly. The bound pattern escapes the
-        // parent's `LIKE` metacharacters and appends the child wildcard, so the
-        // parent matches literally and is never interpolated (ADR-0008).
-        Predicate::Scope { column, parent } => {
-            sql.push_str(column);
-            sql.push_str(" LIKE ");
-            sql.push_str(&dialect.placeholder(binds.len() + 1));
-            sql.push_str(r" ESCAPE '\'");
-            binds.push(Value::Text(format!("{}/%", escape_like(parent))));
-        }
         // A keyset cursor seek: the row-value comparison `(a, b) > (?1, ?2)`,
         // standard SQL across SQLite and Postgres. Each value binds in column
         // order, so the placeholders stay left-to-right.

@@ -148,6 +148,13 @@ ride in `Text` as their value name, matching how the store already sorts enums b
 name (ADR-0008). A handler converts a `CursorValue` to an `aip_sql::Value` at the
 freight boundary, the one place that depends on both crates.
 
+The **encode** side is generic and lives in `aip-pagination` too: one reflective
+encoder reads each seek column's value off the row by its field path and picks the
+`CursorValue` variant from the column's type, so the write side cannot drift from the
+decode that validates against that same type (ADR-0008 amendment). It stays leaf —
+`aip-pagination` reflects with `prost-reflect` but takes no `aip-sql` dependency, and
+the timestamp formatter is injected by the handler so the text byte-matches the store.
+
 ### Indexes (Item 6)
 
 One covering index per resource, for the common case only. `sites` gets

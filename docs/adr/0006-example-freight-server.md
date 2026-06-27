@@ -55,30 +55,45 @@ the unimplemented methods return `Unimplemented`.
   `TODO(aip #N)` marker rather than calling a not-yet-implemented, panicking
   API.
 
-## Amendment (ADR-0016): the Site and Shipment stores become typed-key tables
+## Amendment (ADR-0016): the freight stores become typed-key tables
 
 The typed-key store (ADR-0016) lands in freight, the proving ground for every
-primitive. The Site/Shipment stores stay in-memory SQLite (the #39 engine choice
-is unchanged); only the *row layout* and the *scoping/paging* mechanics change.
+primitive. The stores stay in-memory SQLite (the #39 engine choice is unchanged);
+the *row layout* and the *scoping/paging* mechanics change, and the **Shippers**
+move out of their in-memory keyed map into a SQL table so the child foreign keys
+have a real parent to reference.
 
 **Decision:** rework the `sites` and `shipments` schemas around the typed key
-tuple.
+tuple, and move the `shippers` keyed map into a typed-key SQL table alongside them
+in one connection.
 
+- **Shippers move into SQL.** `shippers` becomes a typed-key table (`shipper` as
+  the key column) in the same connection as `sites` and `shipments`, so the child
+  tables can declare a foreign key onto it. This supersedes the original
+  "Shippers are keyed maps (ADR-0005)" decision above: the keyed-map demonstration
+  is retired in exchange for referential integrity with no redundant storage. The
+  shipper write path is an upsert (not a delete-and-reinsert), so updating or
+  soft-deleting a shipper updates its row in place and never trips the cascade.
 - **Typed key columns, `name` dropped.** Each table's primary key is the
-  resource's **Variables** as columns in **Pattern** order (`sites` keyed on
-  `(shipper, site)`, `shipments` on `(shipper, shipment)`); the `name TEXT PRIMARY
-  KEY` column is removed. The `name` field is reconstructed on read from the key
-  columns through the generated wrapper's `Display` (ADR-0011 amendment),
-  decomposed back into binds on write.
+  resource's **Variables** as columns in **Pattern** order (`shippers` keyed on
+  `(shipper)`, `sites` on `(shipper, site)`, `shipments` on `(shipper, shipment)`);
+  the `name TEXT PRIMARY KEY` column is removed. The `name` field is reconstructed
+  on read from the key columns through the generated wrapper's `Display` (ADR-0011
+  amendment), decomposed back into binds on write.
 - **Column-per-field, no BLOB.** Each scalar field is its own typed column; small
-  repeated/map fields (`tags`, `annotations`) are JSON columns. The ADR records
-  normalized side tables as the production-correct layout for high cardinality.
-- **Foreign key with cascade; `PRAGMA foreign_keys = ON`.** Each child table
-  declares `FOREIGN KEY (parent key columns) REFERENCES parent (…) ON DELETE
-  CASCADE`, and the SQLite pool turns foreign keys on per connection (a
-  SQLite-only step; Postgres enforces them by default). The cascade is
-  hard-delete only — soft delete stays a handler policy, so soft-deleting a
-  **Shipper** leaves its **Sites**/**Shipments** visible-state untouched.
+  repeated/map fields (`tags`, `annotations`, `line_items`) are JSON columns. The
+  ADR records normalized side tables as the production-correct layout for high
+  cardinality. Timestamps ride as second-precision RFC3339 text so they sort
+  lexicographically and compare equal to the second-precision literals a filter
+  binds; server-stamped times are truncated to whole seconds to match.
+- **Foreign key with cascade; `PRAGMA foreign_keys = ON`.** `sites` and `shipments`
+  each declare `FOREIGN KEY (shipper) REFERENCES shippers(shipper) ON DELETE
+  CASCADE`, and the SQLite connection turns foreign keys on (a SQLite-only step;
+  Postgres enforces them by default). The cascade is hard-delete only — soft delete
+  stays a handler policy realized by the in-place upsert, so soft-deleting a
+  **Shipper** leaves its **Sites**/**Shipments** untouched. A `CreateSite` /
+  `CreateShipment` under a non-existent parent is rejected with `NOT_FOUND` rather
+  than a constraint failure deep in the store.
 - **Scope by omission; cursor paging.** `ListSites`/`ListShipments` scope by
   composing `Predicate::eq` per concrete parent **Variable** and omitting per
   **Wildcard** (ADR-0008 amendment, fed by `Pattern::match_with_wildcards`,
@@ -90,8 +105,32 @@ tuple.
 
 **Consequences.** `cargo run -p freight-server` and every affected RPC keep
 working; the README status table moves `BatchGetSites` to *wired* and the
-`ListSites`/`ListShipments` rows note cursor paging, and the `grpcurl` flows are
-refreshed. freight tests that hard-delete a **Shipper** without first clearing its
-**Sites** now rely on the cascade rather than asserting orphans. As freight is the
-sole consumer of the superseded scoping/paging surfaces, the old offset paging and
+`ListShippers`/`ListSites`/`ListShipments` rows note cursor paging, and the
+`grpcurl` flows are refreshed. All three list handlers move to the cursor token —
+`ListShippers` too, now seeking over the `shippers` table instead of windowing an
+in-memory map — since the cursor `PageToken` removes the offset format outright.
+freight tests that hard-delete a **Shipper** without first clearing its **Sites**
+now rely on the cascade rather than asserting orphans. As freight is the sole
+consumer of the superseded scoping/paging surfaces, the old offset paging and
 `scope_to_parent` usage are deleted here, not kept behind a flag.
+
+## Amendment: correct descending and mixed-direction paging
+
+The cursor paging above seeked with a single ascending row-value comparison, so a
+descending `order_by` paged correctly only on the first page; the second page
+seeked the wrong direction. That is fixed here.
+
+`ListSites` routes its cursor through `Predicate::keyset_seek` (ADR-0008
+amendment), which collapses to the efficient row-value comparison when every order
+column is ascending and expands to the lexicographic disjunction — each column `>`
+ascending, `<` descending — when any column is descending. `ListShippers` and
+`ListShipments` order only by the ascending key, so they keep the row-value form
+unchanged; only `ListSites`, which accepts an `order_by`, can take the descending
+path.
+
+**Consequences.** New freight tests page a descending and a mixed-direction
+`order_by` across multiple pages. The README pagination note and `grpcurl` flows
+gain a descending-paging example. Nullable sortable columns remain out of scope —
+the seek still assumes each order column is non-null. `ListSites`' `skip` field
+stays unapplied: the cursor token supersedes an offset for continuation, so honoring
+`skip` is deferred.

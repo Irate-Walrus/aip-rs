@@ -69,6 +69,24 @@ impl CmpOp {
     }
 }
 
+/// A sort direction for a keyset seek column — ascending or descending. Mirrors
+/// the `ASC` / `DESC` an `ORDER BY` renders, so a seek pages in the same order the
+/// query sorts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    /// Ascending order.
+    Asc,
+    /// Descending order.
+    Desc,
+}
+
+impl Direction {
+    /// Whether this is the descending direction.
+    pub fn is_descending(self) -> bool {
+        matches!(self, Direction::Desc)
+    }
+}
+
 /// The left side of a comparison: a plain column, or a value selected from a
 /// stored JSON `map` column by key (the AIP-160 member access `labels.env`).
 #[derive(Debug, Clone, PartialEq)]
@@ -119,7 +137,7 @@ pub enum HasTest {
 /// Build one with [`transpile_filter`](crate::transpile_filter) or the
 /// [`all`](Predicate::all) / [`any`](Predicate::any) / [`not`](Predicate::not) /
 /// [`eq`](Predicate::eq) / [`is_null`](Predicate::is_null) /
-/// [`scope_to_parent`](Predicate::scope_to_parent) / [`raw`](Predicate::raw)
+/// [`tuple_gt`](Predicate::tuple_gt) / [`raw`](Predicate::raw)
 /// constructors, then render it with [`Dialect::render`](crate::Dialect::render).
 ///
 /// Centralizing precedence and placeholder numbering here is the whole point: a
@@ -157,18 +175,6 @@ pub enum Predicate {
     /// A `column IS NULL` test, e.g. the soft-delete predicate `delete_time IS
     /// NULL` a server composes alongside a user filter.
     IsNull(String),
-    /// An AIP parent scope (`column LIKE ?n ESCAPE '\'`): a resource-name prefix
-    /// match keeping the rows under a parent. The bound pattern escapes the
-    /// parent's `LIKE` metacharacters (`%` / `_` / `\`) and appends the child
-    /// wildcard, so a parent containing `%` or `_` matches literally and is never
-    /// interpolated. Built with [`scope_to_parent`](Predicate::scope_to_parent).
-    Scope {
-        /// The resource-name column to scope (e.g. `name`).
-        column: String,
-        /// The parent resource name whose children to keep — escaped and bound at
-        /// render time, never spliced into SQL text.
-        parent: String,
-    },
     /// A keyset cursor seek: the row-value comparison `(col_a, col_b, …) > (?, …)`,
     /// binding each value positionally to its column. Seeks past the last row of a
     /// page (a composite-key cursor), portable across SQLite and Postgres.
@@ -220,18 +226,6 @@ impl Predicate {
         Predicate::IsNull(column.into())
     }
 
-    /// An AIP parent scope on a resource-name `column`: a `LIKE` prefix keeping
-    /// the rows whose name lies under `parent`. The parent's `LIKE`
-    /// metacharacters are escaped and the whole pattern is bound, so a parent
-    /// containing `%` or `_` matches literally and is never interpolated
-    /// (ADR-0008).
-    pub fn scope_to_parent(column: impl Into<String>, parent: impl Into<String>) -> Self {
-        Predicate::Scope {
-            column: column.into(),
-            parent: parent.into(),
-        }
-    }
-
     /// A keyset cursor seek (`(col_a, col_b, …) > (?, …)`), binding each value
     /// positionally to its column. The columns are the ordered seek key, the
     /// values the last row of the current page.
@@ -245,28 +239,77 @@ impl Predicate {
         }
     }
 
+    /// A direction-aware keyset cursor seek: the comparison selecting the rows
+    /// strictly after the cursor under a multi-column ordering. Each item is a seek
+    /// column, its sort [`Direction`], and the cursor value, in `ORDER BY` priority
+    /// order.
+    ///
+    /// All-ascending collapses to the efficient row-value comparison
+    /// [`tuple_gt`](Predicate::tuple_gt). With any descending column it expands to
+    /// the lexicographic OR-of-ANDs — each column `>` when ascending and `<` when
+    /// descending, under equality on the columns before it — so paging is correct in
+    /// either direction. Empty `items` is the always-true empty conjunction.
+    pub fn keyset_seek(
+        items: impl IntoIterator<Item = (impl Into<String>, Direction, Value)>,
+    ) -> Self {
+        let items: Vec<(String, Direction, Value)> = items
+            .into_iter()
+            .map(|(column, dir, value)| (column.into(), dir, value))
+            .collect();
+        if items.is_empty() {
+            return Predicate::all([]);
+        }
+        if items.iter().all(|(_, dir, _)| !dir.is_descending()) {
+            let (columns, values): (Vec<String>, Vec<Value>) = items
+                .into_iter()
+                .map(|(column, _, value)| (column, value))
+                .unzip();
+            return Predicate::tuple_gt(columns, values);
+        }
+        // Lexicographic OR-of-ANDs: each branch is equality on every earlier column
+        // and a strict comparison on this one, oriented by its sort direction.
+        let branches = (0..items.len()).map(|i| {
+            let mut conjuncts: Vec<Predicate> = items[..i]
+                .iter()
+                .map(|(column, _, value)| Predicate::eq(column.clone(), value.clone()))
+                .collect();
+            let (column, dir, value) = &items[i];
+            let op = if dir.is_descending() {
+                CmpOp::Lt
+            } else {
+                CmpOp::Gt
+            };
+            conjuncts.push(Predicate::Compare {
+                column: Column::Plain(column.clone()),
+                op,
+                value: value.clone(),
+            });
+            Predicate::all(conjuncts)
+        });
+        Predicate::any(branches)
+    }
+
     /// A verbatim boolean SQL fragment — the escape hatch for a server predicate
     /// the typed builders don't cover. `sql` must carry no bind placeholders (it
     /// does not participate in the shared numbering); anything needing a bound
     /// value belongs in [`eq`](Predicate::eq) / [`is_null`](Predicate::is_null) /
-    /// [`scope_to_parent`](Predicate::scope_to_parent) or a composition of them.
+    /// [`tuple_gt`](Predicate::tuple_gt) or a composition of them.
     pub fn raw(sql: impl Into<String>) -> Self {
         Predicate::Raw(sql.into())
     }
 
     /// Binding tightness, used by the renderer to parenthesize a child only when
     /// it binds looser than its parent. Higher binds tighter, mirroring SQL:
-    /// a leaf (comparison, has test, `IS NULL`, scope) > `NOT` > `AND` > `OR` >
+    /// a leaf (comparison, has test, `IS NULL`, tuple seek) > `NOT` > `AND` > `OR` >
     /// a raw fragment.
     pub(crate) fn precedence(&self) -> u8 {
         match self {
             // A has leaf renders as a self-contained atom (`LIKE …`, `EXISTS
             // (…)`, `… IS NOT NULL`), so it binds as tight as a comparison; an
-            // `IS NULL` test and a `LIKE`-prefix scope are atoms too.
+            // `IS NULL` test and a tuple seek are atoms too.
             Predicate::Compare { .. }
             | Predicate::Has { .. }
             | Predicate::IsNull(_)
-            | Predicate::Scope { .. }
             | Predicate::TupleGt { .. } => 4,
             Predicate::Not(_) => 3,
             Predicate::All(_) => 2,

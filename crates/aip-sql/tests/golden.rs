@@ -10,7 +10,8 @@
 use aip_filtering::{function, Declarations, Overload, Type};
 use aip_ordering::OrderBy;
 use aip_sql::{
-    transpile_filter, transpile_order_by, Dialect, Order, Predicate, Query, Schema, Sqlite, Value,
+    transpile_filter, transpile_order_by, Dialect, Direction, Order, Predicate, Query, Schema,
+    SeekColumn, Sqlite, Value,
 };
 
 /// The enum type both the `category` field and its bare value names share.
@@ -513,6 +514,101 @@ fn tuple_gt_composes_under_and_keeping_one_placeholder_pass() {
 }
 
 #[test]
+fn keyset_seek_all_ascending_collapses_to_a_row_value_comparison() {
+    // No descending column, so the seek is the efficient row-value form — the same
+    // SQL `tuple_gt` renders, one bind per column in order.
+    let seek = Predicate::keyset_seek([
+        (
+            "display_name",
+            Direction::Asc,
+            Value::Text("Oslo Dock".to_owned()),
+        ),
+        ("site", Direction::Asc, Value::Text("dock-1".to_owned())),
+    ]);
+    let (sql, binds) = Sqlite.render(&seek);
+    assert_eq!(sql, "(display_name, site) > (?1, ?2)");
+    assert_eq!(
+        binds,
+        vec![
+            Value::Text("Oslo Dock".to_owned()),
+            Value::Text("dock-1".to_owned()),
+        ],
+    );
+}
+
+#[test]
+fn keyset_seek_one_descending_expands_to_an_or_of_ands() {
+    // A descending lead column expands to the lexicographic disjunction: strictly
+    // less on the descending column, or equal there and strictly greater on the
+    // ascending tie-break. AND binds tighter than OR, so the branches need no parens.
+    let seek = Predicate::keyset_seek([
+        (
+            "display_name",
+            Direction::Desc,
+            Value::Text("Oslo Dock".to_owned()),
+        ),
+        ("site", Direction::Asc, Value::Text("dock-1".to_owned())),
+    ]);
+    let (sql, binds) = Sqlite.render(&seek);
+    assert_eq!(sql, "display_name < ?1 OR display_name = ?2 AND site > ?3",);
+    assert_eq!(
+        binds,
+        vec![
+            Value::Text("Oslo Dock".to_owned()),
+            Value::Text("Oslo Dock".to_owned()),
+            Value::Text("dock-1".to_owned()),
+        ],
+    );
+}
+
+#[test]
+fn keyset_seek_mixed_directions_compares_each_column_by_its_own_direction() {
+    // Ascending lead, descending tie-break: greater on the first, or equal there and
+    // less on the second. Each column is compared in its own sort direction.
+    let seek = Predicate::keyset_seek([
+        ("latitude", Direction::Asc, Value::Double(30.5)),
+        (
+            "display_name",
+            Direction::Desc,
+            Value::Text("Oslo Dock".to_owned()),
+        ),
+    ]);
+    let (sql, binds) = Sqlite.render(&seek);
+    assert_eq!(sql, "latitude > ?1 OR latitude = ?2 AND display_name < ?3",);
+    assert_eq!(
+        binds,
+        vec![
+            Value::Double(30.5),
+            Value::Double(30.5),
+            Value::Text("Oslo Dock".to_owned()),
+        ],
+    );
+}
+
+#[test]
+fn keyset_seek_disjunction_is_parenthesized_under_a_scope_conjunction() {
+    // Composed under a parent scope, the descending seek's OR is parenthesized so it
+    // does not re-associate with the surrounding AND; placeholders stay one pass.
+    let predicate = Predicate::all([
+        Predicate::eq("shipper", Value::Text("acme".to_owned())),
+        Predicate::keyset_seek([
+            (
+                "display_name",
+                Direction::Desc,
+                Value::Text("Oslo Dock".to_owned()),
+            ),
+            ("site", Direction::Asc, Value::Text("dock-1".to_owned())),
+        ]),
+    ]);
+    let (sql, binds) = Sqlite.render(&predicate);
+    assert_eq!(
+        sql,
+        "shipper = ?1 AND (display_name < ?2 OR display_name = ?3 AND site > ?4)",
+    );
+    assert_eq!(binds.len(), 4);
+}
+
+#[test]
 fn transpile_order_by_returns_cursor_columns_with_types_and_key_tie_break() {
     // Against a declared schema, the seek list pairs each ordered column with its
     // declared Type and appends the key columns (uniformly text) as the tie-break.
@@ -529,10 +625,26 @@ fn transpile_order_by_returns_cursor_columns_with_types_and_key_tie_break() {
     assert_eq!(
         columns,
         vec![
-            ("display_name".to_owned(), Type::String),
-            ("size".to_owned(), Type::Int),
-            ("shipper".to_owned(), Type::String),
-            ("site".to_owned(), Type::String),
+            SeekColumn {
+                column: "display_name".to_owned(),
+                field_path: "display_name".to_owned(),
+                ty: Type::String,
+            },
+            SeekColumn {
+                column: "size".to_owned(),
+                field_path: "size".to_owned(),
+                ty: Type::Int,
+            },
+            SeekColumn {
+                column: "shipper".to_owned(),
+                field_path: "shipper".to_owned(),
+                ty: Type::String,
+            },
+            SeekColumn {
+                column: "site".to_owned(),
+                field_path: "site".to_owned(),
+                ty: Type::String,
+            },
         ],
     );
     assert_eq!(
@@ -621,26 +733,6 @@ fn empty_query_renders_nothing() {
 // ----- The public `Predicate` builder surface for server-side composition -----
 
 #[test]
-fn scope_to_parent_binds_an_escaped_prefix() {
-    // An AIP parent scope is a `LIKE` prefix keeping the rows under `parent`: the
-    // parent plus the child wildcard `/%`, bound under an explicit `ESCAPE` —
-    // never interpolated.
-    let (sql, binds) = Sqlite.render(&Predicate::scope_to_parent("name", "shippers/acme"));
-    assert_eq!(sql, r"name LIKE ?1 ESCAPE '\'");
-    assert_eq!(binds, vec![Value::Text("shippers/acme/%".to_string())]);
-}
-
-#[test]
-fn scope_to_parent_matches_metacharacters_literally() {
-    // A parent containing the `LIKE` wildcards `%` / `_` (or the escape char `\`)
-    // has them escaped in the bound pattern, so it matches literally — a parent
-    // can't smuggle a wildcard into the scope.
-    let (sql, binds) = Sqlite.render(&Predicate::scope_to_parent("name", r"tenants/a%b_c"));
-    assert_eq!(sql, r"name LIKE ?1 ESCAPE '\'");
-    assert_eq!(binds, vec![Value::Text(r"tenants/a\%b\_c/%".to_string())]);
-}
-
-#[test]
 fn is_null_renders_a_null_test() {
     // The soft-delete predicate a server composes with a user filter; it binds
     // nothing.
@@ -670,13 +762,13 @@ fn raw_fragment_is_verbatim_at_the_root_and_parenthesized_as_a_child() {
 
 #[test]
 fn server_composes_scope_tenancy_soft_delete_and_user_filter() {
-    // The headline composition #43 exists for: a server folds its own predicates
-    // — a parent scope, a tenancy `eq`, a soft-delete `IS NULL` — and the user's
-    // (transpiled) filter into one fragment that owns precedence and one coherent
-    // left-to-right placeholder numbering. The user filter's `OR` is parenthesized
-    // under the surrounding `AND`, and the bind-free soft-delete leaf consumes no
-    // placeholder, so the numbering steps 1 → 2 → 3 → 4 across the fragments that
-    // do bind.
+    // The headline composition exists for: a server folds its own predicates — a
+    // parent scope (one `eq` per concrete key variable), a tenancy `eq`, a
+    // soft-delete `IS NULL` — and the user's (transpiled) filter into one fragment
+    // that owns precedence and one coherent left-to-right placeholder numbering. The
+    // user filter's `OR` is parenthesized under the surrounding `AND`, and the
+    // bind-free soft-delete leaf consumes no placeholder, so the numbering steps
+    // 1 → 2 → 3 → 4 across the fragments that do bind.
     let user_filter = transpile_filter(
         &aip_filtering::check(r#"region = "west" OR region = "east""#, &declarations())
             .expect("filter checks"),
@@ -686,7 +778,7 @@ fn server_composes_scope_tenancy_soft_delete_and_user_filter() {
     .expect("filter transpiles");
 
     let composed = Predicate::all([
-        Predicate::scope_to_parent("name", "shippers/acme"),
+        Predicate::eq("shipper", Value::Text("acme".to_string())),
         Predicate::eq("tenant_id", Value::Int(7)),
         Predicate::is_null("delete_time"),
         user_filter,
@@ -695,12 +787,12 @@ fn server_composes_scope_tenancy_soft_delete_and_user_filter() {
     let (sql, binds) = Sqlite.render(&composed);
     assert_eq!(
         sql,
-        r"name LIKE ?1 ESCAPE '\' AND tenant_id = ?2 AND delete_time IS NULL AND (region = ?3 OR region = ?4)",
+        "shipper = ?1 AND tenant_id = ?2 AND delete_time IS NULL AND (region = ?3 OR region = ?4)",
     );
     assert_eq!(
         binds,
         vec![
-            Value::Text("shippers/acme/%".to_string()),
+            Value::Text("acme".to_string()),
             Value::Int(7),
             Value::Text("west".to_string()),
             Value::Text("east".to_string()),

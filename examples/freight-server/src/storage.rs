@@ -1,64 +1,63 @@
 //! Datastore backing the demo.
 //!
-//! Shippers live in an in-memory map (ADR-0005); the gRPC layer — not the store —
-//! is what exercises those primitives. Sites and shipments are backed by an
-//! **in-memory SQLite database** so an AIP-160 **Filter** travels end-to-end into a
-//! real SQL engine (ADR-0008): this is the default store, no feature flag. IAM
-//! **Policies** are likewise SQLite-backed, decomposed into the `iam_policy_bindings`
-//! table the way iam-go's `iamspanner` stores them (see [`PolicyStore`], aip #65).
-//! State lives for the life of the process and resets on restart.
+//! Shippers, sites, and shipments live in one in-memory SQLite database as
+//! typed-key tables: a resource name's variables are the key columns, every field
+//! is its own typed column (small repeated/map fields ride as JSON), and a child's
+//! parent key is a foreign key that cascades on hard delete. A filter composed with
+//! the server's own predicates travels end-to-end into the engine. IAM **Policies**
+//! are a separate SQLite store ([`PolicyStore`]). State lives for the life of the
+//! process and resets on restart.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
-use prost::Message as _;
+use rusqlite::OptionalExtension as _;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use crate::proto::einride::example::freight::v1::{
-    site::State, Shipment, Shipper, ShipperResourceName, Site,
+    site::State, LineItem, Shipment, ShipmentResourceName, Shipper, ShipperResourceName, Site,
+    SiteResourceName,
 };
 use crate::proto::google::longrunning::Operation;
-// `Policy` / `Binding` are aip-proto's generated `google.iam.v1` types (ADR-0011)
-// — the very ones the `aip::iam` structural helpers operate on and the `IAMPolicy`
-// service trait speaks, so there is one `Policy` type by construction (aip #65,
-// #82). `Expr` is the `google.type.Expr` **Condition** a `Binding` carries —
-// persisted (its expression) and reconstructed so `TestIamPermissions` can
-// evaluate it (aip #68).
+// `Policy` / `Binding` are the generated `google.iam.v1` types the `aip::iam`
+// helpers operate on and the `IAMPolicy` service speaks, so there is one `Policy`
+// type. `Expr` is the `google.type.Expr` condition a `Binding` carries.
 use aip::iam::proto::{google::r#type::Expr, Binding, Policy};
+use aip_proto::google::r#type::LatLng;
 
-/// Process-lifetime store. Shippers are a `BTreeMap` keyed by the typed
-/// `ShipperResourceName` (issue #169) — its `Ord` is the canonical-name string
-/// order, which keeps listings in a stable order (the deterministic tie-break
-/// behind a stable `order_by` sort). Sites and shipments live in SQLite tables — the
-/// filterable/sortable columns plus the full resource as wire bytes — so an
-/// AIP-160 **Filter** composed with the server's own predicates (parent scope,
-/// soft delete) travels end-to-end into a real SQL engine (ADR-0008).
+/// The `shippers` columns, in a fixed order shared by every shipper read.
+const SHIPPER_COLUMNS: &str = "shipper, display_name, create_time, update_time, delete_time, etag";
+
+/// The `sites` columns, in a fixed order shared by every site read.
+const SITE_COLUMNS: &str = "shipper, site, display_name, create_time, update_time, \
+     delete_time, latitude, longitude, state, annotations, tags";
+
+/// The `shipments` columns, in a fixed order shared by every shipment read.
+const SHIPMENT_COLUMNS: &str = "shipper, shipment, create_time, update_time, delete_time, \
+     origin_site, destination_site, pickup_earliest_time, pickup_latest_time, \
+     delivery_earliest_time, delivery_latest_time, line_items, annotations, external_reference_id";
+
+/// Process-lifetime store. Shippers, sites, and shipments are typed-key tables in
+/// one SQLite connection, so a filter composed with the server's parent scope and
+/// soft-delete predicate runs in a real SQL engine and a hard-deleted shipper
+/// cascades to its children.
 pub struct Storage {
-    shippers: Mutex<BTreeMap<ShipperResourceName, Shipper>>,
-    sites: Mutex<rusqlite::Connection>,
-    shipments: Mutex<rusqlite::Connection>,
-    /// AIP-155 idempotency cache (issue #94): per `request_id`, the wire bytes of
-    /// the create request that first used it and of the response it produced.
-    /// The library validates the id and names the [`Replay`] contract; this cache
-    /// of seen ids is the server's, matching the parse-and-validate boundary.
-    /// In-memory and process-lifetime like the rest of the store.
-    ///
-    /// The lookup and the record are two separate lock acquisitions (the create
-    /// work between them touches no shared state), so two *concurrent* creates
-    /// with the same brand-new `request_id` can both miss and both proceed — the
-    /// demo does not reserve an id across the whole handler. A production cache
-    /// would close that window (a unique key on the seen-id row, or a reservation
-    /// like [`PolicyStore::set_checked`]'s single-lock read-modify-write);
-    /// AIP-155 leaves the timeframe and concurrency policy to the service.
+    db: Mutex<rusqlite::Connection>,
+    /// Idempotency cache: per `request_id`, the wire bytes of the create request
+    /// that first used it and of the response it produced. The lookup and the
+    /// record are two separate lock acquisitions, so two concurrent creates sharing
+    /// a brand-new id can both miss and proceed — the demo does not reserve an id
+    /// across the whole handler.
     ///
     /// [`Replay`]: aip::requestid::Replay
     idempotency: Mutex<BTreeMap<String, IdempotentRecord>>,
 }
 
-/// One AIP-155 idempotency-cache entry (issue #94): the wire bytes of the create
-/// request that first used a `request_id` and of the response it produced. The
-/// `request` bytes let the server tell an identical replay from a conflicting
-/// reuse; the `response` bytes are decoded back into the resource on a replay.
+/// One idempotency-cache entry: the wire bytes of the create request that first
+/// used a `request_id` and of the response it produced. The `request` bytes tell an
+/// identical replay from a conflicting reuse; the `response` bytes decode back into
+/// the resource on a replay.
 #[derive(Clone)]
 pub struct IdempotentRecord {
     /// Wire bytes of the create request that first used the `request_id`.
@@ -74,28 +73,23 @@ impl Default for Storage {
 }
 
 impl Storage {
-    /// An empty store, with fresh in-memory SQLite databases for sites and
-    /// shipments.
+    /// An empty store with a fresh in-memory SQLite database.
     pub fn new() -> Self {
         Self {
-            shippers: Mutex::new(BTreeMap::new()),
-            sites: Mutex::new(new_sites_db()),
-            shipments: Mutex::new(new_shipments_db()),
+            db: Mutex::new(new_db()),
             idempotency: Mutex::new(BTreeMap::new()),
         }
     }
 
-    /// The [`IdempotentRecord`] recorded the first time `request_id` was used on a
-    /// create, or `None` if it is unseen (AIP-155, issue #94). The caller compares
-    /// the stored request against the incoming one to tell an identical replay
-    /// from a conflicting reuse.
+    /// The record stored the first time `request_id` was used on a create, or
+    /// `None` if it is unseen. The caller compares the stored request against the
+    /// incoming one to tell an identical replay from a conflicting reuse.
     pub fn idempotent_get(&self, request_id: &str) -> Option<IdempotentRecord> {
         self.idempotency.lock().unwrap().get(request_id).cloned()
     }
 
     /// Record a create's request + response wire bytes under `request_id`, so a
-    /// later retry with the same id replays the response instead of acting again
-    /// (AIP-155, issue #94).
+    /// later retry with the same id replays the response instead of acting again.
     pub fn idempotent_put(&self, request_id: String, request: Vec<u8>, response: Vec<u8>) {
         self.idempotency
             .lock()
@@ -103,201 +97,427 @@ impl Storage {
             .insert(request_id, IdempotentRecord { request, response });
     }
 
-    /// Fetch a shipper by its typed resource name (issue #169). The map is keyed
-    /// by the wrapper, so the handler passes the `ShipperResourceName` it already
-    /// parsed instead of a raw string.
+    // ----- Shippers -----
+
+    /// Fetch a shipper by its typed name.
     pub fn get_shipper(&self, name: &ShipperResourceName) -> Option<Shipper> {
-        self.shippers.lock().unwrap().get(name).cloned()
+        let conn = self.db.lock().unwrap();
+        conn.query_row(
+            &format!("SELECT {SHIPPER_COLUMNS} FROM shippers WHERE shipper = ?1"),
+            [name.shipper()],
+            row_to_shipper,
+        )
+        .optional()
+        .expect("get shipper")
     }
 
-    /// Every shipper, in resource-name order. The typed key's `Ord` is the
-    /// canonical-name string order (issue #169), so this is the same stable
-    /// listing order the old `String`-keyed map produced.
-    pub fn list_shippers(&self) -> Vec<Shipper> {
-        self.shippers.lock().unwrap().values().cloned().collect()
+    /// One page of shippers matching `predicate`, ordered and seeked in SQL. The
+    /// predicate carries the soft-delete filter and the cursor seek; the order is
+    /// the key tie-break.
+    pub fn list_shippers_page(
+        &self,
+        predicate: &aip::sql::Predicate,
+        order_by: &[aip::sql::Order],
+        limit: u64,
+    ) -> Vec<Shipper> {
+        let conn = self.db.lock().unwrap();
+        query_page(
+            &conn,
+            "shippers",
+            SHIPPER_COLUMNS,
+            predicate,
+            order_by,
+            limit,
+            row_to_shipper,
+        )
     }
 
-    /// Insert or overwrite a shipper under its typed `name`. Soft delete (AIP-164)
-    /// stamps a `delete_time` and re-puts the shipper rather than removing it, so
-    /// it stays addressable for `GetShipper`/`ListShippers` with `show_deleted`
-    /// and recoverable by `UndeleteShipper` (#96) — there is no shipper removal.
+    /// Insert or update a shipper, keyed by its typed name. An upsert (not a
+    /// delete-and-reinsert) so updating or soft-deleting a shipper leaves its sites
+    /// and shipments untouched — only a hard delete cascades.
     pub fn put_shipper(&self, name: &ShipperResourceName, shipper: Shipper) {
-        self.shippers.lock().unwrap().insert(name.clone(), shipper);
+        let conn = self.db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO shippers (shipper, display_name, create_time, update_time, delete_time, etag) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+             ON CONFLICT(shipper) DO UPDATE SET \
+               display_name = excluded.display_name, create_time = excluded.create_time, \
+               update_time = excluded.update_time, delete_time = excluded.delete_time, \
+               etag = excluded.etag",
+            rusqlite::params![
+                name.shipper(),
+                shipper.display_name,
+                shipper.create_time.as_ref().map(store_timestamp),
+                shipper.update_time.as_ref().map(store_timestamp),
+                shipper.delete_time.as_ref().map(store_timestamp),
+                shipper.etag,
+            ],
+        )
+        .expect("upsert shipper");
     }
 
-    /// Insert or overwrite a site, keyed by its `name`. The full site is stored as
-    /// wire bytes alongside the columns an AIP-160 filter can address or an
-    /// AIP-132 `order_by` can sort by: the scalar `display_name`, the timestamps
-    /// `create_time` / `update_time` as sortable RFC3339 text, the nested
-    /// `lat_lng.latitude` / `lat_lng.longitude` flattened to numeric columns, the
-    /// enum `state` as its value name (matching the transpiler's enum rendering,
-    /// #40), the `annotations` map / `tags` list as JSON the has operator queries
-    /// with `json_each` (#41), and `delete_time` as RFC3339 text (NULL when live)
-    /// so the server's soft-delete predicate `delete_time IS NULL` runs in SQL
-    /// (#43).
-    pub fn put_site(&self, site: Site) {
-        let create_time = site.create_time.as_ref().map(aip::sql::format_timestamp);
-        let update_time = site.update_time.as_ref().map(aip::sql::format_timestamp);
-        let delete_time = site.delete_time.as_ref().map(aip::sql::format_timestamp);
-        let latitude = site.lat_lng.as_ref().map(|ll| ll.latitude);
-        let longitude = site.lat_lng.as_ref().map(|ll| ll.longitude);
-        let state = State::try_from(site.state)
-            .unwrap_or(State::Unspecified)
-            .as_str_name();
-        // The has operator reads these through SQLite's `json_each`, so they are
-        // stored as JSON text — an object for the map, an array for the list.
-        let annotations = serde_json::to_string(&site.annotations).expect("serialize annotations");
-        let tags = serde_json::to_string(&site.tags).expect("serialize tags");
-        self.sites
-            .lock()
-            .unwrap()
-            .execute(
-                "INSERT OR REPLACE INTO sites \
-                 (name, display_name, create_time, update_time, delete_time, latitude, \
-                  longitude, state, annotations, tags, data) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                rusqlite::params![
-                    site.name,
-                    site.display_name,
-                    create_time,
-                    update_time,
-                    delete_time,
-                    latitude,
-                    longitude,
-                    state,
-                    annotations,
-                    tags,
-                    site.encode_to_vec(),
-                ],
-            )
-            .expect("insert site");
+    // ----- Sites -----
+
+    /// Fetch a site by its typed name (a primary-key lookup on its key columns).
+    pub fn get_site(&self, name: &SiteResourceName) -> Option<Site> {
+        let conn = self.db.lock().unwrap();
+        conn.query_row(
+            &format!("SELECT {SITE_COLUMNS} FROM sites WHERE shipper = ?1 AND site = ?2"),
+            [name.shipper(), name.site()],
+            row_to_site,
+        )
+        .optional()
+        .expect("get site")
     }
 
-    /// One page of sites matching `predicate`, sorted and paginated entirely in
-    /// SQLite (#42). `predicate` is the server's composed `WHERE` — a parent
-    /// scope, the soft-delete `delete_time IS NULL`, and any user filter (#43).
-    ///
-    /// See [`query_page`] for the query shape and the parameterize-never-interpolate
-    /// guarantee.
+    /// One page of sites matching `predicate`, ordered and seeked in SQL. The
+    /// predicate is the server's composed `WHERE` — the parent scope, the soft-delete
+    /// filter, any user filter, and the cursor seek.
     pub fn list_sites_page(
         &self,
         predicate: &aip::sql::Predicate,
         order_by: &[aip::sql::Order],
         limit: u64,
-        offset: u64,
     ) -> Vec<Site> {
-        let conn = self.sites.lock().unwrap();
-        query_page(&conn, "sites", predicate, order_by, limit, offset)
-            .into_iter()
-            .map(|data| Site::decode(data.as_slice()).expect("decode site"))
-            .collect()
+        let conn = self.db.lock().unwrap();
+        query_page(
+            &conn,
+            "sites",
+            SITE_COLUMNS,
+            predicate,
+            order_by,
+            limit,
+            row_to_site,
+        )
     }
 
-    /// Insert or overwrite a shipment, keyed by its `name`. The full shipment is
-    /// stored as wire bytes alongside the columns an AIP-160 filter can address:
-    /// the resource-name `name` (also the parent-scope and sort column), the
-    /// `origin_site` / `destination_site` references, `create_time` as sortable
-    /// RFC3339 text, the `annotations` map as JSON the has operator queries with
-    /// `json_each`, and `delete_time` (NULL when live) for the soft-delete
-    /// predicate (#43).
-    pub fn put_shipment(&self, shipment: Shipment) {
-        let create_time = shipment
-            .create_time
-            .as_ref()
-            .map(aip::sql::format_timestamp);
-        let delete_time = shipment
-            .delete_time
-            .as_ref()
-            .map(aip::sql::format_timestamp);
-        let annotations =
-            serde_json::to_string(&shipment.annotations).expect("serialize annotations");
-        self.shipments
-            .lock()
-            .unwrap()
-            .execute(
-                "INSERT OR REPLACE INTO shipments \
-                 (name, origin_site, destination_site, create_time, delete_time, \
-                  annotations, data) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                rusqlite::params![
-                    shipment.name,
-                    shipment.origin_site,
-                    shipment.destination_site,
-                    create_time,
-                    delete_time,
-                    annotations,
-                    shipment.encode_to_vec(),
-                ],
-            )
-            .expect("insert shipment");
+    /// Insert or update a site, keyed by its typed name. The name decomposes into
+    /// the key binds; the rest of the message becomes typed columns, with the map
+    /// and list fields stored as JSON.
+    pub fn put_site(&self, name: &SiteResourceName, site: Site) {
+        let latitude = site.lat_lng.as_ref().map(|ll| ll.latitude);
+        let longitude = site.lat_lng.as_ref().map(|ll| ll.longitude);
+        let state = State::try_from(site.state)
+            .unwrap_or(State::Unspecified)
+            .as_str_name();
+        let annotations = serde_json::to_string(&site.annotations).expect("serialize annotations");
+        let tags = serde_json::to_string(&site.tags).expect("serialize tags");
+        let conn = self.db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO sites (shipper, site, display_name, create_time, update_time, \
+               delete_time, latitude, longitude, state, annotations, tags) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
+             ON CONFLICT(shipper, site) DO UPDATE SET \
+               display_name = excluded.display_name, create_time = excluded.create_time, \
+               update_time = excluded.update_time, delete_time = excluded.delete_time, \
+               latitude = excluded.latitude, longitude = excluded.longitude, \
+               state = excluded.state, annotations = excluded.annotations, tags = excluded.tags",
+            rusqlite::params![
+                name.shipper(),
+                name.site(),
+                site.display_name,
+                site.create_time.as_ref().map(store_timestamp),
+                site.update_time.as_ref().map(store_timestamp),
+                site.delete_time.as_ref().map(store_timestamp),
+                latitude,
+                longitude,
+                state,
+                annotations,
+                tags,
+            ],
+        )
+        .expect("upsert site");
     }
 
-    /// One page of shipments matching `predicate`, sorted and paginated entirely
-    /// in SQLite — the same composed-`WHERE` path as
-    /// [`list_sites_page`](Storage::list_sites_page) (#43).
+    // ----- Shipments -----
+
+    /// One page of shipments matching `predicate`, ordered and seeked in SQL — the
+    /// same composed-`WHERE` path as [`list_sites_page`](Storage::list_sites_page).
     pub fn list_shipments_page(
         &self,
         predicate: &aip::sql::Predicate,
         order_by: &[aip::sql::Order],
         limit: u64,
-        offset: u64,
     ) -> Vec<Shipment> {
-        let conn = self.shipments.lock().unwrap();
-        query_page(&conn, "shipments", predicate, order_by, limit, offset)
-            .into_iter()
-            .map(|data| Shipment::decode(data.as_slice()).expect("decode shipment"))
-            .collect()
+        let conn = self.db.lock().unwrap();
+        query_page(
+            &conn,
+            "shipments",
+            SHIPMENT_COLUMNS,
+            predicate,
+            order_by,
+            limit,
+            row_to_shipment,
+        )
+    }
+
+    /// Insert or update a shipment, keyed by its typed name. The repeated
+    /// `line_items` and the `annotations` map are stored as JSON; every other field
+    /// is its own typed column.
+    pub fn put_shipment(&self, name: &ShipmentResourceName, shipment: Shipment) {
+        let line_items = serde_json::to_string(
+            &shipment
+                .line_items
+                .iter()
+                .map(LineItemJson::from_proto)
+                .collect::<Vec<_>>(),
+        )
+        .expect("serialize line items");
+        let annotations =
+            serde_json::to_string(&shipment.annotations).expect("serialize annotations");
+        let conn = self.db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO shipments (shipper, shipment, create_time, update_time, delete_time, \
+               origin_site, destination_site, pickup_earliest_time, pickup_latest_time, \
+               delivery_earliest_time, delivery_latest_time, line_items, annotations, \
+               external_reference_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+             ON CONFLICT(shipper, shipment) DO UPDATE SET \
+               create_time = excluded.create_time, update_time = excluded.update_time, \
+               delete_time = excluded.delete_time, origin_site = excluded.origin_site, \
+               destination_site = excluded.destination_site, \
+               pickup_earliest_time = excluded.pickup_earliest_time, \
+               pickup_latest_time = excluded.pickup_latest_time, \
+               delivery_earliest_time = excluded.delivery_earliest_time, \
+               delivery_latest_time = excluded.delivery_latest_time, \
+               line_items = excluded.line_items, annotations = excluded.annotations, \
+               external_reference_id = excluded.external_reference_id",
+            rusqlite::params![
+                name.shipper(),
+                name.shipment(),
+                shipment.create_time.as_ref().map(store_timestamp),
+                shipment.update_time.as_ref().map(store_timestamp),
+                shipment.delete_time.as_ref().map(store_timestamp),
+                shipment.origin_site,
+                shipment.destination_site,
+                shipment.pickup_earliest_time.as_ref().map(store_timestamp),
+                shipment.pickup_latest_time.as_ref().map(store_timestamp),
+                shipment
+                    .delivery_earliest_time
+                    .as_ref()
+                    .map(store_timestamp),
+                shipment.delivery_latest_time.as_ref().map(store_timestamp),
+                line_items,
+                annotations,
+                shipment.external_reference_id,
+            ],
+        )
+        .expect("upsert shipment");
     }
 }
 
-/// Run one paginated list query against `table`, returning each matching row's
-/// `data` blob in order. Shared by the site and shipment listings (#43).
-///
-/// The store owns only the `SELECT data FROM <table>` head; the WHERE / `ORDER
-/// BY` / `LIMIT` / `OFFSET` tail is one [`aip::sql::Query`] rendered in a single
-/// call. The composed `predicate` renders to parameterized SQL through the SQLite
-/// [`Dialect`](aip::sql::Dialect) and its bind values are bound positionally —
-/// never spliced into the SQL text (ADR-0005 / ADR-0008); the `ORDER BY` columns
-/// (from the [`Schema`](aip::sql::Schema) allowlist) and the server-resolved
-/// `LIMIT` / `OFFSET` integers carry no binds. `table` is a fixed string literal
-/// supplied by the store, never request input.
-fn query_page(
+#[cfg(test)]
+impl Storage {
+    /// Hard-delete a shipper, cascading to its sites and shipments through the
+    /// foreign key. Returns whether a row was removed. The `DeleteShipper` RPC
+    /// soft-deletes, so the cascade is exercised only here.
+    pub(crate) fn hard_delete_shipper(&self, name: &ShipperResourceName) -> bool {
+        let conn = self.db.lock().unwrap();
+        conn.execute("DELETE FROM shippers WHERE shipper = ?1", [name.shipper()])
+            .expect("hard-delete shipper")
+            > 0
+    }
+
+    /// Every stored shipper regardless of soft-delete state, in key order — a test
+    /// convenience for asserting how many rows exist.
+    pub(crate) fn list_shippers(&self) -> Vec<Shipper> {
+        let conn = self.db.lock().unwrap();
+        let mut statement = conn
+            .prepare(&format!(
+                "SELECT {SHIPPER_COLUMNS} FROM shippers ORDER BY shipper"
+            ))
+            .expect("prepare shipper list");
+        let rows = statement
+            .query_map([], row_to_shipper)
+            .expect("query shippers");
+        rows.map(|row| row.expect("read shipper row")).collect()
+    }
+}
+
+/// Run one ordered, seeked, limited list query against `table`, mapping each row
+/// through `to_row`. The store owns only the `SELECT <columns> FROM <table>` head;
+/// the composed `predicate` renders to a parameterized `WHERE` whose binds are
+/// bound positionally, and the ordered columns plus the `LIMIT` carry no binds.
+/// `table` and `columns` are fixed literals, never request input.
+fn query_page<T>(
     conn: &rusqlite::Connection,
     table: &str,
+    columns: &str,
     predicate: &aip::sql::Predicate,
     order_by: &[aip::sql::Order],
     limit: u64,
-    offset: u64,
-) -> Vec<Vec<u8>> {
+    to_row: impl Fn(&rusqlite::Row) -> rusqlite::Result<T>,
+) -> Vec<T> {
     let (tail, binds) = aip::sql::Query::new()
         .filter(predicate.clone())
         .order_by(order_by.iter().cloned())
         .limit(limit)
-        .offset(offset)
         .render(&aip::sql::Sqlite);
     let params: Vec<rusqlite::types::Value> = binds.into_iter().map(to_sql).collect();
-    let sql = format!("SELECT data FROM {table} {tail}");
+    let sql = format!("SELECT {columns} FROM {table} {tail}");
     let mut statement = conn.prepare(&sql).expect("prepare list query");
     let rows = statement
-        .query_map(rusqlite::params_from_iter(params), |row| {
-            row.get::<_, Vec<u8>>(0)
-        })
+        .query_map(rusqlite::params_from_iter(params), |row| to_row(row))
         .expect("run list query");
-    rows.map(|data| data.expect("read list row")).collect()
+    rows.map(|row| row.expect("read list row")).collect()
 }
 
-/// Open an in-memory SQLite database with the `sites` table: the resource name as
-/// primary key, the `display_name` / `create_time` / `update_time` / `latitude` /
-/// `longitude` / `state` columns the AIP-160 filter addresses (#40) or the
-/// AIP-132 `order_by` sorts by (#42), the JSON `annotations` / `tags` columns the
-/// has operator queries with `json_each` (#41), the `delete_time` column behind
-/// the server's soft-delete predicate (#43), and the full site as wire bytes for
-/// lossless round-trips.
-fn new_sites_db() -> rusqlite::Connection {
+/// Assemble a [`Shipper`] from its columns, reconstructing the resource name from
+/// the key column.
+fn row_to_shipper(row: &rusqlite::Row) -> rusqlite::Result<Shipper> {
+    let shipper: String = row.get("shipper")?;
+    let name = ShipperResourceName::new(&shipper)
+        .expect("a stored shipper key is a valid name")
+        .to_string();
+    Ok(Shipper {
+        name,
+        display_name: row.get("display_name")?,
+        create_time: load_timestamp(row.get("create_time")?),
+        update_time: load_timestamp(row.get("update_time")?),
+        delete_time: load_timestamp(row.get("delete_time")?),
+        etag: row.get("etag")?,
+    })
+}
+
+/// Assemble a [`Site`] from its columns, reconstructing the resource name from the
+/// key columns and the JSON map/list fields.
+fn row_to_site(row: &rusqlite::Row) -> rusqlite::Result<Site> {
+    let shipper: String = row.get("shipper")?;
+    let site: String = row.get("site")?;
+    let name = SiteResourceName::new(&shipper, &site)
+        .expect("a stored site key is a valid name")
+        .to_string();
+    let latitude: Option<f64> = row.get("latitude")?;
+    let longitude: Option<f64> = row.get("longitude")?;
+    let state_name: String = row.get("state")?;
+    let annotations: String = row.get("annotations")?;
+    let tags: String = row.get("tags")?;
+    Ok(Site {
+        name,
+        create_time: load_timestamp(row.get("create_time")?),
+        update_time: load_timestamp(row.get("update_time")?),
+        delete_time: load_timestamp(row.get("delete_time")?),
+        display_name: row.get("display_name")?,
+        lat_lng: lat_lng(latitude, longitude),
+        state: State::from_str_name(&state_name).unwrap_or(State::Unspecified) as i32,
+        annotations: serde_json::from_str(&annotations).expect("deserialize annotations"),
+        tags: serde_json::from_str(&tags).expect("deserialize tags"),
+    })
+}
+
+/// Assemble a [`Shipment`] from its columns, reconstructing the resource name from
+/// the key columns and the JSON `line_items` / `annotations`.
+fn row_to_shipment(row: &rusqlite::Row) -> rusqlite::Result<Shipment> {
+    let shipper: String = row.get("shipper")?;
+    let shipment: String = row.get("shipment")?;
+    let name = ShipmentResourceName::new(&shipper, &shipment)
+        .expect("a stored shipment key is a valid name")
+        .to_string();
+    let line_items: String = row.get("line_items")?;
+    let line_items: Vec<LineItemJson> =
+        serde_json::from_str(&line_items).expect("deserialize line items");
+    let annotations: String = row.get("annotations")?;
+    Ok(Shipment {
+        name,
+        create_time: load_timestamp(row.get("create_time")?),
+        update_time: load_timestamp(row.get("update_time")?),
+        delete_time: load_timestamp(row.get("delete_time")?),
+        origin_site: row.get("origin_site")?,
+        destination_site: row.get("destination_site")?,
+        pickup_earliest_time: load_timestamp(row.get("pickup_earliest_time")?),
+        pickup_latest_time: load_timestamp(row.get("pickup_latest_time")?),
+        delivery_earliest_time: load_timestamp(row.get("delivery_earliest_time")?),
+        delivery_latest_time: load_timestamp(row.get("delivery_latest_time")?),
+        line_items: line_items
+            .into_iter()
+            .map(LineItemJson::into_proto)
+            .collect(),
+        annotations: serde_json::from_str(&annotations).expect("deserialize annotations"),
+        external_reference_id: row.get("external_reference_id")?,
+    })
+}
+
+/// A line item as stored in the JSON `line_items` column — the generated message
+/// carries no serde derive, so this mirror carries the JSON shape.
+#[derive(Serialize, Deserialize)]
+struct LineItemJson {
+    title: String,
+    quantity: f32,
+    weight_kg: f32,
+    volume_m3: f32,
+    external_reference_id: String,
+}
+
+impl LineItemJson {
+    /// The JSON view of a proto line item.
+    fn from_proto(item: &LineItem) -> Self {
+        Self {
+            title: item.title.clone(),
+            quantity: item.quantity,
+            weight_kg: item.weight_kg,
+            volume_m3: item.volume_m3,
+            external_reference_id: item.external_reference_id.clone(),
+        }
+    }
+
+    /// Back to the proto line item.
+    fn into_proto(self) -> LineItem {
+        LineItem {
+            title: self.title,
+            quantity: self.quantity,
+            weight_kg: self.weight_kg,
+            volume_m3: self.volume_m3,
+            external_reference_id: self.external_reference_id,
+        }
+    }
+}
+
+/// Rebuild a [`LatLng`] from its flattened columns; absent when both are NULL.
+fn lat_lng(latitude: Option<f64>, longitude: Option<f64>) -> Option<LatLng> {
+    match (latitude, longitude) {
+        (None, None) => None,
+        (latitude, longitude) => Some(LatLng {
+            latitude: latitude.unwrap_or_default(),
+            longitude: longitude.unwrap_or_default(),
+        }),
+    }
+}
+
+/// Render a timestamp as the canonical second-precision RFC3339 text the store
+/// holds. Using the library formatter keeps a stored value comparable with the
+/// second-precision literal a filter binds, and makes lexicographic text order
+/// match chronological order. Server-stamped times carry no sub-second part (see
+/// `now`), so the round-trip is exact.
+pub(crate) fn store_timestamp(ts: &prost_types::Timestamp) -> String {
+    aip::sql::format_timestamp(ts)
+}
+
+/// Parse a stored RFC3339 timestamp back into a protobuf timestamp.
+fn load_timestamp(text: Option<String>) -> Option<prost_types::Timestamp> {
+    text.map(|text| text.parse().expect("a stored timestamp parses"))
+}
+
+/// Open the in-memory SQLite database holding the typed-key `shippers`, `sites`,
+/// and `shipments` tables. Foreign keys are enabled per connection so a hard-deleted
+/// shipper cascades to its children, and `sites` carries a covering index over the
+/// `display_name` listing.
+fn new_db() -> rusqlite::Connection {
     let conn = rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
+    // SQLite leaves foreign keys off per connection, so turn them on before the DDL.
+    conn.pragma_update(None, "foreign_keys", true)
+        .expect("enable foreign keys");
     conn.execute_batch(
-        "CREATE TABLE sites (
-            name         TEXT PRIMARY KEY,
+        "CREATE TABLE shippers (
+            shipper      TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            create_time  TEXT,
+            update_time  TEXT,
+            delete_time  TEXT,
+            etag         TEXT NOT NULL
+        );
+        CREATE TABLE sites (
+            shipper      TEXT NOT NULL,
+            site         TEXT NOT NULL,
             display_name TEXT NOT NULL,
             create_time  TEXT,
             update_time  TEXT,
@@ -307,54 +527,50 @@ fn new_sites_db() -> rusqlite::Connection {
             state        TEXT NOT NULL,
             annotations  TEXT NOT NULL,
             tags         TEXT NOT NULL,
-            data         BLOB NOT NULL
+            PRIMARY KEY (shipper, site),
+            FOREIGN KEY (shipper) REFERENCES shippers(shipper) ON DELETE CASCADE
+        );
+        CREATE INDEX sites_by_display_name ON sites (shipper, display_name, site);
+        CREATE TABLE shipments (
+            shipper                TEXT NOT NULL,
+            shipment               TEXT NOT NULL,
+            create_time            TEXT,
+            update_time            TEXT,
+            delete_time            TEXT,
+            origin_site            TEXT NOT NULL,
+            destination_site       TEXT NOT NULL,
+            pickup_earliest_time   TEXT,
+            pickup_latest_time     TEXT,
+            delivery_earliest_time TEXT,
+            delivery_latest_time   TEXT,
+            line_items             TEXT NOT NULL,
+            annotations            TEXT NOT NULL,
+            external_reference_id  TEXT NOT NULL,
+            PRIMARY KEY (shipper, shipment),
+            FOREIGN KEY (shipper) REFERENCES shippers(shipper) ON DELETE CASCADE
         );",
     )
-    .expect("create sites table");
-    conn
-}
-
-/// Open an in-memory SQLite database with the `shipments` table: the resource name
-/// as primary key (also the parent-scope and sort column), the `origin_site` /
-/// `destination_site` references and `create_time` the AIP-160 filter addresses,
-/// the JSON `annotations` column the has operator queries with `json_each`, the
-/// `delete_time` column behind the soft-delete predicate (#43), and the full
-/// shipment as wire bytes for lossless round-trips.
-fn new_shipments_db() -> rusqlite::Connection {
-    let conn = rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
-    conn.execute_batch(
-        "CREATE TABLE shipments (
-            name             TEXT PRIMARY KEY,
-            origin_site      TEXT NOT NULL,
-            destination_site TEXT NOT NULL,
-            create_time      TEXT,
-            delete_time      TEXT,
-            annotations      TEXT NOT NULL,
-            data             BLOB NOT NULL
-        );",
-    )
-    .expect("create shipments table");
+    .expect("create freight tables");
     conn
 }
 
 /// Process-lifetime store of `google.iam.v1.Policy`, backing the demo's
-/// `IAMPolicy` service (aip #64, #65). Like a real IAM backend (and mirroring
-/// iam-go's `iamspanner`), a **Policy** is stored *decomposed* into the
-/// `iam_policy_bindings` table — one row per (resource, **Binding**, **Member**) —
-/// rather than as an opaque blob; the **Policy** is reconstructed on read and its
-/// `etag` is a content digest computed from that canonical form (ADR-0010).
+/// `IAMPolicy` service. Like a real IAM backend, a **Policy** is stored *decomposed*
+/// into the `iam_policy_bindings` table — one row per (resource, **Binding**,
+/// **Member**) — rather than as an opaque blob; the **Policy** is reconstructed on
+/// read and its `etag` is a content digest computed from that canonical form.
 ///
 /// Each row also carries its **Binding**'s **Condition** expression (the
 /// `condition` column, NULL for an unconditional binding) so that the stored
 /// **Policy** round-trips its **Conditions** and `TestIamPermissions` can evaluate
-/// them through the opt-in `eval` adapter (aip #68). The policy `version` is *not*
-/// stored — it is reconstructed from the *conditions ⟹ version 3* invariant
-/// ([`reconstruct`]): version 3 when any binding is conditional, else version 1's
-/// default. The invariant itself is still enforced by [`aip::iam::policy::validate`]
-/// in the handler *before* a write, so a conditional binding on an old version is
-/// rejected up front. A **Condition**'s `title` / `description` are not persisted
-/// (only the `expression` the adapter needs). State lives for the process and
-/// resets on restart, like the rest of [`Storage`].
+/// them through the opt-in `eval` adapter. The policy `version` is *not* stored — it
+/// is reconstructed from the *conditions ⟹ version 3* invariant ([`reconstruct`]):
+/// version 3 when any binding is conditional, else version 1's default. The
+/// invariant itself is still enforced by [`aip::iam::policy::validate`] in the
+/// handler *before* a write, so a conditional binding on an old version is rejected
+/// up front. A **Condition**'s `title` / `description` are not persisted (only the
+/// `expression` the adapter needs). State lives for the process and resets on
+/// restart, like the rest of [`Storage`].
 pub struct PolicyStore {
     /// One in-memory SQLite connection holding the `iam_policy_bindings` table.
     bindings: Mutex<rusqlite::Connection>,
@@ -375,10 +591,10 @@ impl PolicyStore {
     }
 
     /// The policy attached to `resource`, or `None` when none is set — the caller
-    /// turns that into the empty `Policy` `GetIamPolicy` returns (AIP / IAM: an
-    /// unset policy is not an error). The reconstructed policy carries the content
-    /// `etag` ([`aip::iam::policy::compute`]), so a client can
-    /// round-trip it back as its read-modify-write token.
+    /// turns that into the empty `Policy` `GetIamPolicy` returns (an unset policy is
+    /// not an error). The reconstructed policy carries the content `etag`
+    /// ([`aip::iam::policy::compute`]), so a client can round-trip it back as its
+    /// read-modify-write token.
     pub fn get(&self, resource: &str) -> Option<Policy> {
         let conn = self.bindings.lock().unwrap();
         let policy = reconstruct(&conn, resource);
@@ -386,7 +602,7 @@ impl PolicyStore {
     }
 
     /// Apply `SetIamPolicy` read-modify-write semantics atomically, the way a real
-    /// IAM backend does it inside a transaction (aip #65).
+    /// IAM backend does it inside a transaction.
     ///
     /// The supplied `policy.etag` is the client's optimistic-concurrency token: it
     /// is checked against the canonical stored policy via
@@ -418,7 +634,7 @@ impl PolicyStore {
         // Canonicalise, then replace the resource's rows atomically. Each row
         // carries the binding's **Condition** expression (NULL when unconditional)
         // — the same value across every member of a binding, taken from whichever
-        // row first reconstructs it on read (#68).
+        // row first reconstructs it on read.
         aip::iam::policy::normalize(&mut policy);
         let tx = conn.transaction().expect("begin policy transaction");
         tx.execute(
@@ -473,10 +689,9 @@ fn reconstruct(conn: &rusqlite::Connection, resource: &str) -> Policy {
     if bindings.is_empty() {
         return Policy::default();
     }
-    // The *conditions ⟹ version 3* invariant read backwards: one library function
-    // owns version recovery (#180), so this store does not hand-roll it and the
-    // recovered `version` always agrees with what `policy::validate` enforces on the
-    // write path.
+    // One library function owns version recovery, so this store does not hand-roll
+    // it and the recovered `version` always agrees with what `policy::validate`
+    // enforces on the write path.
     let version = aip::iam::policy::canonical_version(&bindings);
     let mut policy = Policy {
         version,
@@ -488,14 +703,13 @@ fn reconstruct(conn: &rusqlite::Connection, resource: &str) -> Policy {
 }
 
 /// Open an in-memory SQLite database with the `iam_policy_bindings` table — the
-/// decomposed IAM **Policy** store, one row per (resource, **Binding**, **Member**),
-/// mirroring iam-go's `iamspanner` schema (aip #65). The primary key orders rows by
-/// `(resource, binding_index, role, member_index, member)` so a policy reconstructs
-/// in canonical order. Spanner's `STRING(MAX)`/`INT64` map to SQLite `TEXT`/
-/// `INTEGER`. The nullable `condition` column holds the **Binding**'s **Condition**
-/// expression (NULL ⇒ unconditional), so a stored conditional grant round-trips and
-/// `TestIamPermissions` can evaluate it (#68); it looks up the **Policy** for the
-/// requested **Resource name** directly, so no member-keyed reverse index is needed.
+/// decomposed IAM **Policy** store, one row per (resource, **Binding**, **Member**).
+/// The primary key orders rows by `(resource, binding_index, role, member_index,
+/// member)` so a policy reconstructs in canonical order. The nullable `condition`
+/// column holds the **Binding**'s **Condition** expression (NULL ⇒ unconditional),
+/// so a stored conditional grant round-trips and `TestIamPermissions` can evaluate
+/// it; it looks up the **Policy** for the requested **Resource name** directly, so no
+/// member-keyed reverse index is needed.
 fn new_policies_db() -> rusqlite::Connection {
     let conn = rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
     conn.execute_batch(
@@ -518,7 +732,7 @@ fn new_policies_db() -> rusqlite::Connection {
 /// present, one **Condition**); the `ORDER BY` makes the grouping contiguous and the
 /// **Members** deterministic. The `condition` column is the same across a binding's
 /// member rows, so it is read off whichever row first opens the binding and lifted
-/// back into a [`google.type.Expr`](Expr) carrying just its expression (#68).
+/// back into a [`google.type.Expr`](Expr) carrying just its expression.
 fn read_bindings(conn: &rusqlite::Connection, resource: &str) -> Vec<Binding> {
     let mut statement = conn
         .prepare(
@@ -562,15 +776,15 @@ fn read_bindings(conn: &rusqlite::Connection, resource: &str) -> Vec<Binding> {
 }
 
 /// Process-lifetime store of long-running [`Operation`]s, backing the demo's
-/// `google.longrunning.Operations` service and the `BatchCreateShippers` task
-/// (ADR-0015). `aip-lro` owns no store — storage is the caller's — so this is the
-/// freight-side store, keyed by operation name; the stored value is the wire
-/// [`Operation`] (round-tripped via `into_inner`/`from_inner`), kept in memory.
+/// `google.longrunning.Operations` service and the `BatchCreateShippers` task.
+/// `aip-lro` owns no store — storage is the caller's — so this is the freight-side
+/// store, keyed by operation name; the stored value is the wire [`Operation`], kept
+/// in memory.
 ///
-/// Two things sit alongside, deliberately outside the library (ADR-0015): the set
-/// of cancel-requested names — caller execution state the batch task polls, since
-/// "cancel asked, work winding down" has no wire field — and a [`Notify`] pulsed
-/// on every change so `WaitOperation` blocks instead of busy-polling.
+/// Two things sit alongside, deliberately outside the library: the set of
+/// cancel-requested names — caller execution state the batch task polls, since
+/// "cancel asked, work winding down" has no wire field — and a [`Notify`] pulsed on
+/// every change so `WaitOperation` blocks instead of busy-polling.
 pub struct OperationStore {
     operations: Mutex<BTreeMap<String, Operation>>,
     cancels: Mutex<BTreeSet<String>>,
@@ -610,8 +824,8 @@ impl OperationStore {
     }
 
     /// Every operation in `collection` (the `operations` collection a
-    /// `ListOperations` names), in name order — those whose name sits directly
-    /// under `{collection}/`.
+    /// `ListOperations` names), in name order — those whose name sits directly under
+    /// `{collection}/`.
     pub fn list(&self, collection: &str) -> Vec<Operation> {
         let prefix = format!("{collection}/");
         self.operations
@@ -624,12 +838,11 @@ impl OperationStore {
     }
 
     /// Remove the operation named `name` (a `DeleteOperation`); returns whether it
-    /// was present. Deletion drops the record — it does **not** cancel the work
-    /// (ADR-0015).
+    /// was present. Deletion drops the record — it does **not** cancel the work.
     pub fn remove(&self, name: &str) -> bool {
         let removed = self.operations.lock().unwrap().remove(name).is_some();
-        // Drop any cancel flag alongside the record, so the flag's lifetime is
-        // tied to the operation's rather than orphaned in the set after a delete.
+        // Drop any cancel flag alongside the record, so the flag's lifetime is tied
+        // to the operation's rather than orphaned in the set after a delete.
         self.cancels.lock().unwrap().remove(name);
         if removed {
             self.changed.notify_waiters();
@@ -638,16 +851,15 @@ impl OperationStore {
     }
 
     /// Record that cancellation was requested for `name` (a best-effort
-    /// `CancelOperation`). This is caller execution state: it does not flip
-    /// `done`; the batch task notices the flag and lands the operation in
-    /// `CANCELLED` (ADR-0015).
+    /// `CancelOperation`). This is caller execution state: it does not flip `done`;
+    /// the batch task notices the flag and lands the operation in `CANCELLED`.
     pub fn request_cancel(&self, name: &str) {
         self.cancels.lock().unwrap().insert(name.to_owned());
     }
 
-    /// Clear a consumed cancel flag — the batch task calls this once it has
-    /// observed the request and landed the operation in `CANCELLED`, so the flag
-    /// does not linger on the now-terminal operation.
+    /// Clear a consumed cancel flag — the batch task calls this once it has observed
+    /// the request and landed the operation in `CANCELLED`, so the flag does not
+    /// linger on the now-terminal operation.
     pub fn clear_cancel(&self, name: &str) {
         self.cancels.lock().unwrap().remove(name);
     }
@@ -661,8 +873,8 @@ impl OperationStore {
     /// [`Notified`](tokio::sync::futures::Notified) is returned (not an opaque
     /// future) so `WaitOperation` can `enable()` it — enrol it in the waiter list
     /// *before* re-reading the operation, so a change landing between the read and
-    /// the await cannot be missed (`tokio::sync::Notify` only enrols a `Notified`
-    /// on poll otherwise).
+    /// the await cannot be missed (`tokio::sync::Notify` only enrols a `Notified` on
+    /// poll otherwise).
     pub fn changed(&self) -> tokio::sync::futures::Notified<'_> {
         self.changed.notified()
     }

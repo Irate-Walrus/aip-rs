@@ -14,12 +14,34 @@ use aip_filtering::Type;
 use aip_ordering::OrderBy;
 
 use crate::schema::Schema;
-use crate::Error;
+use crate::{Direction, Error};
 
-/// The ordered cursor seek columns: each a SQL column paired with its declared
-/// [`Type`], in `ORDER BY` clause order with the key tie-break last. Built once by
-/// [`transpile_order_by`] and fed to both the cursor build and the cursor decode.
-pub type CursorColumns = Vec<(String, Type)>;
+/// One resolved cursor seek column: the SQL `column`, the proto `field_path` the
+/// value is read from, and the column's declared [`Type`].
+///
+/// One struct feeds both pagination directions from a single source: the encode
+/// side reads the value off a message by `field_path` and picks the cursor variant
+/// from `ty`, and the decode side cross-checks each cursor value against the same
+/// `column` + `ty`. For a key tie-break column the `field_path` equals the
+/// `column` (the resource-name variable, read off the typed name rather than the
+/// message). Key columns are uniformly text, so each carries [`Type::String`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeekColumn {
+    /// The SQL column this seek key compares against — a column name from the
+    /// [`Schema`], never raw filter input.
+    pub column: String,
+    /// The proto field path the encode side reflects the value from. Equals
+    /// [`column`](Self::column) for a key tie-break column.
+    pub field_path: String,
+    /// The column's declared [`Type`], driving both the cursor variant the encode
+    /// side emits and the variant the decode side accepts.
+    pub ty: Type,
+}
+
+/// The ordered cursor seek columns, in `ORDER BY` clause order with the key
+/// tie-break last. Built once by [`transpile_order_by`] and fed to both the cursor
+/// encode and the cursor decode, so the two cannot drift.
+pub type CursorColumns = Vec<SeekColumn>;
 
 /// One `ORDER BY` item: a SQL column and its sort direction.
 ///
@@ -53,6 +75,15 @@ impl Order {
             desc: true,
         }
     }
+
+    /// This order's sort [`Direction`].
+    pub fn direction(&self) -> Direction {
+        if self.desc {
+            Direction::Desc
+        } else {
+            Direction::Asc
+        }
+    }
 }
 
 /// Transpile a parsed [`OrderBy`] into the cursor seek key and SQL `ORDER BY`
@@ -60,10 +91,11 @@ impl Order {
 /// (the column allowlist) and preserving field order so a multi-field directive
 /// renders its columns in priority order.
 ///
-/// Returns the ordered `(column, Type)` seek list — fed to both the cursor build
-/// and the cursor validate (so the column list is derived once) — alongside the
-/// [`Order`] items for the SQL clause. A field path with no column mapping is
-/// [`Error::UnknownIdentifier`], the same gate
+/// Returns the ordered [`SeekColumn`] list — fed to both the cursor encode and the
+/// cursor validate (so the column list is derived once) — alongside the [`Order`]
+/// items for the SQL clause. Each seek column carries the proto `field_path` the
+/// encode side reflects from next to its SQL `column`. A field path with no column
+/// mapping is [`Error::UnknownIdentifier`], the same gate
 /// [`transpile_filter`](crate::transpile_filter) applies.
 ///
 /// # Always-on key tie-break
@@ -87,7 +119,11 @@ pub fn transpile_order_by(
             .column(&field.path)
             .ok_or_else(|| Error::UnknownIdentifier(field.path.clone()))?;
         let ty = schema.column_type(column).cloned().unwrap_or(Type::String);
-        columns.push((column.to_string(), ty));
+        columns.push(SeekColumn {
+            column: column.to_string(),
+            field_path: field.path.clone(),
+            ty,
+        });
         orders.push(Order {
             column: column.to_string(),
             desc: field.desc,
@@ -100,7 +136,11 @@ pub fn transpile_order_by(
         if orders.iter().any(|order| order.column == *key) {
             continue;
         }
-        columns.push(((*key).to_string(), Type::String));
+        columns.push(SeekColumn {
+            column: (*key).to_string(),
+            field_path: (*key).to_string(),
+            ty: Type::String,
+        });
         orders.push(Order::asc(*key));
     }
 
