@@ -23,10 +23,11 @@ The listen address defaults to `127.0.0.1:50051`. Override it with the
 FREIGHT_ADDR=0.0.0.0:8080 cargo run -p freight-server
 ```
 
-The Site store is backed by an in-memory SQLite database, so `ListSites`
-filtering works out of the box (`aip-sql` transpiles the `filter` to
-parameterized SQL and runs it there). Building the example therefore needs a C
-toolchain for the bundled SQLite.
+The stores are backed by an in-memory SQLite database — shippers, sites, and
+shipments are typed-key tables in one connection — so `ListSites` filtering works
+out of the box (`aip-sql` transpiles the `filter` to parameterized SQL and runs it
+there) and a hard-deleted shipper cascades to its children. Building the example
+therefore needs a C toolchain for the bundled SQLite.
 
 ## Try it
 
@@ -122,11 +123,12 @@ SITE_ALPHA=$(gc -d '{"parent":"'"$ID"'","site":{"display_name":"Alpha","state":"
 gc -d '{"parent":"'"$ID"'","order_by":"display_name"}'      127.0.0.1:50051 $SVC/ListSites
 gc -d '{"parent":"'"$ID"'","order_by":"display_name desc"}' 127.0.0.1:50051 $SVC/ListSites
 
-# Sorting and paging happen in SQL: an ORDER BY plus a LIMIT/OFFSET derived
-# from the page size and the offset page token. Ask for one site per page, then
-# pass the returned `nextPageToken` back to get the next — the page boundaries
-# stay stable because the resource name breaks ties. (Changing `order_by` or
-# `filter` mid-pagination flips the request checksum and rejects the token.)
+# Sorting and paging happen in SQL: an ORDER BY plus a cursor seek over the key
+# tuple — the page token carries the last row's key, not an offset. Ask for one
+# site per page, then pass the returned `nextPageToken` back to get the next — the
+# page boundaries stay stable because the key columns break ties. (Changing
+# `order_by` or `filter` mid-pagination flips the request checksum and rejects the
+# token; an old offset-format token is rejected outright so the client restarts.)
 TOKEN=$(gc -d '{"parent":"'"$ID"'","order_by":"display_name","page_size":1}' \
                                            127.0.0.1:50051 $SVC/ListSites | jq -r '.nextPageToken // empty')
 gc -d '{"parent":"'"$ID"'","order_by":"display_name","page_size":1,"page_token":"'"$TOKEN"'"}' \
@@ -141,7 +143,7 @@ gc -d '{"parent":"'"$ID"'","order_by":"bogus_field"}' 127.0.0.1:50051 $SVC/ListS
 # AIP-160 filtering: the filter is type-checked, transpiled to parameterized
 # SQL by `aip::sql`, and run in the in-memory SQLite store, so only matching
 # sites come back. The full operator set lowers — `=` `!=` `<` `<=` `>` `>=`,
-# `AND` `OR` `NOT` — over the scalar `display_name`/`name`, the nested numeric
+# `AND` `OR` `NOT` — over the scalar `display_name`, the nested numeric
 # `lat_lng.latitude`, the timestamp `create_time`, and the enum `state`.
 gc -d '{"parent":"'"$ID"'","filter":"display_name = \"Alpha\" OR display_name = \"Bravo\""}' 127.0.0.1:50051 $SVC/ListSites
 gc -d '{"parent":"'"$ID"'","filter":"state = STATE_ACTIVE"}'                127.0.0.1:50051 $SVC/ListSites
@@ -156,12 +158,21 @@ gc -d '{"parent":"'"$ID"'","filter":"tags:refrigerated"}'    127.0.0.1:50051 $SV
 
 # Server-side predicate composition: the user `filter` above is never run alone.
 # `aip::sql::Predicate` folds it together with the server's own predicates — an
-# AIP parent scope (`name LIKE '$ID/%'`, the parent escaped + bound) and a
-# soft-delete (`delete_time IS NULL`) — into one fragment that owns precedence and
-# placeholder numbering, so a user `a OR b` can't re-associate against the
-# server's `AND`s. The scope runs in the SQL `WHERE`, so a site under another
-# shipper never leaks into this listing.
+# AIP parent scope (one equality per concrete parent key column, e.g. `shipper =
+# '<id>'`) and a soft-delete (`delete_time IS NULL`) — into one fragment that owns
+# precedence and placeholder numbering, so a user `a OR b` can't re-associate
+# against the server's `AND`s. The scope runs in the SQL `WHERE`, so a site under
+# another shipper never leaks into this listing.
 gc -d '{"parent":"'"$ID"'","filter":"display_name = \"Alpha\" OR display_name = \"Bravo\""}' 127.0.0.1:50051 $SVC/ListSites
+
+# A `-` wildcard in the parent lists sites across every shipper: the equality is
+# omitted rather than over-matching across name segments.
+gc -d '{"parent":"shippers/-"}' 127.0.0.1:50051 $SVC/ListSites
+
+# BatchGetSites fetches several sites by name in one call (AIP-231): each name is a
+# primary-key lookup, returned in request order. Any missing name fails the whole
+# batch with NOT_FOUND rather than returning a partial result.
+gc -d '{"parent":"'"$ID"'","names":["'"$SITE_BRAVO"'","'"$SITE_ALPHA"'"]}' 127.0.0.1:50051 $SVC/BatchGetSites
 
 # A missing required field is rejected the same way (the reflective
 # `aip-fieldbehavior` validator; the BadRequest names `shipper.display_name`,
@@ -172,7 +183,7 @@ gc -d '{"shipper":{}}'                                       127.0.0.1:50051 $SV
 Shipments live under a shipper too. `CreateShipment` mints a system-assigned id;
 `ListShipments` runs the **same** server-side composition as `ListSites` —
 parent scope + soft-delete + the user `filter` — against its own SQLite store, but
-carries no `order_by`, so results come back in resource-name order:
+carries no `order_by`, so results come back in key (`shipper`, `shipment`) order:
 
 ```sh
 # Seed a couple of shipments between the sites created above, each carrying
@@ -393,17 +404,18 @@ wired up.
 | Method            | aip-rs primitive(s)                          | Status      |
 | ----------------- | -------------------------------------------- | ----------- |
 | `GetShipper`      | `resourcename` (validate) + generated `ShipperResourceName` (pattern match), `iam` (AIP-211 authorization → non-leaking `PERMISSION_DENIED` / `NOT_FOUND`-via-parent over the shared Policy store), `softdelete` (AIP-164 `show_deleted` visibility gating) | wired |
-| `ListShippers`    | `pagination` (`Page::parse` folds the request-checksum guard + offset token verification + AIP-158 size policy via `SizeLimits`, then `Page::apply` slices the in-memory visible-shipper set and mints the follow-on token; read through the generated `PageRequest` impl) + `softdelete` (AIP-164 `show_deleted` filtering) | wired |
+| `ListShippers`    | `pagination` (`Page::parse` folds the request-checksum guard + cursor token decode + AIP-158 size policy via `SizeLimits`, then `fetch_limit`/`split_overfetch` drive a keyset seek over the `shippers` table and mint the follow-on token; read through the generated `PageRequest` impl) + `softdelete` (AIP-164 `show_deleted` filtering, run as `delete_time IS NULL` in SQL) | wired |
 | `CreateShipper`   | `resourceid` (generate), generated `ShipperResourceName` (validated `new` + infallible `Display`), `fieldbehavior` (clear OUTPUT_ONLY/IMMUTABLE, validate REQUIRED), `etag` (stamp the AIP-154 content etag), `requestid` (AIP-155 `request_id` validation + idempotent replay), `preview` (AIP-163 `validate_only` gate) | wired |
 | `UpdateShipper`   | `fieldmask` (typed `update` over `update_mask`), `fieldbehavior` (copy OUTPUT_ONLY from existing, validate REQUIRED in mask), `etag` (AIP-154 freshness check + re-stamp), `preview` (AIP-163 `validate_only` gate) | wired |
 | `DeleteShipper`   | `resourcename` (validate) + generated `ShipperResourceName` (pattern match), `etag` (AIP-154 freshness check), `softdelete` (AIP-164 soft delete — stamp `delete_time`, keep the record) | wired |
 | `UndeleteShipper` | `resourcename` (validate) + generated `ShipperResourceName` (pattern match), `softdelete` (AIP-164 undelete — clear `delete_time` after confirming the shipper is soft-deleted, else `ALREADY_EXISTS`) | wired |
 | `CreateSite`      | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `SiteResourceName` (validated `new` + infallible `Display`), `fieldbehavior` (reflective REQUIRED validation → AIP-193, the `aip-rs` sentinel rewritten to the service domain by the boundary layer), `requestid` (AIP-155 idempotent replay), `preview` (AIP-163 `validate_only` gate) | wired |
-| `ListSites`       | `ordering` (parse/validate, read through the generated `OrderByRequest` impl) + `pagination` (`Page::parse` preamble: checksum guard + offset token + `SizeLimits` size policy, then `fetch_limit`/`split_overfetch` drive the store overfetch probe at the unsigned `offset()` and mint the follow-on token; read through the generated `PageRequest` impl) + `filtering`/`aip-sql` (filter declarations derived from the `Site` descriptor + server-composed scope/soft-delete + `ORDER BY`/`LIMIT`/`OFFSET` → in-memory SQLite), with the in-memory `filtering` matcher pinned against SQLite | wired |
+| `ListSites`       | `ordering` (parse/validate, read through the generated `OrderByRequest` impl) + `pagination` (`Page::parse` preamble: checksum guard + cursor token + `SizeLimits` size policy, then `fetch_limit`/`split_overfetch` drive the store overfetch probe whose seek is a `Predicate::tuple_gt` over the order_by columns plus the key tie-break, and mint the follow-on token; read through the generated `PageRequest` impl) + `filtering`/`aip-sql` (filter declarations derived from the `Site` descriptor + server-composed scope (one `eq` per concrete parent variable, omitted per `-` wildcard)/soft-delete + `ORDER BY`/`LIMIT` → in-memory SQLite), with the in-memory `filtering` matcher pinned against SQLite | wired |
 | `CreateShipment`  | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `ShipmentResourceName` (validated `new` + infallible `Display`), `fieldbehavior` (reflective REQUIRED validation of all six fields — endpoints + four pickup/delivery timestamps — into one AIP-193 response, the `aip-rs` sentinel rewritten to the service domain by the boundary layer), `requestid` (AIP-155 idempotent replay), `preview` (AIP-163 `validate_only` gate) | wired |
-| `ListShipments`   | `pagination` (`Page::parse` preamble: checksum guard + offset token + `SizeLimits` size policy, then `fetch_limit`/`split_overfetch` drive the store overfetch probe at the unsigned `offset()` and mint the follow-on token; read through the generated `PageRequest` impl) + `filtering`/`aip-sql` (filter declarations derived from the `Shipment` descriptor + server-composed scope/soft-delete → in-memory SQLite) | wired |
+| `ListShipments`   | `pagination` (`Page::parse` preamble: checksum guard + cursor token + `SizeLimits` size policy, then `fetch_limit`/`split_overfetch` drive the store overfetch probe whose seek is a `Predicate::tuple_gt` over the key tie-break, and mint the follow-on token; read through the generated `PageRequest` impl) + `filtering`/`aip-sql` (filter declarations derived from the `Shipment` descriptor + server-composed scope/soft-delete → in-memory SQLite) | wired |
+| `BatchGetSites`   | generated `SiteResourceName` (parse each name to its typed key) + per-name primary-key `get_site` lookups in request order, with the AIP-231 whole-batch-`NOT_FOUND` default (any missing site fails the batch) | wired |
 | `IAMPolicy.GetIamPolicy` / `SetIamPolicy` | `iam` (Member validation + structural read-modify-write: dedupe/normalise, `etag` optimistic concurrency, conditions⟹version-3) over a decomposed SQLite policy store (iam-go's `iam_policy_bindings` schema), with `version` recovered on read by `policy::canonical_version` (the invariant `validate` enforces, read backwards) | wired |
 | `IAMPolicy.TestIamPermissions` | `iam` + the opt-in cel-backed `eval` adapter (`aip::iam::eval`): role→permission expansion via an example-owned catalogue built on `aip::iam::RoleSet` (the library ships the mechanism, never role definitions), Member matching through `aip::iam::grant_admits`, Condition evaluation against a `RequestContext` whose `request.time` defaults to now | wired |
 | `BatchCreateShippers` | `lro` (AIP-151 / AIP-233): `Operation<M, R>` packs progress `metadata` + the created shippers `response` into `Any` by descriptor; a `tokio` task steps `set_metadata` → `succeed`, honouring a `CancelOperation` flag with the terminal `cancel`; `OperationName` mints the flat name; `preview` (AIP-163 `validate_only` → `Operation::validated`, empty name). Reuses the `CreateShipper` pipeline per shipper | wired |
 | `Operations.GetOperation` / `ListOperations` / `WaitOperation` / `CancelOperation` / `DeleteOperation` | `lro`: `OperationName` (validate), the `not_found` shaping, `WaitTimeout` (default/cap, the block is the server's), `into_inner`/`from_inner` round-tripping the stored `Operation`. AIP-160 filtering + full `pagination` over operations deferred (ADR-0015) | wired |
-| `GetSite` / `UpdateSite` / `DeleteSite`, `BatchGetSites`, `GetShipment` / `UpdateShipment` / `DeleteShipment` | the same primitives | `Unimplemented` |
+| `GetSite` / `UpdateSite` / `DeleteSite`, `GetShipment` / `UpdateShipment` / `DeleteShipment` | the same primitives | `Unimplemented` |

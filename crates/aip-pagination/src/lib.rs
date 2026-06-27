@@ -9,7 +9,7 @@
 //! # Example
 //!
 //! ```
-//! use aip_pagination::{PageRequest, PageToken};
+//! use aip_pagination::{CursorEntry, CursorValue, PageRequest, PageToken};
 //!
 //! struct ListReq {
 //!     page_token: String,
@@ -24,18 +24,24 @@
 //!     }
 //! }
 //!
-//! // first page: empty token (checksum from `request_checksum` for
-//! // reflective requests; constant here for brevity)
+//! // first page: an empty token decodes to no cursor (checksum from
+//! // `request_checksum` for reflective requests; constant here for brevity)
 //! let checksum = 42;
 //! let first = ListReq { page_token: String::new(), page_size: 10 };
-//! let token = PageToken::parse(&first, checksum).unwrap();
+//! assert!(PageToken::parse(&first, checksum).unwrap().is_none());
 //!
-//! // mint the next-page token, verify it on the follow-up request
-//! let follow_up = ListReq { page_token: token.next(10).encode(), page_size: 10 };
-//! PageToken::parse(&follow_up, checksum).unwrap();
+//! // mint the next-page token from the last row's key, verify it next request
+//! let cursor = vec![CursorEntry {
+//!     column: "shipper".to_owned(),
+//!     value: CursorValue::Text("acme".to_owned()),
+//! }];
+//! let token = PageToken::encode(cursor.clone(), checksum);
+//! let follow_up = ListReq { page_token: token, page_size: 10 };
+//! assert_eq!(PageToken::parse(&follow_up, checksum).unwrap(), Some(cursor));
 //!
 //! // a request that changed mid-pagination is rejected
-//! assert!(PageToken::parse(&follow_up, 7).is_err());
+//! let stale = ListReq { page_token: PageToken::encode(vec![], checksum), page_size: 10 };
+//! assert!(PageToken::parse(&stale, 7).is_err());
 //! ```
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
@@ -48,7 +54,7 @@ use serde::{Deserialize, Serialize};
 /// Version byte prepended to every encoded page token. Bump it whenever the
 /// token wire format changes so that tokens minted by an older format fail
 /// loudly (see ADR-0004) instead of silently mis-decoding under the new one.
-const PAGE_TOKEN_VERSION: u8 = 1;
+const PAGE_TOKEN_VERSION: u8 = 2;
 
 /// Errors produced when parsing or verifying page tokens.
 #[derive(Debug, thiserror::Error)]
@@ -93,60 +99,85 @@ pub trait PageRequest {
     }
 }
 
-/// An offset-based page token.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// One value in a cursor: a closed sum over the scalar shapes a sortable column
+/// can hold. Null is not a cursor value — a sort over a nullable column would make
+/// the seek ambiguous. Timestamps ride RFC3339 in [`Text`](CursorValue::Text) and
+/// proto enums ride as their value name in `Text`.
+///
+/// Lives here, in the leaf crate, so it carries no dependency on the SQL layer; a
+/// handler converts it to its store's bind value at the one boundary that depends
+/// on both.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum CursorValue {
+    /// A boolean.
+    Bool(bool),
+    /// A signed 64-bit integer.
+    Int(i64),
+    /// A 64-bit float.
+    Double(f64),
+    /// A UTF-8 string — also a timestamp (RFC3339) or an enum value name.
+    Text(String),
+    /// Raw bytes.
+    Bytes(Vec<u8>),
+}
+
+/// One cursor entry: a SQL column paired with the last row's value in it. The
+/// cursor is self-describing — each entry names its column — so a token reads
+/// legibly at the debug layer and its column list can be cross-checked against the
+/// resolved `ORDER BY`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CursorEntry {
+    /// The SQL column this value came from.
+    pub column: String,
+    /// The last row's value in that column.
+    pub value: CursorValue,
+}
+
+/// A cursor page token: the last row's ordered key values, in `ORDER BY` clause
+/// order, plus the request checksum that detects a request changed mid-pagination.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PageToken {
-    /// Offset of the page into the result set.
-    pub offset: i64,
+    /// The seek key: one entry per `ORDER BY` column, in clause order.
+    pub cursor: Vec<CursorEntry>,
     /// Checksum of the request fields that must stay constant across pages.
     pub request_checksum: u32,
 }
 
 impl PageToken {
-    /// Parses and verifies an offset page token from a request and the
+    /// Decode and verify a cursor page token from a request and the
     /// [`request_checksum`] of its non-pagination fields.
     ///
-    /// An empty [`page_token`](PageRequest::page_token) yields offset 0 (plus any
-    /// [`skip`](PageRequest::skip)); a non-empty one is decoded and its stored
-    /// offset returned (again with `skip` applied on top, per AIP-158). The token
-    /// is rejected with [`Error::ChecksumMismatch`] when its recorded checksum
-    /// disagrees with `checksum` — i.e. the client changed a non-pagination field
-    /// (filter, order_by, parent, …) mid-pagination.
+    /// An empty [`page_token`](PageRequest::page_token) is the first page, so it
+    /// returns `Ok(None)`; a non-empty one is decoded (rejecting a stale-format
+    /// token by its version byte) and its cursor returned. The token is rejected
+    /// with [`Error::ChecksumMismatch`] when its recorded checksum disagrees with
+    /// `checksum` — i.e. the client changed a non-pagination field (filter,
+    /// order_by, parent, …) mid-pagination.
     ///
-    /// Unlike `aip-go`, no `pageTokenChecksumMask` is applied: the 1-byte version
-    /// prefix already forces older tokens to fail loudly across a format change
-    /// (see ADR-0004), so the mask would be redundant.
-    pub fn parse(request: &impl PageRequest, checksum: u32) -> Result<Self, Error> {
-        let skip = i64::from(request.skip());
+    /// The caller still cross-checks the cursor's columns against the resolved
+    /// `ORDER BY` and each value's variant against its column type — that needs the
+    /// schema, which this leaf crate does not depend on.
+    pub fn parse(
+        request: &impl PageRequest,
+        checksum: u32,
+    ) -> Result<Option<Vec<CursorEntry>>, Error> {
         if request.page_token().is_empty() {
-            return Ok(Self {
-                offset: skip,
-                request_checksum: checksum,
-            });
+            return Ok(None);
         }
         let token: Self = decode_page_token(request.page_token())?;
         if token.request_checksum != checksum {
             return Err(Error::ChecksumMismatch);
         }
-        Ok(Self {
-            // Tokens are unsigned and therefore client-forgeable (ADR-0004), so
-            // saturate rather than risk an overflow panic on a hostile offset.
-            offset: token.offset.saturating_add(skip),
-            request_checksum: token.request_checksum,
+        Ok(Some(token.cursor))
+    }
+
+    /// Mint a token from the last row's `cursor`, carrying `checksum` forward so
+    /// the next page still rejects a changed request.
+    pub fn encode(cursor: Vec<CursorEntry>, checksum: u32) -> String {
+        encode_page_token(&Self {
+            cursor,
+            request_checksum: checksum,
         })
-    }
-
-    /// The token for the next page, given the current page size.
-    pub fn next(self, page_size: i32) -> Self {
-        Self {
-            offset: self.offset + i64::from(page_size),
-            ..self
-        }
-    }
-
-    /// Encode this token to its opaque string form.
-    pub fn encode(&self) -> String {
-        encode_page_token(self)
     }
 }
 
@@ -174,41 +205,39 @@ pub struct SizeLimits {
     pub max: i32,
 }
 
-/// The resolved AIP-158 pagination state for one list page: the verified offset
-/// [`PageToken`] and the effective page size after the policy default/cap has
-/// been applied.
+/// The resolved AIP-158 pagination state for one list page: the decoded seek
+/// cursor (the start, `None` on the first page) and the effective page size after
+/// the policy default/cap.
 ///
 /// Produced by [`Page::parse`], which folds the whole list-pagination preamble —
-/// request checksum, token parse/verify, size resolution — into one call. A list
-/// handler opens with `Page::parse(&req, limits)?`, reads the page start and width
-/// through the unsigned [`offset`](Self::offset) / [`size`](Self::size) accessors,
-/// and **owns applying itself to the results**: [`apply`](Self::apply) for a
-/// collection already in memory, or the [`fetch_limit`](Self::fetch_limit) /
-/// [`split_overfetch`](Self::split_overfetch) pair for a store-backed listing.
-/// Each of those mints the `next_page_token` the handler returns.
+/// request checksum, token decode/verify, size resolution — into one call. A list
+/// handler opens with `Page::parse(&req, limits)?`, seeks past
+/// [`cursor`](Self::cursor) (a `Predicate::tuple_gt` in SQL, or a key comparison
+/// over an in-memory listing), overfetches [`fetch_limit`](Self::fetch_limit)
+/// rows, and hands the result to [`split_overfetch`](Self::split_overfetch) —
+/// which truncates the probe row and mints the `next_page_token` from the last
+/// kept row.
 ///
-/// The fields are **private**: by [`parse`](Self::parse) the offset is clamped
-/// non-negative and the size is floored at zero, so the post-validation surface a
-/// handler reads is unsigned — there is no signed [`PageToken::offset`] or `i32`
-/// size left to cast at the call site. The raw signed `i64`/`i32` representation is
-/// an internal detail, not the consumer story.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The fields are **private**: by [`parse`](Self::parse) the size is floored at
+/// zero, so the width a handler reads is unsigned with no cast at the call site.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Page {
-    /// The verified offset page token, its `offset` clamped non-negative by
-    /// [`parse`](Self::parse) — where this page starts.
-    token: PageToken,
-    /// The page size after the [`SizeLimits`] default/cap has been applied, floored
-    /// at zero by [`resolve_size`] so a degenerate [`SizeLimits`] yields a 0-size
-    /// page rather than a wrapped cast (a negative *request* is the separate
+    /// The decoded seek cursor, `None` on the first page.
+    cursor: Option<Vec<CursorEntry>>,
+    /// The page size after the [`SizeLimits`] default/cap, floored at zero by
+    /// [`resolve_size`] so a degenerate [`SizeLimits`] yields a 0-size page rather
+    /// than a wrapped cast (a negative *request* is the separate
     /// [`Error::NegativePageSize`]).
     size: i32,
+    /// Carried into the next page's token so a changed request is still rejected.
+    request_checksum: u32,
 }
 
 impl Page {
     /// Folds the AIP-158 list-pagination preamble into one step: checksum the
-    /// request's non-pagination fields ([`request_checksum`]), parse and verify
-    /// the offset page token against that checksum ([`PageToken::parse`], which
-    /// rejects a request that changed mid-pagination), and resolve the effective
+    /// request's non-pagination fields ([`request_checksum`]), decode and verify
+    /// the cursor page token against that checksum ([`PageToken::parse`], which
+    /// rejects a stale-format or changed-request token), and resolve the effective
     /// page size from `limits`.
     ///
     /// Size resolution (AIP-158): a negative `page_size` is rejected with
@@ -223,35 +252,25 @@ impl Page {
         limits: SizeLimits,
     ) -> Result<Self, Error> {
         let checksum = request_checksum(request);
-        let mut token = PageToken::parse(request, checksum)?;
-        // Clamp a forged negative offset to 0 *here*, not in the accessor: the
-        // next-page token is minted from `offset + size` (see [`PageToken::next`]),
-        // so clamping only on read would advance from `negative + size` and skip
-        // rows. Tokens are unsigned and client-forgeable (ADR-0004), so this is the
-        // one place the negative is neutralized for both the served page and its
-        // successor. `PageToken::offset` stays a signed wire artifact.
-        token.offset = token.offset.max(0);
+        let cursor = PageToken::parse(request, checksum)?;
         let size = resolve_size(request.page_size(), limits)?;
-        Ok(Self { token, size })
+        Ok(Self {
+            cursor,
+            size,
+            request_checksum: checksum,
+        })
     }
 
-    /// Where this page starts: the verified offset, clamped non-negative by
-    /// [`parse`](Self::parse), as an unsigned `u64`.
-    ///
-    /// This is the post-validation surface a list handler hands to its store
-    /// (`OFFSET ?`) — no `as u64` / `try_from` ceremony at the call site, because
-    /// the clamp already happened.
-    pub fn offset(&self) -> u64 {
-        // Clamped non-negative at parse, so the cast cannot wrap into the high
-        // `u64` range.
-        self.token.offset as u64
+    /// The decoded seek cursor — the last row of the previous page — or `None` on
+    /// the first page. A handler turns it into the store's seek (a
+    /// `Predicate::tuple_gt` over the ordered columns) after cross-checking its
+    /// columns against the resolved `ORDER BY`.
+    pub fn cursor(&self) -> Option<&[CursorEntry]> {
+        self.cursor.as_deref()
     }
 
     /// The effective page size as an unsigned `u64` — the AIP-158 size after the
     /// [`SizeLimits`] default/cap, floored at zero by the internal size resolution.
-    ///
-    /// The unsigned partner to [`offset`](Self::offset): the width a handler passes
-    /// to a store or compares a result length against, cast-free.
     pub fn size(&self) -> u64 {
         // Floored at zero by `resolve_size`, so the cast cannot wrap.
         self.size as u64
@@ -268,76 +287,30 @@ impl Page {
         self.size() + 1
     }
 
-    /// Apply this page to a collection that **lives in memory**: slice out the
-    /// page's window, decide whether more remain, and mint the
-    /// `next_page_token` — returning the page rows paired with that token.
-    ///
-    /// For the freight demo this is the shipper `BTreeMap` listing and any
-    /// post-filter set (e.g. the soft-delete visibility filter) — collections the
-    /// handler already holds in full. The `Vec` is consumed and the page drained
-    /// out of it in place, so there are no element clones.
-    ///
-    /// **Do not** `fetch_all().apply(..)` a store-backed listing to use this: that
-    /// pulls the whole table into memory to serve one page, exactly what the
-    /// [`fetch_limit`](Self::fetch_limit) / [`split_overfetch`](Self::split_overfetch)
-    /// pair exists to avoid. This helper is for collections that are *already*
-    /// resident, not a shortcut around paging in the store.
-    pub fn apply<T>(&self, mut items: Vec<T>) -> (Vec<T>, String) {
-        let total = items.len();
-        // `offset`/`size` are bounded unsigned values; saturate the `usize`
-        // conversions so a 32-bit target degrades to "past the end" (an empty page)
-        // rather than wrapping. `.min(total)` keeps both within the collection.
-        let start = usize::try_from(self.offset())
-            .unwrap_or(usize::MAX)
-            .min(total);
-        let width = usize::try_from(self.size()).unwrap_or(usize::MAX);
-        let end = start.saturating_add(width).min(total);
-        // More remain only when this page stops short of the full collection.
-        let token = self.next_token(end < total);
-        // Drop the tail past `end`, then drain the `0..start` prefix away (the
-        // `Drain` drop shifts the rest down), leaving exactly `start..end` — no
-        // clones.
-        items.truncate(end);
-        items.drain(..start);
-        (items, token)
-    }
-
     /// Split a store-backed **overfetch** (a `LIMIT` of [`fetch_limit`](Self::fetch_limit)
     /// rows) into the page to return and the `next_page_token`: if the store handed
     /// back more rows than the page size, another page remains — truncate the extra
-    /// probe row off and mint the token; otherwise the listing is exhausted.
+    /// probe row off and mint the token from the last kept row's cursor entries
+    /// (`to_cursor`); otherwise the listing is exhausted and the token is empty.
     ///
-    /// Pairs with [`fetch_limit`](Self::fetch_limit): the handler fetches
-    /// `fetch_limit()` rows at [`offset`](Self::offset), then hands the result
+    /// Pairs with [`fetch_limit`](Self::fetch_limit): the handler seeks past
+    /// [`cursor`](Self::cursor), fetches `fetch_limit()` rows, then hands the result
     /// straight here. See the **Overfetch probe** glossary entry.
-    pub fn split_overfetch<T>(&self, mut rows: Vec<T>) -> (Vec<T>, String) {
+    pub fn split_overfetch<T, F>(&self, mut rows: Vec<T>, to_cursor: F) -> (Vec<T>, String)
+    where
+        F: FnOnce(&T) -> Vec<CursorEntry>,
+    {
         // The probe row makes the result longer than the page exactly when a
         // further page exists.
         let has_more = rows.len() as u64 > self.size();
         // Truncate is a no-op when the store returned a short final page.
         rows.truncate(usize::try_from(self.size()).unwrap_or(usize::MAX));
-        let token = self.next_token(has_more);
+        // Mint the next token from the last kept row's key, or end the listing.
+        let token = match (has_more, rows.last()) {
+            (true, Some(last)) => PageToken::encode(to_cursor(last), self.request_checksum),
+            _ => String::new(),
+        };
         (rows, token)
-    }
-
-    /// The opaque token for the page after this one, or the empty string when no
-    /// further page remains.
-    ///
-    /// The escape hatch behind [`apply`](Self::apply) and
-    /// [`split_overfetch`](Self::split_overfetch) — reach for it directly only in a
-    /// custom flow they do not cover (e.g. a total-count handler computing
-    /// `has_more` as `end < total` itself).
-    ///
-    /// `has_more` is the caller's "is there another page?" signal. When set, the
-    /// token advances the offset by this page's [`size`](Self::size), carrying the
-    /// request checksum forward so the next page still rejects a changed request;
-    /// when unset, the empty string tells the client the listing is exhausted.
-    pub fn next_token(&self, has_more: bool) -> String {
-        if has_more {
-            self.token.next(self.size).encode()
-        } else {
-            String::new()
-        }
     }
 }
 
@@ -573,35 +546,38 @@ mod tests {
         }
     }
 
+    /// A cursor entry over `column` holding `value`.
+    fn entry(column: &str, value: CursorValue) -> CursorEntry {
+        CursorEntry {
+            column: column.to_owned(),
+            value,
+        }
+    }
+
     #[test]
-    fn round_trips_offset_page_token() {
+    fn round_trips_cursor_page_token() {
+        // Every cursor-value variant survives the postcard + base64url round-trip.
         let token = PageToken {
-            offset: 100,
+            cursor: vec![
+                entry("display_name", CursorValue::Text("Oslo Dock".to_owned())),
+                entry("size", CursorValue::Int(-3)),
+                entry("ratio", CursorValue::Double(1.5)),
+                entry("active", CursorValue::Bool(true)),
+                entry("blob", CursorValue::Bytes(vec![1, 2, 3])),
+            ],
             request_checksum: 0xDEAD_BEEF,
         };
-        let decoded: PageToken = decode_page_token(&token.encode()).expect("round-trips");
+        let encoded = PageToken::encode(token.cursor.clone(), token.request_checksum);
+        let decoded: PageToken = decode_page_token(&encoded).expect("round-trips");
         assert_eq!(decoded, token);
     }
 
     #[test]
-    fn next_advances_offset_by_page_size() {
-        let token = PageToken {
-            offset: 10,
-            request_checksum: 0x1234,
-        };
-        let next = token.next(20);
-        assert_eq!(next.offset, 30);
-        // The checksum is carried through unchanged across pages.
-        assert_eq!(next.request_checksum, token.request_checksum);
-    }
-
-    #[test]
     fn wrong_version_prefix_is_rejected() {
-        let encoded = PageToken {
-            offset: 1,
-            request_checksum: 2,
-        }
-        .encode();
+        let encoded = PageToken::encode(
+            vec![entry("shipper", CursorValue::Text("acme".to_owned()))],
+            2,
+        );
         // Flip the version byte (the first decoded byte) and re-encode, leaving
         // the rest of the payload intact.
         let mut bytes = URL_SAFE_NO_PAD.decode(&encoded).expect("valid base64url");
@@ -654,92 +630,60 @@ mod tests {
         assert_eq!(req.skip(), 0); // default
     }
 
-    /// A reflection-free offset request used to exercise [`PageToken::parse`];
+    /// A reflection-free request used to exercise [`PageToken::parse`];
     /// `page_size` is irrelevant to parsing, so it is fixed at 0.
-    struct OffsetReq {
+    struct CursorReq {
         page_token: String,
-        skip: i32,
     }
-    impl PageRequest for OffsetReq {
+    impl PageRequest for CursorReq {
         fn page_token(&self) -> &str {
             &self.page_token
         }
         fn page_size(&self) -> i32 {
             0
         }
-        fn skip(&self) -> i32 {
-            self.skip
-        }
     }
 
     #[test]
-    fn parse_empty_token_starts_at_skip() {
-        // No token → offset 0, carrying the supplied checksum forward so the next
-        // page can detect a changed request.
-        let first = PageToken::parse(
-            &OffsetReq {
+    fn parse_empty_token_is_the_first_page() {
+        // No token → no cursor; the listing starts from the top.
+        let cursor = PageToken::parse(
+            &CursorReq {
                 page_token: String::new(),
-                skip: 0,
             },
             0xABCD,
         )
         .expect("empty token parses");
-        assert_eq!(first.offset, 0);
-        assert_eq!(first.request_checksum, 0xABCD);
-
-        // Skip shifts the very first page (AIP-158).
-        let skipped = PageToken::parse(
-            &OffsetReq {
-                page_token: String::new(),
-                skip: 5,
-            },
-            0xABCD,
-        )
-        .expect("empty token with skip parses");
-        assert_eq!(skipped.offset, 5);
+        assert_eq!(cursor, None);
     }
 
     #[test]
-    fn parse_valid_token_returns_stored_offset() {
+    fn parse_valid_token_returns_the_cursor() {
         let checksum = 0x1234_5678;
-        let minted = PageToken {
-            offset: 100,
-            request_checksum: checksum,
-        };
+        let seek = vec![
+            entry("display_name", CursorValue::Text("Oslo Dock".to_owned())),
+            entry("site", CursorValue::Text("dock-1".to_owned())),
+        ];
         let parsed = PageToken::parse(
-            &OffsetReq {
-                page_token: minted.encode(),
-                skip: 0,
+            &CursorReq {
+                page_token: PageToken::encode(seek.clone(), checksum),
             },
             checksum,
         )
         .expect("matching checksum parses");
-        assert_eq!(parsed.offset, 100);
-
-        // Skip stacks on top of the token's recorded position.
-        let skipped = PageToken::parse(
-            &OffsetReq {
-                page_token: minted.encode(),
-                skip: 5,
-            },
-            checksum,
-        )
-        .expect("matching checksum parses");
-        assert_eq!(skipped.offset, 105);
+        assert_eq!(parsed, Some(seek));
     }
 
     #[test]
     fn parse_rejects_checksum_mismatch() {
         // A token minted against one request is rejected when replayed against a
         // request whose non-pagination fields changed (different checksum).
-        let minted = PageToken {
-            offset: 100,
-            request_checksum: 0x1111,
-        };
         let err = PageToken::parse(
-            &OffsetReq {
-                page_token: minted.encode(),
-                skip: 0,
+            &CursorReq {
+                page_token: PageToken::encode(
+                    vec![entry("site", CursorValue::Text("dock-1".to_owned()))],
+                    0x1111,
+                ),
             },
             0x2222,
         )
@@ -752,33 +696,13 @@ mod tests {
         // A malformed (non-empty) token surfaces the decode error rather than
         // being mistaken for the start of the result set.
         let err = PageToken::parse(
-            &OffsetReq {
+            &CursorReq {
                 page_token: "not*base64".to_owned(),
-                skip: 0,
             },
             0,
         )
         .expect_err("malformed token");
         assert!(matches!(err, Error::Decode(_)), "{err:?}");
-    }
-
-    #[test]
-    fn parse_saturates_offset_on_overflow() {
-        // Tokens are unsigned and forgeable: a near-max offset plus a skip must
-        // saturate rather than overflow-panic (a debug-build crash otherwise).
-        let minted = PageToken {
-            offset: i64::MAX,
-            request_checksum: 0,
-        };
-        let parsed = PageToken::parse(
-            &OffsetReq {
-                page_token: minted.encode(),
-                skip: 5,
-            },
-            0,
-        )
-        .expect("forged near-max offset parses");
-        assert_eq!(parsed.offset, i64::MAX);
     }
 
     /// Builds a `ListSitesRequest` fixture (it carries `parent`, `page_size`,
@@ -896,125 +820,70 @@ mod tests {
     // guard) lives in freight-server's `list_*` handler tests, where the generated
     // requests carry both impls.
 
-    #[test]
-    fn next_token_is_empty_at_the_end_and_advances_otherwise() {
-        // `next_token(false)` ends the listing with the empty string; `(true)`
-        // mints the follow-on token, advancing the offset by the page size and
-        // carrying the checksum forward.
-        let page = Page {
-            token: PageToken {
-                offset: 20,
-                request_checksum: 0x1234,
-            },
-            size: 10,
-        };
-        assert_eq!(page.next_token(false), "");
-
-        let next = page.next_token(true);
-        assert!(!next.is_empty());
-        let decoded: PageToken = decode_page_token(&next).expect("the next token round-trips");
-        assert_eq!(decoded.offset, 30);
-        assert_eq!(decoded.request_checksum, 0x1234);
-    }
-
-    /// Builds a [`Page`] at `offset` with page size `size` — the unsigned accessors'
+    /// Builds a [`Page`] with page size `size` and no seek cursor — the
     /// post-validation state, constructed directly (private fields are in reach
-    /// crate-internally) so the apply/overfetch helpers can be unit-tested without a
+    /// crate-internally) so the overfetch helper can be unit-tested without a
     /// generated `PageRequest + ReflectMessage` request.
-    fn page(offset: i64, size: i32) -> Page {
+    fn page(size: i32) -> Page {
         Page {
-            token: PageToken {
-                offset,
-                request_checksum: 0x1234,
-            },
+            cursor: None,
             size,
+            request_checksum: 0x1234,
         }
     }
 
-    /// Decodes a non-empty `next_page_token` back to its offset, asserting it is
+    /// A u32 row's cursor: a single `n` column holding the row as an integer.
+    fn to_cursor(n: &u32) -> Vec<CursorEntry> {
+        vec![entry("n", CursorValue::Int(i64::from(*n)))]
+    }
+
+    /// Decodes a non-empty `next_page_token` back to its cursor, asserting it is
     /// non-empty first — the shape every "more pages remain" assertion below checks.
-    fn next_offset(token: &str) -> i64 {
+    fn next_cursor(token: &str) -> Vec<CursorEntry> {
         let decoded: PageToken = decode_page_token(token).expect("a non-empty token round-trips");
-        decoded.offset
+        decoded.cursor
     }
 
     #[test]
-    fn offset_and_size_accessors_are_unsigned() {
-        // The post-validation surface: a clamped offset and a floored size read back
-        // as plain `u64`, no cast at the call site.
-        let page = page(20, 10);
-        assert_eq!(page.offset(), 20);
-        assert_eq!(page.size(), 10);
+    fn cursor_accessor_returns_the_decoded_seek() {
+        // The seek a handler turns into a `tuple_gt`; `None` on the first page.
+        let seek = vec![entry("shipper", CursorValue::Text("acme".to_owned()))];
+        let seeking = Page {
+            cursor: Some(seek.clone()),
+            size: 10,
+            request_checksum: 0,
+        };
+        assert_eq!(seeking.cursor(), Some(seek.as_slice()));
+        assert!(page(10).cursor().is_none());
+    }
+
+    #[test]
+    fn size_accessor_is_unsigned() {
+        // The post-validation surface: a floored size reads back as plain `u64`.
+        assert_eq!(page(10).size(), 10);
     }
 
     #[test]
     fn fetch_limit_is_size_plus_one() {
         // The overfetch probe pulls one row past the page so its presence answers
         // `has_more`.
-        assert_eq!(page(0, 10).fetch_limit(), 11);
-        assert_eq!(page(40, 0).fetch_limit(), 1);
-    }
-
-    #[test]
-    fn apply_empty_collection_yields_empty_page_and_no_token() {
-        // Nothing in memory ⇒ an empty page and an exhausted listing.
-        let (items, token) = page(0, 10).apply(Vec::<u32>::new());
-        assert!(items.is_empty());
-        assert_eq!(token, "");
-    }
-
-    #[test]
-    fn apply_full_page_mid_listing_mints_next_token() {
-        // A full page with rows beyond it: the window is sliced out and the token
-        // advances the offset by the page size.
-        let (items, token) = page(0, 2).apply(vec![10, 20, 30, 40, 50]);
-        assert_eq!(items, [10, 20]);
-        assert_eq!(next_offset(&token), 2);
-
-        // The second page starts where the first stopped.
-        let (items, token) = page(2, 2).apply(vec![10, 20, 30, 40, 50]);
-        assert_eq!(items, [30, 40]);
-        assert_eq!(next_offset(&token), 4);
-    }
-
-    #[test]
-    fn apply_exact_fit_last_page_has_no_next_token() {
-        // The page ends exactly at the collection's end ⇒ no further page.
-        let (items, token) = page(2, 2).apply(vec![10, 20, 30, 40]);
-        assert_eq!(items, [30, 40]);
-        assert_eq!(token, "");
-    }
-
-    #[test]
-    fn apply_under_filled_last_page_has_no_next_token() {
-        // A final page shorter than the page size ⇒ the listing is exhausted.
-        let (items, token) = page(2, 10).apply(vec![10, 20, 30]);
-        assert_eq!(items, [30]);
-        assert_eq!(token, "");
-    }
-
-    #[test]
-    fn apply_offset_past_total_yields_empty_page() {
-        // An offset beyond the collection (a stale or over-skipped token) clamps to
-        // the end: an empty page, no next token, no panic.
-        let (items, token) = page(100, 10).apply(vec![10, 20, 30]);
-        assert!(items.is_empty());
-        assert_eq!(token, "");
+        assert_eq!(page(10).fetch_limit(), 11);
+        assert_eq!(page(0).fetch_limit(), 1);
     }
 
     #[test]
     fn split_overfetch_overfull_truncates_and_mints_token() {
         // The store handed back `size + 1` rows: the probe row proves a further page
-        // exists. Truncate it off, mint the token advancing past this page.
-        let (rows, token) = page(0, 2).split_overfetch(vec![10, 20, 30]);
+        // exists. Truncate it off, mint the token from the last kept row's key.
+        let (rows, token) = page(2).split_overfetch(vec![10, 20, 30], to_cursor);
         assert_eq!(rows, [10, 20]);
-        assert_eq!(next_offset(&token), 2);
+        assert_eq!(next_cursor(&token), vec![entry("n", CursorValue::Int(20))],);
     }
 
     #[test]
     fn split_overfetch_exact_fit_has_no_next_token() {
         // Exactly `size` rows came back ⇒ no probe row ⇒ the listing is exhausted.
-        let (rows, token) = page(0, 2).split_overfetch(vec![10, 20]);
+        let (rows, token) = page(2).split_overfetch(vec![10, 20], to_cursor);
         assert_eq!(rows, [10, 20]);
         assert_eq!(token, "");
     }
@@ -1022,7 +891,7 @@ mod tests {
     #[test]
     fn split_overfetch_under_filled_page_has_no_next_token() {
         // A short final page (fewer than `size` rows) ⇒ exhausted.
-        let (rows, token) = page(4, 2).split_overfetch(vec![50]);
+        let (rows, token) = page(2).split_overfetch(vec![50], to_cursor);
         assert_eq!(rows, [50]);
         assert_eq!(token, "");
     }
@@ -1030,7 +899,7 @@ mod tests {
     #[test]
     fn split_overfetch_empty_store_yields_empty_page() {
         // The store returned nothing ⇒ an empty page and no token.
-        let (rows, token) = page(0, 2).split_overfetch(Vec::<u32>::new());
+        let (rows, token) = page(2).split_overfetch(Vec::<u32>::new(), to_cursor);
         assert!(rows.is_empty());
         assert_eq!(token, "");
     }

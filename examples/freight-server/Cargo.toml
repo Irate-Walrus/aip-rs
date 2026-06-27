@@ -75,15 +75,17 @@ prost-types = { workspace = true }
 prost-reflect = { workspace = true, features = ["derive"] }
 tokio       = { workspace = true }
 
-# Default SQLite-backed Site storage (ADR-0008): the `aip` umbrella's `sql`
-# feature (above) re-exports the SQL adapter as `aip::sql`, which transpiles the
-# AIP filter to a parameterized Predicate; `rusqlite` (bundled SQLite, opened
-# in-memory) binds the values and runs it. This is the Site store out of the box,
-# so `cargo run` exercises the filter end-to-end; shippers stay in an in-memory
-# map. The `bundled` SQLite needs a C toolchain to build the example.
+# Default SQLite-backed storage: the `aip` umbrella's `sql` feature (above)
+# re-exports the SQL adapter as `aip::sql`, which transpiles the AIP filter to a
+# parameterized Predicate; `rusqlite` (bundled SQLite, opened in-memory) binds the
+# values and runs it. Shippers, sites, and shipments are all typed-key tables in
+# one connection, so `cargo run` exercises the filter end-to-end. The `bundled`
+# SQLite needs a C toolchain to build the example.
 rusqlite = { workspace = true }
-# The `annotations` map / `tags` list are stored as JSON text so the has operator
-# can query them with SQLite's `json_each` (#41).
+# Small repeated/map fields (`annotations`, `tags`, `line_items`) are stored as
+# JSON text; `serde` derives the JSON mirror of a line item and `serde_json` reads
+# the map/list columns with SQLite's `json_each`.
+serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
@@ -95,3 +97,6 @@ serde_json = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 http = { workspace = true }
 http-body-util = { workspace = true }
+# A page-token-rejection test mints a stale version-1 token by hand to confirm the
+# handler refuses it; `base64` builds the raw token bytes.
+base64 = { workspace = true }

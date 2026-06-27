@@ -39,21 +39,28 @@
 //! use std::error::Error;
 //! use prost_reflect::ReflectMessage;
 //! use prost_types::FieldMask;
-//! use aip::pagination::{Page, PageRequest, SizeLimits};
+//! use aip::pagination::{CursorEntry, Page, PageRequest, SizeLimits};
 //!
 //! const PAGE_LIMITS: SizeLimits = SizeLimits { default: 50, max: 1000 };
 //!
 //! // List: pagination preamble (AIP-158).
-//! // `Page::parse` validates the page token, verifies the request checksum
-//! // so a mid-pagination change is caught, and resolves the page size.
-//! // With the `tonic` feature, `?` maps errors to INVALID_ARGUMENT with
+//! // `Page::parse` validates the page token, verifies the request checksum so a
+//! // mid-pagination change is caught, and resolves the page size. The store seeks
+//! // past `page.cursor()` and overfetches `page.fetch_limit()` rows; then
+//! // `split_overfetch` drops the probe row and mints the next token from the last
+//! // kept row. With the `tonic` feature, `?` maps errors to INVALID_ARGUMENT with
 //! // AIP-193 ErrorInfo + BadRequest.
-//! fn list<Req: PageRequest + ReflectMessage, Item: Clone>(
+//! fn list<Req, Item>(
 //!     req: Req,
-//!     all: Vec<Item>,
-//! ) -> Result<(Vec<Item>, String), Box<dyn Error>> {
+//!     fetch: impl FnOnce(Option<&[CursorEntry]>, u64) -> Vec<Item>,
+//!     to_cursor: impl Fn(&Item) -> Vec<CursorEntry>,
+//! ) -> Result<(Vec<Item>, String), Box<dyn Error>>
+//! where
+//!     Req: PageRequest + ReflectMessage,
+//! {
 //!     let page = Page::parse(&req, PAGE_LIMITS)?;
-//!     let (items, next_page_token) = page.apply(all);
+//!     let rows = fetch(page.cursor(), page.fetch_limit());
+//!     let (items, next_page_token) = page.split_overfetch(rows, to_cursor);
 //!     Ok((items, next_page_token))
 //! }
 //!

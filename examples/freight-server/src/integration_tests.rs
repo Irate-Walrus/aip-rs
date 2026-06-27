@@ -99,8 +99,10 @@ fn valid_time() -> Option<prost_types::Timestamp> {
     })
 }
 
-/// Create a site under [`PARENT`] with the given display name.
+/// Create a site under [`PARENT`] with the given display name. The parent shipper
+/// is seeded first so the foreign key holds.
 async fn seed_site(freight: &FreightServer, display_name: &str) {
+    freight.seed_shipper("acme");
     freight
         .create_site(Request::new(CreateSiteRequest {
             parent: PARENT.to_owned(),
@@ -195,9 +197,14 @@ async fn shipper_crud_with_update_mask() {
         updated.create_time, created.create_time,
         "OUTPUT_ONLY create_time must not change"
     );
-    assert_ne!(
-        updated.update_time, created.update_time,
-        "update_time must advance after a write"
+    // Timestamps are second-precision, so a write in the same second as the create
+    // re-stamps update_time to the same value; the etag advance below proves the
+    // write landed. Check only that update_time is set and never precedes create_time.
+    let updated_secs = updated.update_time.as_ref().map(|t| t.seconds);
+    let created_secs = updated.create_time.as_ref().map(|t| t.seconds);
+    assert!(
+        updated_secs.is_some() && updated_secs >= created_secs,
+        "update_time is re-stamped on write and never precedes create_time"
     );
     assert_ne!(
         updated.etag, created.etag,
@@ -436,7 +443,9 @@ async fn list_sites_ordering_and_pagination_with_checksum_guard() {
     let status = freight
         .list_sites(Request::new(ListSitesRequest {
             parent: PARENT.to_owned(),
-            order_by: "name".to_owned(), // changed mid-pagination
+            // A valid but different sort changed mid-pagination, so the rejection is
+            // the checksum guard rather than order_by validation.
+            order_by: "create_time".to_owned(),
             page_size: 2,
             page_token: first.next_page_token.clone(),
             ..Default::default()
@@ -583,6 +592,9 @@ async fn list_shipments_filtering_and_missing_endpoints_aip193() {
     use tonic_types::StatusExt as _;
 
     let (freight, _iam) = make_server();
+    // The shipments hang off the parent shipper, so it must exist for the foreign
+    // key; the site references are plain strings, not foreign keys.
+    freight.seed_shipper("acme");
 
     let site_a = format!("{PARENT}/sites/a");
     let site_b = format!("{PARENT}/sites/b");

@@ -119,7 +119,7 @@ pub enum HasTest {
 /// Build one with [`transpile_filter`](crate::transpile_filter) or the
 /// [`all`](Predicate::all) / [`any`](Predicate::any) / [`not`](Predicate::not) /
 /// [`eq`](Predicate::eq) / [`is_null`](Predicate::is_null) /
-/// [`scope_to_parent`](Predicate::scope_to_parent) / [`raw`](Predicate::raw)
+/// [`tuple_gt`](Predicate::tuple_gt) / [`raw`](Predicate::raw)
 /// constructors, then render it with [`Dialect::render`](crate::Dialect::render).
 ///
 /// Centralizing precedence and placeholder numbering here is the whole point: a
@@ -157,18 +157,6 @@ pub enum Predicate {
     /// A `column IS NULL` test, e.g. the soft-delete predicate `delete_time IS
     /// NULL` a server composes alongside a user filter.
     IsNull(String),
-    /// An AIP parent scope (`column LIKE ?n ESCAPE '\'`): a resource-name prefix
-    /// match keeping the rows under a parent. The bound pattern escapes the
-    /// parent's `LIKE` metacharacters (`%` / `_` / `\`) and appends the child
-    /// wildcard, so a parent containing `%` or `_` matches literally and is never
-    /// interpolated. Built with [`scope_to_parent`](Predicate::scope_to_parent).
-    Scope {
-        /// The resource-name column to scope (e.g. `name`).
-        column: String,
-        /// The parent resource name whose children to keep — escaped and bound at
-        /// render time, never spliced into SQL text.
-        parent: String,
-    },
     /// A keyset cursor seek: the row-value comparison `(col_a, col_b, …) > (?, …)`,
     /// binding each value positionally to its column. Seeks past the last row of a
     /// page (a composite-key cursor), portable across SQLite and Postgres.
@@ -220,18 +208,6 @@ impl Predicate {
         Predicate::IsNull(column.into())
     }
 
-    /// An AIP parent scope on a resource-name `column`: a `LIKE` prefix keeping
-    /// the rows whose name lies under `parent`. The parent's `LIKE`
-    /// metacharacters are escaped and the whole pattern is bound, so a parent
-    /// containing `%` or `_` matches literally and is never interpolated
-    /// (ADR-0008).
-    pub fn scope_to_parent(column: impl Into<String>, parent: impl Into<String>) -> Self {
-        Predicate::Scope {
-            column: column.into(),
-            parent: parent.into(),
-        }
-    }
-
     /// A keyset cursor seek (`(col_a, col_b, …) > (?, …)`), binding each value
     /// positionally to its column. The columns are the ordered seek key, the
     /// values the last row of the current page.
@@ -249,24 +225,23 @@ impl Predicate {
     /// the typed builders don't cover. `sql` must carry no bind placeholders (it
     /// does not participate in the shared numbering); anything needing a bound
     /// value belongs in [`eq`](Predicate::eq) / [`is_null`](Predicate::is_null) /
-    /// [`scope_to_parent`](Predicate::scope_to_parent) or a composition of them.
+    /// [`tuple_gt`](Predicate::tuple_gt) or a composition of them.
     pub fn raw(sql: impl Into<String>) -> Self {
         Predicate::Raw(sql.into())
     }
 
     /// Binding tightness, used by the renderer to parenthesize a child only when
     /// it binds looser than its parent. Higher binds tighter, mirroring SQL:
-    /// a leaf (comparison, has test, `IS NULL`, scope) > `NOT` > `AND` > `OR` >
+    /// a leaf (comparison, has test, `IS NULL`, tuple seek) > `NOT` > `AND` > `OR` >
     /// a raw fragment.
     pub(crate) fn precedence(&self) -> u8 {
         match self {
             // A has leaf renders as a self-contained atom (`LIKE …`, `EXISTS
             // (…)`, `… IS NOT NULL`), so it binds as tight as a comparison; an
-            // `IS NULL` test and a `LIKE`-prefix scope are atoms too.
+            // `IS NULL` test and a tuple seek are atoms too.
             Predicate::Compare { .. }
             | Predicate::Has { .. }
             | Predicate::IsNull(_)
-            | Predicate::Scope { .. }
             | Predicate::TupleGt { .. } => 4,
             Predicate::Not(_) => 3,
             Predicate::All(_) => 2,

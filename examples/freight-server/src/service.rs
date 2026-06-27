@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime};
 use aip::fieldbehavior::FieldBehavior;
 use aip::iam::{Member, Permission};
 use aip::lro::{Operation as LroOperation, OperationName, WaitTimeout};
-use aip::pagination::{Page, SizeLimits};
+use aip::pagination::{CursorEntry, CursorValue, Page, SizeLimits};
 use aip::preview;
 use prost::Message as _;
 use prost_reflect::ReflectMessage;
@@ -122,6 +122,35 @@ impl FreightServer {
             Some(policy) => aip::iam::policy::grants(&policy, caller),
         }
     }
+
+    /// Confirm the parent shipper exists so a child insert satisfies the foreign
+    /// key; a missing parent is NOT_FOUND rather than a constraint failure deep in
+    /// the store.
+    fn require_shipper(&self, parent: &ShipperResourceName) -> Result<(), Status> {
+        if self.storage.get_shipper(parent).is_none() {
+            return Err(Status::not_found(format!(
+                "shipper `{}` not found",
+                parent.as_str()
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+impl FreightServer {
+    /// Insert a shipper with a fixed id so a test has a concrete parent for its
+    /// sites and shipments — the foreign key needs the parent row present. Only the
+    /// row's existence matters, not its content.
+    pub(crate) fn seed_shipper(&self, id: &str) {
+        let name = ShipperResourceName::new(id).expect("a test shipper id is valid");
+        let shipper = Shipper {
+            name: name.to_string(),
+            display_name: id.to_owned(),
+            ..Default::default()
+        };
+        self.storage.put_shipper(&name, shipper);
+    }
 }
 
 #[tonic::async_trait]
@@ -193,28 +222,34 @@ impl FreightService for FreightServer {
         request: Request<ListShippersRequest>,
     ) -> Result<Response<ListShippersResponse>, Status> {
         let req = request.into_inner();
-        // Offset pagination (AIP-158) over the stable shipper listing. `Page::parse`
-        // checksums the request's non-pagination fields, verifies the offset token
-        // against that checksum (rejecting a request that changed mid-pagination),
-        // and resolves the page size against `PAGE_LIMITS`; an empty token starts at
-        // offset 0, and a negative `page_size` is `INVALID_ARGUMENT` (AIP-193).
+        // Cursor pagination over the shipper key. `Page::parse` checksums the
+        // request's non-pagination fields, decodes and verifies the cursor token
+        // against that checksum, and resolves the page size; a request that changed
+        // mid-pagination or a stale-format token is rejected.
         let page = Page::parse(&req, PAGE_LIMITS)?;
-        // AIP-164: soft-deleted shippers are dropped unless `show_deleted` was set.
-        // `show_deleted` is a non-pagination field, so `Page::parse`'s request
-        // checksum covers it — flipping it mid-pagination rejects the stale token.
-        // The visibility rule is the same `aip::softdelete` primitive `GetShipper`
-        // uses; here it filters the in-memory listing before the page is sliced, so
-        // page boundaries are computed over exactly the visible shippers.
-        let shippers: Vec<Shipper> = self
+        // Shippers have no parent, so the only ordering is the key tie-break.
+        let (cursor_columns, order) = aip::sql::transpile_order_by(
+            &aip::ordering::OrderBy::default(),
+            &aip::sql::Schema::builder().build(),
+            ShipperResourceName::KEY_COLUMNS,
+        )?;
+        let seek = cursor_seek(page.cursor(), &cursor_columns)?;
+        // Soft-deleted shippers are dropped in SQL unless `show_deleted` was set;
+        // `show_deleted` rides the request checksum, so flipping it mid-pagination
+        // rejects the stale token. The keyset seek resumes past the last row.
+        let mut clauses = Vec::new();
+        if !req.show_deleted {
+            clauses.push(aip::sql::Predicate::is_null("delete_time"));
+        }
+        clauses.extend(seek);
+        let predicate = aip::sql::Predicate::all(clauses);
+        let shippers = self
             .storage
-            .list_shippers()
-            .into_iter()
-            .filter(|shipper| aip::softdelete::is_visible(shipper, req.show_deleted))
-            .collect();
-        // The visible shippers already live in memory (a post-filter set), so
-        // `Page::apply` owns the slice-and-mint: it windows the page out of the
-        // `Vec`, decides whether more remain, and returns the `next_page_token`.
-        let (shippers, next_page_token) = page.apply(shippers);
+            .list_shippers_page(&predicate, &order, page.fetch_limit());
+        // The probe row's presence answers `has_more`; `split_overfetch` truncates it
+        // and mints the next token from the last kept shipper's key.
+        let (shippers, next_page_token) =
+            page.split_overfetch(shippers, |shipper| shipper_cursor(shipper, &cursor_columns));
         Ok(Response::new(ListShippersResponse {
             shippers,
             next_page_token,
@@ -446,55 +481,47 @@ impl FreightService for FreightServer {
         request: Request<ListSitesRequest>,
     ) -> Result<Response<ListSitesResponse>, Status> {
         let req = request.into_inner();
+        // Validate the parent shape and name the `parent` field on a bad one; a `-`
+        // wildcard segment is well-formed and handled by the scope below.
         ShipperResourceName::parse_field("parent", &req.parent)?;
 
-        // Parse and validate the AIP-132 `order_by` against the sortable paths the
-        // column `Schema` derives — the single sortable source, no separately
-        // maintained list to drift from the schema. Bad syntax or an unknown
-        // ordering field converts via the crate's AIP-193 `From<Error> for Status`
-        // to `INVALID_ARGUMENT` with an `ErrorInfo`, plus a `BadRequest` naming the
-        // offending field path.
+        // Parse and validate the `order_by` against the sortable paths the column
+        // schema derives — the single sortable source. Bad syntax or an unknown
+        // field is `INVALID_ARGUMENT` with a `BadRequest` naming the path.
         let schema = site_schema();
         let order_by = aip::ordering::parse(&req)?;
         order_by.validate_for_paths(&schema.sortable_paths())?;
 
-        // Offset pagination (AIP-158). `order_by` is a non-pagination field, so
-        // the request checksum `Page::parse` computes covers it: changing it
-        // mid-pagination flips the checksum and the now-stale token is rejected.
+        // Pagination preamble. order_by and filter are non-pagination fields, so the
+        // request checksum covers them: changing either mid-pagination flips the
+        // checksum and the stale token is rejected.
         let page = Page::parse(&req, PAGE_LIMITS)?;
 
-        // The AIP-160 `filter` is parsed + type-checked (`aip::filtering`) and
-        // transpiled to a parameterized `Predicate` (`aip::sql`); an empty filter
-        // adds nothing. The server then folds in its own predicates — the AIP
-        // parent scope and the soft-delete `delete_time IS NULL` — through
-        // `Predicate`, which owns precedence and one coherent placeholder
-        // numbering across every composed fragment, so a user `a OR b` can't
-        // silently re-associate against the server's `AND`s. The SQLite
-        // store renders the whole thing to one parameterized `WHERE`.
+        // The user filter is parsed, type-checked, and transpiled to a predicate; an
+        // empty filter adds nothing.
         let user_filter = parse_filter(&req.filter, &site_declarations(), &schema)?;
-        let predicate = scoped_predicate(&req.parent, user_filter);
 
-        // Sort and page in SQL. The validated `order_by` transpiles to SQL
-        // `ORDER BY` items, mapped through the same column `Schema` the filter
-        // uses; `transpile_order_by` appends the resource-name tie-break itself, so
-        // the order is total and stable across pages — equal `order_by` keys fall
-        // back to a fixed `name` order. Every sortable path is in the allow-list and
-        // the schema maps it, so transpilation can only fail on an allow-list/schema
-        // drift, an internal inconsistency rather than bad input — which `aip-sql`'s
-        // `From<Error>` maps to `INTERNAL`, so a bare `?` carries the right fault.
-        let (_cursor_columns, order) = aip::sql::transpile_order_by(&order_by, &schema, &["name"])?;
+        // Resolve the seek columns (the order_by columns plus the key tie-break)
+        // once, feeding both the cursor decode and the next-token mint, then turn a
+        // decoded cursor into the keyset seek.
+        let (cursor_columns, order) =
+            aip::sql::transpile_order_by(&order_by, &schema, SiteResourceName::KEY_COLUMNS)?;
+        let seek = cursor_seek(page.cursor(), &cursor_columns)?;
 
-        // Overfetch probe: fetch one row past the page (`page.fetch_limit()`) at the
-        // page offset, both unsigned off `Page` — the forged-token clamp and the
-        // size floor already happened, so no cast lives here. The parent scope is in
-        // the SQL `WHERE`, so the `LIMIT`/`OFFSET` boundaries cover exactly the
-        // in-scope rows — no in-memory post-filter that could under-fill a page.
-        let sites =
-            self.storage
-                .list_sites_page(&predicate, &order, page.fetch_limit(), page.offset());
-        // `split_overfetch` reads the probe row's presence as `has_more`, truncates
-        // it off, and mints the `next_page_token`.
-        let (sites, next_page_token) = page.split_overfetch(sites);
+        // Compose the server's own predicates with the user filter: one equality per
+        // concrete parent variable (omitted per wildcard), the soft-delete filter,
+        // the user filter, and the cursor seek — one predicate owning precedence and
+        // placeholder numbering, rendered to a parameterized `WHERE`.
+        let predicate = scoped_predicate(&req.parent, user_filter, seek)?;
+
+        // Fetch one row past the page; the seek is in the predicate, so there is no
+        // offset. `split_overfetch` reads the probe row's presence as `has_more`,
+        // truncates it, and mints the `next_page_token` from the last kept site.
+        let sites = self
+            .storage
+            .list_sites_page(&predicate, &order, page.fetch_limit());
+        let (sites, next_page_token) =
+            page.split_overfetch(sites, |site| site_cursor(site, &cursor_columns));
         Ok(Response::new(ListSitesResponse {
             sites,
             next_page_token,
@@ -534,7 +561,9 @@ impl FreightService for FreightServer {
         // system-assigned `{site}` id; a UUIDv4 is always a valid segment, so
         // construction is infallible (AIP-122 / ADR-0011 / AIP-148).
         let parent = ShipperResourceName::parse_field("parent", &req.parent)?;
-        site.name = SiteResourceName::mint_under(&parent).to_string();
+        self.require_shipper(&parent)?;
+        let name = SiteResourceName::mint_under(&parent);
+        site.name = name.to_string();
 
         let ts = now();
         site.create_time = Some(ts);
@@ -543,7 +572,7 @@ impl FreightService for FreightServer {
         // AIP-163: a `validate_only` request previews the would-be site without
         // persisting it or recording an idempotency entry.
         preview::commit_unless(req.validate_only, || {
-            self.storage.put_site(site.clone());
+            self.storage.put_site(&name, site.clone());
             idempotent_record(&self.storage, &request_id, fingerprint, &site);
         });
         Ok(Response::new(site))
@@ -559,9 +588,29 @@ impl FreightService for FreightServer {
 
     async fn batch_get_sites(
         &self,
-        _: Request<BatchGetSitesRequest>,
+        request: Request<BatchGetSitesRequest>,
     ) -> Result<Response<BatchGetSitesResponse>, Status> {
-        Err(unimplemented("BatchGetSites"))
+        let req = request.into_inner();
+        // Each name parses to its typed key and is looked up by primary key, in
+        // request order; there is no wrapping transaction. Any missing site fails
+        // the whole batch with NOT_FOUND, so a partial result never hides a gap.
+        let mut sites = Vec::with_capacity(req.names.len());
+        for name in &req.names {
+            let resource = SiteResourceName::parse_field("names", name)?;
+            // When `parent` is set, every site must live under it.
+            if !req.parent.is_empty() && resource.parent().as_str() != req.parent {
+                return Err(Status::invalid_argument(format!(
+                    "site `{name}` is not under parent `{}`",
+                    req.parent
+                )));
+            }
+            let site = self
+                .storage
+                .get_site(&resource)
+                .ok_or_else(|| Status::not_found(format!("site `{name}` not found")))?;
+            sites.push(site);
+        }
+        Ok(Response::new(BatchGetSitesResponse { sites }))
     }
 
     // ----- Shipment: not yet wired -----
@@ -580,34 +629,31 @@ impl FreightService for FreightServer {
         let req = request.into_inner();
         ShipperResourceName::parse_field("parent", &req.parent)?;
 
-        // Offset pagination (AIP-158). `filter` is a non-pagination field, so the
-        // request checksum `Page::parse` computes covers it: changing it
+        // Pagination preamble; filter is a non-pagination field, so changing it
         // mid-pagination flips the checksum and the stale token is rejected.
         let page = Page::parse(&req, PAGE_LIMITS)?;
 
-        // The same server-side composition as `ListSites`: the user's
-        // AIP-160 `filter` (parsed + type-checked + transpiled) folded with the
-        // parent scope and the soft-delete `delete_time IS NULL` through one
-        // `Predicate` that owns precedence and placeholder numbering. The
-        // SQLite-backed store renders it to a parameterized `WHERE`.
+        // The same server-side composition as `ListSites`. `ListShipments` carries
+        // no `order_by`, so the ordering is the key tie-break alone — a total, stable
+        // page order over exactly the cursor's seek columns.
         let schema = shipment_schema();
         let user_filter = parse_filter(&req.filter, &shipment_declarations(), &schema)?;
-        let predicate = scoped_predicate(&req.parent, user_filter);
+        let (cursor_columns, order) = aip::sql::transpile_order_by(
+            &aip::ordering::OrderBy::default(),
+            &schema,
+            ShipmentResourceName::KEY_COLUMNS,
+        )?;
+        let seek = cursor_seek(page.cursor(), &cursor_columns)?;
+        let predicate = scoped_predicate(&req.parent, user_filter, seek)?;
 
-        // `ListShipments` carries no `order_by`, so results are ordered by
-        // resource name — a total, stable page order across the offset pages. An
-        // empty `order_by` transpiles to exactly the `[name ASC]` tie-break, so
-        // this leans on the same always-on tie-break `ListSites` does rather than
-        // hand-spelling the order.
-        let (_cursor_columns, order) =
-            aip::sql::transpile_order_by(&aip::ordering::OrderBy::default(), &schema, &["name"])?;
-        // The same overfetch probe as `ListSites`: fetch `fetch_limit()` rows at the
-        // unsigned page offset, then `split_overfetch` truncates the probe row and
-        // mints the `next_page_token` — no integer casts in the handler.
-        let shipments =
-            self.storage
-                .list_shipments_page(&predicate, &order, page.fetch_limit(), page.offset());
-        let (shipments, next_page_token) = page.split_overfetch(shipments);
+        // Fetch one row past the page; the seek is in the predicate. `split_overfetch`
+        // truncates the probe row and mints the `next_page_token`.
+        let shipments = self
+            .storage
+            .list_shipments_page(&predicate, &order, page.fetch_limit());
+        let (shipments, next_page_token) = page.split_overfetch(shipments, |shipment| {
+            shipment_cursor(shipment, &cursor_columns)
+        });
         Ok(Response::new(ListShipmentsResponse {
             shipments,
             next_page_token,
@@ -651,7 +697,9 @@ impl FreightService for FreightServer {
         // system-assigned `{shipment}` id; a UUIDv4 is always a valid segment, so
         // construction is infallible (AIP-122 / ADR-0011 / AIP-148).
         let parent = ShipperResourceName::parse_field("parent", &req.parent)?;
-        shipment.name = ShipmentResourceName::mint_under(&parent).to_string();
+        self.require_shipper(&parent)?;
+        let name = ShipmentResourceName::mint_under(&parent);
+        shipment.name = name.to_string();
 
         let ts = now();
         shipment.create_time = Some(ts);
@@ -660,7 +708,7 @@ impl FreightService for FreightServer {
         // AIP-163: a `validate_only` request previews the would-be shipment
         // without persisting it or recording an idempotency entry.
         preview::commit_unless(req.validate_only, || {
-            self.storage.put_shipment(shipment.clone());
+            self.storage.put_shipment(&name, shipment.clone());
             idempotent_record(&self.storage, &request_id, fingerprint, &shipment);
         });
         Ok(Response::new(shipment))
@@ -691,10 +739,11 @@ impl FreightService for FreightServer {
 
 /// The AIP-160 declarations a `ListSites` filter is checked against: the full
 /// standard operator set over one identifier of each filterable
-/// shape — the string `display_name` / `name`, the timestamp `create_time`, the
+/// shape — the string `display_name`, the timestamp `create_time`, the
 /// nested numeric `lat_lng.latitude`, the reflective enum `state`, the
 /// `annotations` map, and the `tags` list. The map / list / string / timestamp
-/// identifiers carry the has operator `:` overloads.
+/// identifiers carry the has operator `:` overloads. There is no `name` column —
+/// the resource name lives in the key columns.
 fn site_declarations() -> aip::filtering::Declarations {
     use aip::filtering::Declarations;
 
@@ -707,7 +756,6 @@ fn site_declarations() -> aip::filtering::Declarations {
         .standard_functions()
         .fields([
             "display_name",
-            "name",
             "create_time",
             "lat_lng.latitude",
             "annotations",
@@ -723,7 +771,7 @@ fn site_declarations() -> aip::filtering::Declarations {
 /// drift between three hand-kept lists). [`Schema::for_declarations`] reads off a
 /// column per declared field (named for the path by default) and marks each
 /// sortable iff its declared type is one a SQL `ORDER BY` totally orders — so the
-/// string `display_name` / `name`, the timestamp `create_time`, and the nested
+/// string `display_name`, the timestamp `create_time`, and the nested
 /// `lat_lng.latitude` (a double) are sortable, while the enum `state`, the
 /// `annotations` map, and the `tags` list are filter-only (a bare
 /// `order_by: state` stays rejected). Two overrides handle what the rule can't:
@@ -751,13 +799,12 @@ fn site_schema() -> aip::sql::Schema {
 fn shipment_declarations() -> aip::filtering::Declarations {
     use aip::filtering::Declarations;
 
-    // Derived from the `Shipment` descriptor: `name` / `origin_site` /
-    // `destination_site` read off as strings, `create_time` as a timestamp, and
-    // `annotations` as a map — same allowlist, no hand-spelled `Type`s.
+    // Derived from the `Shipment` descriptor: `origin_site` / `destination_site`
+    // read off as strings, `create_time` as a timestamp, and `annotations` as a
+    // map — same allowlist, no hand-spelled `Type`s.
     Declarations::for_message::<Shipment>()
         .standard_functions()
         .fields([
-            "name",
             "origin_site",
             "destination_site",
             "create_time",
@@ -801,27 +848,173 @@ fn parse_filter(
     Ok(Some(predicate))
 }
 
-/// Compose the server's own predicates with an optional user `filter` into one
-/// [`Predicate`](aip::sql::Predicate): an AIP parent scope on the `name`
-/// column (`name LIKE 'parent/%'`, the parent escaped + bound) and the soft-delete
-/// `delete_time IS NULL`, conjoined with the user filter when present. `Predicate`
-/// owns precedence and one coherent placeholder numbering across the fragments, so
-/// a user `a OR b` is parenthesized under the server's `AND`s rather than silently
-/// re-associating, and the bound parent never collides with the filter's binds.
+/// Compose the server's own predicates with an optional user `filter` and an
+/// optional cursor `seek` into one [`Predicate`](aip::sql::Predicate): one equality
+/// per concrete parent variable (omitted per `-` wildcard, so a non-terminal
+/// wildcard never over-matches across segments), the soft-delete `delete_time IS
+/// NULL`, the user filter, and the keyset seek. `Predicate` owns precedence and one
+/// coherent placeholder numbering across the fragments, so a user `a OR b` is
+/// parenthesized under the server's `AND`s rather than silently re-associating.
 ///
 /// A multi-tenant server adds its tenancy predicate to the very same `all` — e.g.
-/// `aip::sql::Predicate::eq("tenant_id", tenant)` — and it numbers in step with
-/// the rest; here the parent scope is the freight demo's tenancy boundary (a
-/// shipper owns its sites and shipments).
-fn scoped_predicate(parent: &str, user_filter: Option<aip::sql::Predicate>) -> aip::sql::Predicate {
-    let mut clauses = vec![
-        aip::sql::Predicate::scope_to_parent("name", parent),
-        aip::sql::Predicate::is_null("delete_time"),
-    ];
-    // `Option` is an iterator of 0-or-1, so this appends the user filter only when
-    // one was supplied.
+/// `aip::sql::Predicate::eq("tenant_id", tenant)` — and it numbers in step with the
+/// rest; here the parent scope is the freight demo's tenancy boundary (a shipper
+/// owns its sites and shipments).
+fn scoped_predicate(
+    parent: &str,
+    user_filter: Option<aip::sql::Predicate>,
+    seek: Option<aip::sql::Predicate>,
+) -> Result<aip::sql::Predicate, Status> {
+    // Bind each pattern variable to its concrete value or a wildcard. The parent
+    // shape was validated upstream, so this only ever sees a well-formed name.
+    let bindings = ShipperResourceName::pattern().match_with_wildcards(parent)?;
+    let mut clauses = Vec::new();
+    for (variable, value) in bindings {
+        // A concrete segment scopes by equality; a wildcard omits the predicate.
+        if let Some(value) = value {
+            clauses.push(aip::sql::Predicate::eq(
+                variable,
+                aip::sql::Value::Text(value.to_owned()),
+            ));
+        }
+    }
+    clauses.push(aip::sql::Predicate::is_null("delete_time"));
+    // `Option` is an iterator of 0-or-1, so these append only when present.
     clauses.extend(user_filter);
-    aip::sql::Predicate::all(clauses)
+    clauses.extend(seek);
+    Ok(aip::sql::Predicate::all(clauses))
+}
+
+/// Turn a decoded cursor into a keyset seek predicate, or `None` on the first
+/// page. The cursor's columns must equal the resolved seek columns positionally and
+/// each value's variant must match its column's type; a mismatch is a forged or
+/// stale token, so it is `INVALID_ARGUMENT`. This is the one boundary that depends
+/// on both the pagination and SQL crates.
+///
+/// The seek is a single ascending row-value comparison, so it assumes every order
+/// column sorts ascending and is non-null: a descending `order_by` paginates
+/// correctly only on the first page, and the demo's seeds keep the sortable columns
+/// non-null. Mixed-direction or nullable keyset paging needs a richer seek than the
+/// store offers.
+fn cursor_seek(
+    cursor: Option<&[CursorEntry]>,
+    columns: &aip::sql::CursorColumns,
+) -> Result<Option<aip::sql::Predicate>, Status> {
+    let Some(cursor) = cursor else {
+        return Ok(None);
+    };
+    if cursor.len() != columns.len() {
+        return Err(Status::invalid_argument(
+            "page token does not match the ordering",
+        ));
+    }
+    let mut values = Vec::with_capacity(cursor.len());
+    for (entry, (column, ty)) in cursor.iter().zip(columns) {
+        if &entry.column != column || !cursor_value_matches(&entry.value, ty) {
+            return Err(Status::invalid_argument(
+                "page token does not match the ordering",
+            ));
+        }
+        values.push(cursor_value_to_sql(&entry.value));
+    }
+    let seek =
+        aip::sql::Predicate::tuple_gt(columns.iter().map(|(column, _)| column.clone()), values);
+    Ok(Some(seek))
+}
+
+/// Whether a cursor value's variant matches a column's declared type. Key columns
+/// are uniformly text; timestamps and enums also ride as text.
+fn cursor_value_matches(value: &CursorValue, ty: &aip::filtering::Type) -> bool {
+    use aip::filtering::Type;
+    matches!(
+        (value, ty),
+        (
+            CursorValue::Text(_),
+            Type::String | Type::Timestamp | Type::Enum(_)
+        ) | (CursorValue::Int(_), Type::Int | Type::Uint)
+            | (CursorValue::Double(_), Type::Double)
+            | (CursorValue::Bool(_), Type::Bool)
+    )
+}
+
+/// Convert a cursor value to its SQL bind value, the inverse of how each resource's
+/// cursor builder reads the column back out.
+fn cursor_value_to_sql(value: &CursorValue) -> aip::sql::Value {
+    match value {
+        CursorValue::Bool(b) => aip::sql::Value::Bool(*b),
+        CursorValue::Int(i) => aip::sql::Value::Int(*i),
+        CursorValue::Double(d) => aip::sql::Value::Double(*d),
+        CursorValue::Text(s) => aip::sql::Value::Text(s.clone()),
+        CursorValue::Bytes(b) => aip::sql::Value::Bytes(b.clone()),
+    }
+}
+
+/// A timestamp rendered exactly as the store holds it, so a cursor value compares
+/// against the stored column. Absent timestamps never reach a cursor column.
+fn timestamp_cursor(ts: Option<&prost_types::Timestamp>) -> String {
+    ts.map(crate::storage::store_timestamp).unwrap_or_default()
+}
+
+/// Mint cursor entries for the resolved seek columns, reading each column's value
+/// from `value_of`. The per-resource builders below supply the column→value map.
+fn build_cursor(
+    columns: &aip::sql::CursorColumns,
+    value_of: impl Fn(&str) -> CursorValue,
+) -> Vec<CursorEntry> {
+    columns
+        .iter()
+        .map(|(column, _)| CursorEntry {
+            column: column.clone(),
+            value: value_of(column),
+        })
+        .collect()
+}
+
+/// Build a shipper's cursor entries for the resolved seek columns (the key alone).
+fn shipper_cursor(shipper: &Shipper, columns: &aip::sql::CursorColumns) -> Vec<CursorEntry> {
+    let name =
+        ShipperResourceName::parse(&shipper.name).expect("a stored shipper has a valid name");
+    build_cursor(columns, |column| match column {
+        "shipper" => CursorValue::Text(name.shipper().to_owned()),
+        other => unreachable!("unexpected shipper cursor column {other}"),
+    })
+}
+
+/// Build a site's cursor entries for the resolved seek columns — the order_by
+/// columns plus the key tie-break.
+fn site_cursor(site: &Site, columns: &aip::sql::CursorColumns) -> Vec<CursorEntry> {
+    let name = SiteResourceName::parse(&site.name).expect("a stored site has a valid name");
+    build_cursor(columns, |column| match column {
+        "shipper" => CursorValue::Text(name.shipper().to_owned()),
+        "site" => CursorValue::Text(name.site().to_owned()),
+        "display_name" => CursorValue::Text(site.display_name.clone()),
+        "create_time" => CursorValue::Text(timestamp_cursor(site.create_time.as_ref())),
+        "update_time" => CursorValue::Text(timestamp_cursor(site.update_time.as_ref())),
+        "latitude" => CursorValue::Double(
+            site.lat_lng
+                .as_ref()
+                .map(|ll| ll.latitude)
+                .unwrap_or_default(),
+        ),
+        "longitude" => CursorValue::Double(
+            site.lat_lng
+                .as_ref()
+                .map(|ll| ll.longitude)
+                .unwrap_or_default(),
+        ),
+        other => unreachable!("unexpected site cursor column {other}"),
+    })
+}
+
+/// Build a shipment's cursor entries for the resolved seek columns (the key alone).
+fn shipment_cursor(shipment: &Shipment, columns: &aip::sql::CursorColumns) -> Vec<CursorEntry> {
+    let name =
+        ShipmentResourceName::parse(&shipment.name).expect("a stored shipment has a valid name");
+    build_cursor(columns, |column| match column {
+        "shipper" => CursorValue::Text(name.shipper().to_owned()),
+        "shipment" => CursorValue::Text(name.shipment().to_owned()),
+        other => unreachable!("unexpected shipment cursor column {other}"),
+    })
 }
 
 /// The AIP-193 `ErrorInfo.domain` the service presents to its clients. Handed
@@ -1185,9 +1378,12 @@ fn unimplemented(method: &str) -> Status {
 }
 
 /// Current wall-clock time as a protobuf `Timestamp`, for the server-set
-/// OUTPUT_ONLY `create_time`/`update_time` fields.
+/// OUTPUT_ONLY `create_time`/`update_time` fields. Truncated to whole seconds so a
+/// stamped time round-trips through the second-precision RFC3339 columns exactly.
 fn now() -> prost_types::Timestamp {
-    prost_types::Timestamp::from(SystemTime::now())
+    let mut ts = prost_types::Timestamp::from(SystemTime::now());
+    ts.nanos = 0;
+    ts
 }
 
 #[cfg(test)]
@@ -1213,8 +1409,10 @@ mod tests {
         );
     }
 
-    /// Creates a site under `PARENT` with the given display name and latitude.
+    /// Creates a site under `PARENT` with the given display name and latitude. The
+    /// parent shipper is seeded first so the foreign key holds.
     async fn seed_site(server: &FreightServer, display_name: &str, latitude: f64) {
+        server.seed_shipper("acme");
         let site = Site {
             display_name: display_name.to_owned(),
             lat_lng: Some(LatLng {
@@ -1236,6 +1434,7 @@ mod tests {
     /// Creates a site under `PARENT` with the given display name and operational
     /// state, for the enum-filter test.
     async fn seed_site_with_state(server: &FreightServer, display_name: &str, state: site::State) {
+        server.seed_shipper("acme");
         server
             .create_site(Request::new(CreateSiteRequest {
                 parent: PARENT.to_owned(),
@@ -1258,6 +1457,7 @@ mod tests {
         annotations: &[(&str, &str)],
         tags: &[&str],
     ) {
+        server.seed_shipper("acme");
         server
             .create_site(Request::new(CreateSiteRequest {
                 parent: PARENT.to_owned(),
@@ -1415,7 +1615,9 @@ mod tests {
         let status = server
             .list_sites(Request::new(ListSitesRequest {
                 parent: PARENT.to_owned(),
-                order_by: "name".to_owned(),
+                // A valid but different sort, so the rejection is the checksum guard,
+                // not order_by validation.
+                order_by: "create_time".to_owned(),
                 page_size: 2,
                 page_token: first.next_page_token,
                 ..Default::default()
@@ -1463,41 +1665,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_sites_clamps_a_forged_negative_offset_token() {
-        // Page tokens are unsigned and client-forgeable (ADR-0004). A token carrying
-        // a negative offset must not skip rows or panic: `Page::parse` clamps the
-        // offset non-negative, so the page is served from the start. The forged
-        // token still has to pass the request checksum — that guard is unchanged —
-        // so it is minted with the request's own checksum.
+    async fn list_sites_rejects_a_stale_version_one_page_token() {
+        // The cursor token carries a single version byte; a token from the old
+        // offset format (version 1) is refused rather than mis-decoded, so a client
+        // mid-migration restarts pagination instead of getting garbage rows.
+        use base64::Engine as _;
         let server = FreightServer::default();
         seed_site(&server, "only", 0.0).await;
 
-        // `request_checksum` ignores the pagination fields, so the checksum computed
-        // over the token-less request is the one the forged token must carry.
-        let base = ListSitesRequest {
-            parent: PARENT.to_owned(),
-            page_size: 10,
-            ..Default::default()
-        };
-        let checksum = aip::pagination::request_checksum(&base);
-        let forged = aip::pagination::PageToken {
-            offset: -100,
-            request_checksum: checksum,
-        }
-        .encode();
-
-        let resp = server
+        // A version-1 token: the stale version byte followed by an arbitrary payload.
+        let v1_token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([1u8, 0, 0, 0, 0]);
+        let status = server
             .list_sites(Request::new(ListSitesRequest {
-                page_token: forged,
-                ..base
+                parent: PARENT.to_owned(),
+                page_token: v1_token,
+                ..Default::default()
             }))
             .await
-            .expect("a forged negative-offset token is clamped, not rejected")
-            .into_inner();
-        // Clamped to offset 0 ⇒ the one seeded site is served; a wrapped huge offset
-        // would have returned nothing.
-        assert_eq!(resp.sites.len(), 1);
-        assert_eq!(resp.sites[0].display_name, "only");
+            .expect_err("a version-1 token is rejected");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
     }
 
     #[tokio::test]
@@ -1667,6 +1853,7 @@ mod tests {
         // legitimate retry as a conflict. With several keys, a safe retry must
         // still replay (same site, no second create).
         let server = FreightServer::default();
+        server.seed_shipper("acme");
         let request = CreateSiteRequest {
             parent: PARENT.to_owned(),
             site: Some(Site {
@@ -2545,6 +2732,7 @@ mod tests {
     /// keeps and drops at least one site — and some sites lack a key / a location,
     /// to exercise the `NULL`/absent agreement.
     async fn seed_filter_corpus(server: &FreightServer) -> Vec<Site> {
+        server.seed_shipper("acme");
         let annotations = |pairs: &[(&str, &str)]| {
             pairs
                 .iter()
@@ -2647,17 +2835,17 @@ mod tests {
 
     #[tokio::test]
     async fn list_sites_scopes_to_parent_in_sql() {
-        // The parent scope runs in the SQL `WHERE` (via `scope_to_parent`),
-        // not an in-memory post-filter: sites under a different shipper — including
-        // one whose name is a string prefix of the parent (`shippers/acme2`) — are
-        // excluded, proving the bound `LIKE 'shippers/acme/%'` respects the segment
-        // boundary.
+        // The parent scope runs in the SQL `WHERE` as one equality on the `shipper`
+        // key column, not an in-memory post-filter: sites under a different shipper —
+        // including one whose id is a string prefix of the parent (`acme2`) — are
+        // excluded, because the scope matches the key segment exactly.
         let server = FreightServer::default();
         seed_site(&server, "Mine", 0.0).await; // under PARENT (`shippers/acme`)
-        for other_parent in ["shippers/other", "shippers/acme2"] {
+        for other in ["other", "acme2"] {
+            server.seed_shipper(other);
             server
                 .create_site(Request::new(CreateSiteRequest {
-                    parent: other_parent.to_owned(),
+                    parent: format!("shippers/{other}"),
                     site: Some(Site {
                         display_name: "Theirs".to_owned(),
                         ..Default::default()
@@ -2671,18 +2859,134 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_sites_across_shippers_with_a_wildcard_parent() {
+        // A `-` wildcard in the parent omits the shipper equality, so the listing
+        // spans every shipper rather than over-matching across segments — the case a
+        // string `LIKE` prefix could not express. The key-tuple order sorts the
+        // result by (shipper, site).
+        let server = FreightServer::default();
+        for shipper in ["acme", "beta"] {
+            server.seed_shipper(shipper);
+            server
+                .create_site(Request::new(CreateSiteRequest {
+                    parent: format!("shippers/{shipper}"),
+                    site: Some(Site {
+                        display_name: "Depot".to_owned(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }))
+                .await
+                .expect("create_site succeeds");
+        }
+        // A concrete parent scopes to that one shipper...
+        let scoped = server
+            .list_sites(Request::new(ListSitesRequest {
+                parent: "shippers/acme".to_owned(),
+                ..Default::default()
+            }))
+            .await
+            .expect("scoped list succeeds")
+            .into_inner();
+        assert_eq!(scoped.sites.len(), 1);
+        // ...the `-` wildcard lists across both.
+        let across = server
+            .list_sites(Request::new(ListSitesRequest {
+                parent: "shippers/-".to_owned(),
+                ..Default::default()
+            }))
+            .await
+            .expect("wildcard list succeeds")
+            .into_inner();
+        assert_eq!(across.sites.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn cross_shipper_listing_orders_by_the_key_tuple() {
+        // The order is the (shipper, site) key tuple, not the canonical name string:
+        // shipper `a` sorts before `a-b` (a prefix sorts first), where the old
+        // name-string order — `shippers/a-b/...` before `shippers/a/...` — was the
+        // reverse.
+        let server = FreightServer::default();
+        for shipper in ["a-b", "a"] {
+            server.seed_shipper(shipper);
+            server
+                .create_site(Request::new(CreateSiteRequest {
+                    parent: format!("shippers/{shipper}"),
+                    site: Some(Site {
+                        display_name: shipper.to_owned(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }))
+                .await
+                .expect("create_site succeeds");
+        }
+        let across = server
+            .list_sites(Request::new(ListSitesRequest {
+                parent: "shippers/-".to_owned(),
+                ..Default::default()
+            }))
+            .await
+            .expect("wildcard list succeeds")
+            .into_inner();
+        let shippers: Vec<String> = across
+            .sites
+            .iter()
+            .map(|site| {
+                SiteResourceName::parse(&site.name)
+                    .expect("a listed site has a valid name")
+                    .shipper()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(shippers, ["a", "a-b"]);
+    }
+
+    #[tokio::test]
+    async fn hard_deleting_a_shipper_cascades_to_its_sites() {
+        // The foreign key cascades on hard delete: removing the parent shipper row
+        // drops its sites (and shipments, by the same key) in one statement, so a
+        // hard delete never orphans children. The `DeleteShipper` RPC soft-deletes;
+        // this cascade is storage-level only.
+        let server = FreightServer::default();
+        let shipper = ShipperResourceName::new("acme").expect("a valid shipper name");
+        server.seed_shipper("acme");
+        let site = SiteResourceName::new("acme", "depot").expect("a valid site name");
+        server.storage.put_site(
+            &site,
+            Site {
+                name: site.to_string(),
+                display_name: "Depot".to_owned(),
+                ..Default::default()
+            },
+        );
+        assert!(server.storage.get_site(&site).is_some());
+
+        assert!(server.storage.hard_delete_shipper(&shipper));
+        assert!(
+            server.storage.get_site(&site).is_none(),
+            "the site cascades when its shipper is hard-deleted",
+        );
+    }
+
+    #[tokio::test]
     async fn list_sites_excludes_soft_deleted_in_sql() {
         // The soft-delete predicate `delete_time IS NULL` runs in SQL: a site
         // carrying a `delete_time` is dropped from the listing. `DeleteSite` is not
         // yet wired, so the soft-deleted row is seeded straight into the store.
         let server = FreightServer::default();
         seed_site(&server, "Live", 0.0).await;
-        server.storage.put_site(Site {
-            name: format!("{PARENT}/sites/deleted-1"),
-            display_name: "Gone".to_owned(),
-            delete_time: Some(now()),
-            ..Default::default()
-        });
+        let deleted = SiteResourceName::new("acme", "deleted-1").expect("a valid site name");
+        server.storage.put_site(
+            &deleted,
+            Site {
+                name: deleted.to_string(),
+                display_name: "Gone".to_owned(),
+                delete_time: Some(now()),
+                ..Default::default()
+            },
+        );
         assert_eq!(list_display_names(&server, "display_name").await, ["Live"]);
     }
 
@@ -2706,6 +3010,7 @@ mod tests {
         destination: &str,
         annotations: &[(&str, &str)],
     ) -> Shipment {
+        server.seed_shipper("acme");
         server
             .create_shipment(Request::new(CreateShipmentRequest {
                 parent: PARENT.to_owned(),
@@ -2753,6 +3058,7 @@ mod tests {
         let server = FreightServer::default();
         create_shipment(&server, site, site, &[]).await;
         create_shipment(&server, site, site, &[]).await;
+        server.seed_shipper("other");
         server
             .create_shipment(Request::new(CreateShipmentRequest {
                 parent: "shippers/other".to_owned(),
