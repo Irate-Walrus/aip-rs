@@ -10,15 +10,21 @@
 //! assembles these items, together with the `LIMIT` / `OFFSET` page tail, into
 //! the full clause tail of a list query.
 
+use aip_filtering::Type;
 use aip_ordering::OrderBy;
 
 use crate::schema::Schema;
 use crate::Error;
 
+/// The ordered cursor seek columns: each a SQL column paired with its declared
+/// [`Type`], in `ORDER BY` clause order with the key tie-break last. Built once by
+/// [`transpile_order_by`] and fed to both the cursor build and the cursor decode.
+pub type CursorColumns = Vec<(String, Type)>;
+
 /// One `ORDER BY` item: a SQL column and its sort direction.
 ///
 /// Produced by [`transpile_order_by`] from an AIP-132 [`OrderByField`] (which also
-/// appends the resource-name tie-break itself), or built directly with
+/// appends the key-column tie-break itself), or built directly with
 /// [`Order::asc`] / [`Order::desc`].
 ///
 /// [`OrderByField`]: aip_ordering::OrderByField
@@ -49,53 +55,56 @@ impl Order {
     }
 }
 
-/// The resource-name column every transpile appends as a tie-break, so the order
-/// is total and stable across pages (AIP-122 names the resource `name`). Skipped
-/// only when the user's `order_by` already sorts on this column.
-const TIE_BREAK_COLUMN: &str = "name";
+/// Transpile a parsed [`OrderBy`] into the cursor seek key and SQL `ORDER BY`
+/// [items](Order), mapping each field path to its column through the [`Schema`]
+/// (the column allowlist) and preserving field order so a multi-field directive
+/// renders its columns in priority order.
+///
+/// Returns the ordered `(column, Type)` seek list — fed to both the cursor build
+/// and the cursor validate (so the column list is derived once) — alongside the
+/// [`Order`] items for the SQL clause. A field path with no column mapping is
+/// [`Error::UnknownIdentifier`], the same gate
+/// [`transpile_filter`](crate::transpile_filter) applies.
+///
+/// # Always-on key tie-break
+///
+/// `key_columns` — the resource's key columns, ASC — are appended so the order is
+/// total and stable across cursor pages: equal `order_by` keys fall back to the
+/// primary key, the exact columns the cursor seeks on. A key column the user
+/// already sorts on is not duplicated; an empty `order_by` yields just the key
+/// tie-break. Key columns are uniformly text by AIP-122, so each carries
+/// [`Type::String`].
+pub fn transpile_order_by(
+    order_by: &OrderBy,
+    schema: &Schema,
+    key_columns: &[&str],
+) -> Result<(CursorColumns, Vec<Order>), Error> {
+    let mut columns: CursorColumns = Vec::new();
+    let mut orders: Vec<Order> = Vec::new();
 
-/// Transpile a parsed [`OrderBy`] into SQL `ORDER BY` [items](Order), mapping each
-/// field path to its column through the [`Schema`] (the column allowlist) and
-/// preserving the field order so a multi-field directive renders its columns in
-/// priority order.
-///
-/// A field path with no column mapping is [`Error::UnknownIdentifier`] — the same
-/// gate [`transpile_filter`](crate::transpile_filter) applies to an unmapped
-/// identifier.
-///
-/// # Always-on tie-break
-///
-/// A trailing `name ASC` is **always appended** so the order is total and stable
-/// across offset pages — equal `order_by` keys fall back to a fixed resource-name
-/// order (AIP-122), without which two rows sharing a key could swap places between
-/// page boundaries. The append is skipped only when the user's `order_by` already
-/// sorts on the `name` column (in either direction), so it is never duplicated or
-/// overridden. An *empty* `order_by` therefore yields `[name ASC]`, not an empty
-/// `Vec`, so a consumer with no `order_by`
-/// (`transpile_order_by(&OrderBy::default(), …)`) gets the stable name order for
-/// free. The `name` column is taken literally — the resource-name column by AIP
-/// convention — not looked up in the [`Schema`].
-pub fn transpile_order_by(order_by: &OrderBy, schema: &Schema) -> Result<Vec<Order>, Error> {
-    let mut orders = order_by
-        .fields
-        .iter()
-        .map(|field| {
-            let column = schema
-                .column(&field.path)
-                .ok_or_else(|| Error::UnknownIdentifier(field.path.clone()))?;
-            Ok(Order {
-                column: column.to_string(),
-                desc: field.desc,
-            })
-        })
-        .collect::<Result<Vec<Order>, Error>>()?;
-
-    // Append the resource-name tie-break unless the user already ordered on it,
-    // so the result is a total order with no duplicate `name` term.
-    if !orders.iter().any(|order| order.column == TIE_BREAK_COLUMN) {
-        orders.push(Order::asc(TIE_BREAK_COLUMN));
+    for field in &order_by.fields {
+        let column = schema
+            .column(&field.path)
+            .ok_or_else(|| Error::UnknownIdentifier(field.path.clone()))?;
+        let ty = schema.column_type(column).cloned().unwrap_or(Type::String);
+        columns.push((column.to_string(), ty));
+        orders.push(Order {
+            column: column.to_string(),
+            desc: field.desc,
+        });
     }
-    Ok(orders)
+
+    // Append the key-column tie-break (ASC) so the order is total over exactly the
+    // cursor's seek columns; skip a key column the user already sorts on.
+    for key in key_columns {
+        if orders.iter().any(|order| order.column == *key) {
+            continue;
+        }
+        columns.push(((*key).to_string(), Type::String));
+        orders.push(Order::asc(*key));
+    }
+
+    Ok((columns, orders))
 }
 
 /// Render `ORDER BY` items to their SQL spelling — `col ASC` / `col DESC` joined

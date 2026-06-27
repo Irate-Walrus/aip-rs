@@ -80,6 +80,22 @@ fn write_node<D: Dialect + ?Sized>(
             sql.push_str(r" ESCAPE '\'");
             binds.push(Value::Text(format!("{}/%", escape_like(parent))));
         }
+        // A keyset cursor seek: the row-value comparison `(a, b) > (?1, ?2)`,
+        // standard SQL across SQLite and Postgres. Each value binds in column
+        // order, so the placeholders stay left-to-right.
+        Predicate::TupleGt { columns, values } => {
+            sql.push('(');
+            sql.push_str(&columns.join(", "));
+            sql.push_str(") > (");
+            for (i, value) in values.iter().enumerate() {
+                if i > 0 {
+                    sql.push_str(", ");
+                }
+                sql.push_str(&dialect.placeholder(binds.len() + 1));
+                binds.push(value.clone());
+            }
+            sql.push(')');
+        }
         // A raw fragment is emitted verbatim; it carries no binds, so the shared
         // placeholder numbering is untouched. `write_child` parenthesizes it when
         // it sits under a combinator (its precedence is the loosest).
