@@ -72,13 +72,15 @@ fn write_node<D: Dialect + ?Sized>(
         // A parent scope is a `LIKE` prefix: standard SQL across SQLite and
         // Postgres, so it is rendered directly. The bound pattern escapes the
         // parent's `LIKE` metacharacters and appends the child wildcard, so the
-        // parent matches literally and is never interpolated (ADR-0008).
+        // parent matches literally and is never interpolated (ADR-0008) — except
+        // a `-` segment, which is the AIP-159 wildcard `scope_pattern` turns into
+        // an unescaped `%` so the listing fans out across that position.
         Predicate::Scope { column, parent } => {
             sql.push_str(column);
             sql.push_str(" LIKE ");
             sql.push_str(&dialect.placeholder(binds.len() + 1));
             sql.push_str(r" ESCAPE '\'");
-            binds.push(Value::Text(format!("{}/%", escape_like(parent))));
+            binds.push(Value::Text(scope_pattern(parent)));
         }
         // A raw fragment is emitted verbatim; it carries no binds, so the shared
         // placeholder numbering is untouched. `write_child` parenthesizes it when
@@ -207,6 +209,59 @@ impl Dialect for Sqlite {
             HasTest::Present => (format!("{column} IS NOT NULL"), Vec::new()),
         }
     }
+}
+
+/// Translate a (possibly wildcard) parent resource name into the `LIKE` pattern
+/// scoping a name column to that parent's children.
+///
+/// Walks the parent's `/`-separated segments: a `-` segment is the AIP-159
+/// wildcard, emitted as an unescaped `%` so it matches any resource ID in that
+/// position (`%` spans `/`, so a wildcard ancestor still reaches a deeper
+/// child); every other segment is [`escape_like`]d so its own `%` / `_` / `\`
+/// match literally and can never act as a wildcard. The segments rejoin with
+/// `/` and a trailing `/%` keeps only rows strictly under the parent — never the
+/// parent row itself.
+///
+/// `-` is never a valid concrete resource ID (it is not a DNS name), so a `-`
+/// segment in a validated parent is unambiguously the wildcard; a concrete
+/// parent renders byte-for-byte as it did before — per-segment escaping of a
+/// `/`-free metacharacter set is identical to escaping the whole string.
+///
+/// `shippers/-` -> `shippers/%/%` (every site under every shipper);
+/// `shippers/acme` -> `shippers/acme/%` (only acme's children).
+///
+/// Two `LIKE` properties bound what this scope can express, and a caller relying
+/// on per-segment wildcard semantics must respect them:
+///
+/// - **`parent` must be a relative resource name** (no `//service/...` prefix, no
+///   leading `/`). The pattern is matched against the `name` column verbatim, so
+///   a parent and the stored names must be in the *same* form. Passing a full
+///   resource name scopes to full-resource-name children — which match nothing if
+///   the column stores bare names. (The resource-name layer's `Scanner` accepts
+///   a `//service` prefix, so a parent can validate yet still scope to nothing;
+///   normalize before scoping if a store mixes forms.)
+/// - **A `-` matches across `/`, so it is single-segment only in the *terminal*
+///   position.** A non-terminal wildcard such as `shippers/-/sites/oslo` becomes
+///   `shippers/%/sites/oslo/%`, and because `%` spans `/` the wildcard can absorb
+///   more than one segment — over-matching structurally-different rows when a
+///   single name column mixes resources of differing depth. `LIKE` has no
+///   portable single-segment wildcard, so the per-segment guarantee holds only
+///   when each `-` is the last id position (freight's `shippers/-`) or the
+///   column holds one resource shape.
+fn scope_pattern(parent: &str) -> String {
+    let mut out = String::new();
+    for (i, segment) in parent.split('/').enumerate() {
+        if i > 0 {
+            out.push('/');
+        }
+        if segment == "-" {
+            out.push('%');
+        } else {
+            out.push_str(&escape_like(segment));
+        }
+    }
+    out.push_str("/%");
+    out
 }
 
 /// Escape a value's `LIKE` metacharacters — the wildcards `%` and `_`, and the

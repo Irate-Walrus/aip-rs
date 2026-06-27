@@ -446,7 +446,13 @@ impl FreightService for FreightServer {
         request: Request<ListSitesRequest>,
     ) -> Result<Response<ListSitesResponse>, Status> {
         let req = request.into_inner();
-        ShipperResourceName::parse_field("parent", &req.parent)?;
+        // AIP-159: a `List` `parent` may be a `-` wildcard (`shippers/-`) to fan
+        // the listing out across every shipper, so it is parsed with
+        // `parse_parent_field` — which accepts the wildcard — rather than the
+        // wildcard-rejecting `parse_field` a `Get` uses. The raw `parent` flows
+        // into `scoped_predicate` below, whose wildcard-aware scope turns each
+        // `-` into a SQL `%` so the fan-out actually reaches every shipper's sites.
+        ShipperResourceName::parse_parent_field("parent", &req.parent)?;
 
         // Parse and validate the AIP-132 `order_by` against the sortable paths the
         // column `Schema` derives — the single sortable source, no separately
@@ -578,7 +584,11 @@ impl FreightService for FreightServer {
         request: Request<ListShipmentsRequest>,
     ) -> Result<Response<ListShipmentsResponse>, Status> {
         let req = request.into_inner();
-        ShipperResourceName::parse_field("parent", &req.parent)?;
+        // AIP-159: as in `ListSites`, the `parent` may be a `-` wildcard
+        // (`shippers/-`) to list shipments across every shipper, so it is parsed
+        // with the wildcard-permitting `parse_parent_field`; `scoped_predicate`
+        // renders each `-` as a SQL `%` to fan the scope out.
+        ShipperResourceName::parse_parent_field("parent", &req.parent)?;
 
         // Offset pagination (AIP-158). `filter` is a non-pagination field, so the
         // request checksum `Page::parse` computes covers it: changing it
@@ -812,6 +822,13 @@ fn parse_filter(
 /// `aip::sql::Predicate::eq("tenant_id", tenant)` — and it numbers in step with
 /// the rest; here the parent scope is the freight demo's tenancy boundary (a
 /// shipper owns its sites and shipments).
+///
+/// `parent` may be an AIP-159 `-` wildcard (`shippers/-`): the scope is
+/// wildcard-aware, rendering each `-` segment as a SQL `%` so a `List` fans out
+/// across that position. The wildcard relaxes only *which* parents are in scope,
+/// not *which caller* may see them — a real server gating its `List` would
+/// authorize the wildcard against the enclosing collection, never the verbatim
+/// `shippers/-` (the demo's `List` is ungated, so there is nothing to bypass).
 fn scoped_predicate(parent: &str, user_filter: Option<aip::sql::Predicate>) -> aip::sql::Predicate {
     let mut clauses = vec![
         aip::sql::Predicate::scope_to_parent("name", parent),
@@ -2769,6 +2786,59 @@ mod tests {
             .await
             .expect("create_shipment succeeds");
         assert_eq!(list_filtered_origins(&server, "").await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn list_shipments_fans_out_across_shippers_with_a_wildcard_parent() {
+        // AIP-159: `parent = "shippers/-"` lists shipments across *every*
+        // shipper. The wildcard-aware parent scope renders `-` as a SQL `%`, so
+        // the two shipments under `acme` and the one under `other` all come back
+        // — where a concrete `shippers/acme` parent would see only the two.
+        let site = "shippers/acme/sites/x";
+        let server = FreightServer::default();
+        create_shipment(&server, site, site, &[]).await; // under PARENT = shippers/acme
+        create_shipment(&server, site, site, &[]).await;
+        server
+            .create_shipment(Request::new(CreateShipmentRequest {
+                parent: "shippers/other".to_owned(),
+                shipment: Some(Shipment {
+                    origin_site: site.to_owned(),
+                    destination_site: site.to_owned(),
+                    pickup_earliest_time: valid_time(),
+                    pickup_latest_time: valid_time(),
+                    delivery_earliest_time: valid_time(),
+                    delivery_latest_time: valid_time(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }))
+            .await
+            .expect("create_shipment succeeds");
+
+        let wildcard = server
+            .list_shipments(Request::new(ListShipmentsRequest {
+                parent: "shippers/-".to_owned(),
+                ..Default::default()
+            }))
+            .await
+            .expect("a wildcard List succeeds")
+            .into_inner();
+        assert_eq!(
+            wildcard.shipments.len(),
+            3,
+            "the wildcard parent fans out across both shippers"
+        );
+
+        // The concrete parent still scopes to just its own shipper's two.
+        let scoped = server
+            .list_shipments(Request::new(ListShipmentsRequest {
+                parent: PARENT.to_owned(),
+                ..Default::default()
+            }))
+            .await
+            .expect("a concrete List succeeds")
+            .into_inner();
+        assert_eq!(scoped.shipments.len(), 2);
     }
 
     #[tokio::test]

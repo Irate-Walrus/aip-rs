@@ -171,3 +171,43 @@ the two drift-guard tests — redundant by construction now that the schema *is*
 derivation — are removed. `Schema::builder()` survives for descriptor-less
 consumers; its hand-built columns default to filterable + sortable, since with no
 declared types there is nothing to drive the sortable rule.
+
+## Amendment (issue #195): `scope_to_parent` is AIP-159 wildcard-aware
+
+The original `scope_to_parent` escaped the parent's `LIKE` metacharacters whole
+and appended `/%`, so **the child `/%` was the only wildcard** and the parent
+matched literally. AIP-159 lets a `List` `parent` carry a `-` wildcard
+(`shippers/-` — list across every shipper), which that contract rendered as the
+literal string `shippers/-/%`, matching nothing.
+
+`scope_to_parent` now renders **per segment**: a bare `-` segment becomes an
+unescaped `%` (fanning out across that position); every other segment is escaped
+exactly as before. This is a deliberate contract change to the shared primitive,
+safe because **`-` is never a valid concrete resource ID** (it is not a DNS name,
+so `is_domain_name("-")` is false) — a concrete parent can never contain one, and
+concrete parents render byte-for-byte as they did before. The wildcard relaxes
+*which parents are in scope*, not *which caller may see them*: authorization stays
+the handler's job (AIP-211), and the typed gate that decides a `-` is permissible
+is `aip-resourcename`'s `parse_parent_field` / `Pattern::match_parent`, not this
+SQL layer.
+
+Two limits are inherent to `LIKE` and are documented on the builder and on
+`dialect::scope_pattern` rather than enforced here:
+
+- **`parent` must be a relative resource name.** The pattern is matched against
+  the `name` column verbatim; a `//service/...`-prefixed parent scopes to
+  full-resource-name children and matches nothing if the column stores bare names.
+  The resource-name `Scanner` accepts such a prefix, so a parent can validate yet
+  scope to nothing — normalize before scoping if a store mixes forms.
+- **A `-` is single-segment only in the terminal position.** `%` spans `/`, so a
+  non-terminal wildcard (`shippers/-/sites/oslo` → `shippers/%/sites/oslo/%`) can
+  absorb more than one segment and over-match when one `name` column mixes
+  resources of differing depth. `LIKE` has no portable single-segment wildcard;
+  the per-segment guarantee holds only for a terminal `-` (freight's `shippers/-`)
+  or a single-resource-shape column.
+
+**Consequences.** The `aip-sql` golden tests gain wildcard-scope cases; concrete
+scopes are unchanged. The freight example's `ListSites` / `ListShipments` parse
+their `parent` with `parse_parent_field` and fan out over `shippers/-`. No new
+dependency on `aip-resourcename` is taken — the translation stays string-based,
+keyed on the fact that `-` is the one segment value no concrete name can hold.

@@ -195,6 +195,21 @@ gc -d '{"parent":"'"$ID"'","filter":"origin_site = \"'"$SITE_BRAVO"'\""}'       
 gc -d '{"parent":"'"$ID"'","filter":"annotations:priority"}'                            127.0.0.1:50051 $SVC/ListShipments
 ```
 
+An AIP-159 `-` wildcard parent fans a `List` out across **every** shipper. The
+wildcard-aware parent scope renders each `-` segment as a SQL `%`, so the listing
+reaches every shipper's children at once; the collection-id segments stay literal.
+A `Get` name, by contrast, must address one resource — a `-` there is rejected as
+`INVALID_ARGUMENT` (reason `RESOURCE_NAME_WILDCARD_NOT_ALLOWED`):
+
+```sh
+# Every shipment under every shipper (and likewise `shippers/-` for ListSites).
+gc -d '{"parent":"shippers/-"}'                                                         127.0.0.1:50051 $SVC/ListShipments
+gc -d '{"parent":"shippers/-"}'                                                         127.0.0.1:50051 $SVC/ListSites
+
+# A wildcard is NOT a valid Get name — rejected, not a fan-out:
+gc -d '{"name":"shippers/-"}'                                                           127.0.0.1:50051 $SVC/GetShipper
+```
+
 The `google.iam.v1.IAMPolicy` service stores a **Policy** keyed by
 **Resource name** and mutates it through the `aip::iam` structural helpers:
 
@@ -399,9 +414,9 @@ wired up.
 | `DeleteShipper`   | `resourcename` (validate) + generated `ShipperResourceName` (pattern match), `etag` (AIP-154 freshness check), `softdelete` (AIP-164 soft delete — stamp `delete_time`, keep the record) | wired |
 | `UndeleteShipper` | `resourcename` (validate) + generated `ShipperResourceName` (pattern match), `softdelete` (AIP-164 undelete — clear `delete_time` after confirming the shipper is soft-deleted, else `ALREADY_EXISTS`) | wired |
 | `CreateSite`      | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `SiteResourceName` (validated `new` + infallible `Display`), `fieldbehavior` (reflective REQUIRED validation → AIP-193, the `aip-rs` sentinel rewritten to the service domain by the boundary layer), `requestid` (AIP-155 idempotent replay), `preview` (AIP-163 `validate_only` gate) | wired |
-| `ListSites`       | `ordering` (parse/validate, read through the generated `OrderByRequest` impl) + `pagination` (`Page::parse` preamble: checksum guard + offset token + `SizeLimits` size policy, then `fetch_limit`/`split_overfetch` drive the store overfetch probe at the unsigned `offset()` and mint the follow-on token; read through the generated `PageRequest` impl) + `filtering`/`aip-sql` (filter declarations derived from the `Site` descriptor + server-composed scope/soft-delete + `ORDER BY`/`LIMIT`/`OFFSET` → in-memory SQLite), with the in-memory `filtering` matcher pinned against SQLite | wired |
+| `ListSites`       | `resourcename` (AIP-159 `parse_parent_field` — accepts a `-` wildcard parent) + `ordering` (parse/validate, read through the generated `OrderByRequest` impl) + `pagination` (`Page::parse` preamble: checksum guard + offset token + `SizeLimits` size policy, then `fetch_limit`/`split_overfetch` drive the store overfetch probe at the unsigned `offset()` and mint the follow-on token; read through the generated `PageRequest` impl) + `filtering`/`aip-sql` (filter declarations derived from the `Site` descriptor + server-composed wildcard-aware scope/soft-delete + `ORDER BY`/`LIMIT`/`OFFSET` → in-memory SQLite), with the in-memory `filtering` matcher pinned against SQLite | wired |
 | `CreateShipment`  | `resourceid` (generate), generated `ShipperResourceName` (parse parent) + `ShipmentResourceName` (validated `new` + infallible `Display`), `fieldbehavior` (reflective REQUIRED validation of all six fields — endpoints + four pickup/delivery timestamps — into one AIP-193 response, the `aip-rs` sentinel rewritten to the service domain by the boundary layer), `requestid` (AIP-155 idempotent replay), `preview` (AIP-163 `validate_only` gate) | wired |
-| `ListShipments`   | `pagination` (`Page::parse` preamble: checksum guard + offset token + `SizeLimits` size policy, then `fetch_limit`/`split_overfetch` drive the store overfetch probe at the unsigned `offset()` and mint the follow-on token; read through the generated `PageRequest` impl) + `filtering`/`aip-sql` (filter declarations derived from the `Shipment` descriptor + server-composed scope/soft-delete → in-memory SQLite) | wired |
+| `ListShipments`   | `resourcename` (AIP-159 `parse_parent_field` — accepts a `-` wildcard parent) + `pagination` (`Page::parse` preamble: checksum guard + offset token + `SizeLimits` size policy, then `fetch_limit`/`split_overfetch` drive the store overfetch probe at the unsigned `offset()` and mint the follow-on token; read through the generated `PageRequest` impl) + `filtering`/`aip-sql` (filter declarations derived from the `Shipment` descriptor + server-composed wildcard-aware scope/soft-delete → in-memory SQLite) | wired |
 | `IAMPolicy.GetIamPolicy` / `SetIamPolicy` | `iam` (Member validation + structural read-modify-write: dedupe/normalise, `etag` optimistic concurrency, conditions⟹version-3) over a decomposed SQLite policy store (iam-go's `iam_policy_bindings` schema), with `version` recovered on read by `policy::canonical_version` (the invariant `validate` enforces, read backwards) | wired |
 | `IAMPolicy.TestIamPermissions` | `iam` + the opt-in cel-backed `eval` adapter (`aip::iam::eval`): role→permission expansion via an example-owned catalogue built on `aip::iam::RoleSet` (the library ships the mechanism, never role definitions), Member matching through `aip::iam::grant_admits`, Condition evaluation against a `RequestContext` whose `request.time` defaults to now | wired |
 | `BatchCreateShippers` | `lro` (AIP-151 / AIP-233): `Operation<M, R>` packs progress `metadata` + the created shippers `response` into `Any` by descriptor; a `tokio` task steps `set_metadata` → `succeed`, honouring a `CancelOperation` flag with the terminal `cancel`; `OperationName` mints the flat name; `preview` (AIP-163 `validate_only` → `Operation::validated`, empty name). Reuses the `CreateShipper` pipeline per shipper | wired |

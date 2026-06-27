@@ -45,6 +45,8 @@ pub enum Error {
     InvalidPattern(String),
     #[error("segment {segment:?}: resource names must not contain variables")]
     VariableInName { segment: String },
+    #[error("segment {segment:?}: wildcard `-` is not allowed in this resource name")]
+    WildcardInName { segment: String },
     #[error("missing value for variable {name:?}")]
     MissingVariable { name: String },
     #[error("variable {name:?} is not declared in the pattern")]
@@ -228,6 +230,33 @@ impl Pattern {
         Ok(out)
     }
 
+    /// Match a `List` `parent` that may carry [`Wildcard`](WILDCARD) (`-`)
+    /// segments in its resource-id positions (AIP-159), returning a borrowed
+    /// [`ParentName`] view rather than binding captures.
+    ///
+    /// The structural check is [`match_name`](Self::match_name)'s: the segment
+    /// count must equal the pattern's, literal (collection-id) segments must
+    /// match exactly, and each variable position must hold a non-empty
+    /// segment — but here that segment may be the wildcard `-`, standing for
+    /// "any resource ID in this position". A name carrying an embedded
+    /// `{variable}` is rejected, as in `match_name`. Returns `None` on any
+    /// structural mismatch.
+    ///
+    /// This is the wildcard-permitting counterpart to the strict
+    /// [`validate_strict`] a `Get` name takes: a `Shipper` pattern matches
+    /// `shippers/-` here (a `List` fanning out across every shipper) while
+    /// `shippers/-` is rejected as a `Get` name.
+    pub fn match_parent<'a>(&'a self, name: &'a str) -> Option<ParentName<'a>> {
+        // A parent is exactly a name that matches this pattern, viewed as one that
+        // may carry wildcards: [`match_name`](Self::match_name) already accepts a
+        // `-` in a variable position (it is a non-empty segment like any other) and
+        // performs the whole structural check — segment count, literal equality,
+        // and the embedded-`{variable}` rejection. Reuse it rather than maintaining
+        // a second copy of the walk that could drift; the [`Captures`] it builds are
+        // discarded since a `ParentName` is a borrowed view, not bound variables.
+        self.match_name(name).map(|_| ParentName { name })
+    }
+
     /// Reports whether the pattern declares a variable named `name`.
     fn declares(&self, name: &str) -> bool {
         self.segments
@@ -251,6 +280,63 @@ impl<'a> Captures<'a> {
     /// Iterate over `(variable, value)` pairs.
     pub fn iter(&self) -> impl Iterator<Item = (&'a str, &'a str)> + '_ {
         self.vars.iter().map(|(k, v)| (*k, *v))
+    }
+}
+
+/// A validated `List` `parent` that may carry [`Wildcard`](WILDCARD) (`-`)
+/// segments — the borrowed view [`Pattern::match_parent`] returns.
+///
+/// It is a distinct type from a concrete `<Type>ResourceName` on purpose: it
+/// marks "this name may contain a wildcard", so a wildcard-bearing parent can
+/// never masquerade as a concrete resource name. A handler holds it only long
+/// enough to read [`as_str`](Self::as_str) (feeding the SQL scope) and to walk
+/// [`segments`](Self::segments) (each reporting [`Segment::is_wildcard`]) when
+/// it needs to authorize the wildcard positions; it borrows the request's
+/// `parent` string, so it allocates nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParentName<'a> {
+    name: &'a str,
+}
+
+impl<'a> ParentName<'a> {
+    /// The parent resource name as a string slice — the value to hand the SQL
+    /// parent scope (`aip-sql`'s wildcard-aware `scope_to_parent`).
+    pub fn as_str(&self) -> &'a str {
+        self.name
+    }
+
+    /// Iterate the parent's [`Segment`]s in order. Each reports
+    /// [`is_wildcard`](Segment::is_wildcard), so a handler can authorize a
+    /// wildcard position against its enclosing collection rather than the
+    /// verbatim `-`.
+    pub fn segments(&self) -> Segments<'a> {
+        Segments {
+            scanner: Scanner::new(self.name),
+        }
+    }
+
+    /// Reports whether this parent carries any [`Wildcard`](WILDCARD) (`-`)
+    /// segment — i.e. whether it fans the listing out rather than scoping to one
+    /// concrete parent. Delegates to the free [`contains_wildcard`] so the crate
+    /// has a single notion of "carries a wildcard".
+    pub fn contains_wildcard(&self) -> bool {
+        contains_wildcard(self.name)
+    }
+}
+
+/// Iterator over a [`ParentName`]'s [`Segment`]s, driven by the crate's own
+/// [`Scanner`] so it skips a leading `/` and a `//service` prefix the same way
+/// every other walk does.
+#[derive(Debug)]
+pub struct Segments<'a> {
+    scanner: Scanner<'a>,
+}
+
+impl<'a> Iterator for Segments<'a> {
+    type Item = Segment<'a>;
+
+    fn next(&mut self) -> Option<Segment<'a>> {
+        self.scanner.scan()
     }
 }
 
@@ -363,6 +449,14 @@ pub fn contains_wildcard(name: &str) -> bool {
 /// [`Literal`]; variables are not allowed. A `//service` prefix must be a valid
 /// DNS name.
 pub fn validate(name: &str) -> Result<(), Error> {
+    validate_inner(name, true)
+}
+
+/// The shared body of [`validate`] and [`validate_strict`]: one [`Scanner`] pass
+/// over `name`. When `allow_wildcard` is false a [`Wildcard`](WILDCARD) (`-`)
+/// segment is rejected with [`Error::WildcardInName`] instead of accepted, so the
+/// wildcard rule lives in exactly one place and the name is scanned once.
+fn validate_inner(name: &str, allow_wildcard: bool) -> Result<(), Error> {
     if name.is_empty() {
         return Err(Error::Empty);
     }
@@ -374,7 +468,12 @@ pub fn validate(name: &str) -> Result<(), Error> {
             return Err(Error::EmptySegment { index });
         }
         if segment.is_wildcard() {
-            continue;
+            if allow_wildcard {
+                continue;
+            }
+            return Err(Error::WildcardInName {
+                segment: segment.0.to_string(),
+            });
         }
         if segment.is_variable() {
             return Err(Error::VariableInName {
@@ -393,6 +492,23 @@ pub fn validate(name: &str) -> Result<(), Error> {
         });
     }
     Ok(())
+}
+
+/// Validates that `name` is a well-formed resource name carrying **no**
+/// [`Wildcard`](WILDCARD) (`-`) segment — the strict form a `Get` name or any
+/// mutation target requires.
+///
+/// AIP-159 reserves `-` for the `parent` of a `List` (where it fans the listing
+/// out across a collection); everywhere a name must address a single concrete
+/// resource a wildcard is meaningless, so this rejects it with
+/// [`Error::WildcardInName`] rather than letting it fall through to a later
+/// `NOT_FOUND`. It is otherwise [`validate`]: empty names, empty segments,
+/// embedded variables, and non-DNS segments are rejected the same way. The
+/// generated `<Type>ResourceName::parse_field` guard calls this; the
+/// wildcard-permitting [`Pattern::match_parent`] is the `List`-parent
+/// counterpart.
+pub fn validate_strict(name: &str) -> Result<(), Error> {
+    validate_inner(name, false)
 }
 
 /// Validates that `pattern` is a well-formed resource-name pattern per AIP-122.
@@ -678,6 +794,10 @@ impl From<Error> for tonic::Status {
                 "RESOURCE_NAME_VARIABLE_IN_NAME",
                 HashMap::from([("segment".to_owned(), segment.clone())]),
             ),
+            Error::WildcardInName { segment } => (
+                "RESOURCE_NAME_WILDCARD_NOT_ALLOWED",
+                HashMap::from([("segment".to_owned(), segment.clone())]),
+            ),
             Error::MissingVariable { name } => (
                 "RESOURCE_NAME_MISSING_VARIABLE",
                 HashMap::from([("variable".to_owned(), name.clone())]),
@@ -749,6 +869,10 @@ impl From<FieldError> for tonic::Status {
             ),
             Error::VariableInName { segment } => (
                 "RESOURCE_NAME_VARIABLE_IN_NAME",
+                HashMap::from([("segment".to_owned(), segment.clone())]),
+            ),
+            Error::WildcardInName { segment } => (
+                "RESOURCE_NAME_WILDCARD_NOT_ALLOWED",
                 HashMap::from([("segment".to_owned(), segment.clone())]),
             ),
             Error::MissingVariable { name } => (
@@ -1274,6 +1398,73 @@ mod tests {
                 "contains_wildcard({input:?})"
             );
         }
+    }
+
+    #[test]
+    fn validate_strict_rejects_wildcards_but_keeps_validate_otherwise() {
+        // The plain `validate` allows `-` (AIP-159 wildcard); `validate_strict`
+        // is the same check minus that allowance — a `Get` name must be concrete.
+        for ok in ["foo", "foo/bar", "foo/1234/bar", "//example.com/foo/bar"] {
+            assert!(validate(ok).is_ok(), "{ok:?} should validate");
+            assert!(
+                validate_strict(ok).is_ok(),
+                "{ok:?} should validate strictly"
+            );
+        }
+        for wildcard in ["-", "-/bar", "foo/-", "foo/-/bar"] {
+            assert!(validate(wildcard).is_ok(), "{wildcard:?} validates loosely");
+            assert!(
+                matches!(validate_strict(wildcard), Err(Error::WildcardInName { .. })),
+                "{wildcard:?} is rejected by validate_strict",
+            );
+        }
+        // A non-wildcard defect still surfaces as its specific error, not a
+        // wildcard one.
+        assert!(matches!(validate_strict(""), Err(Error::Empty)));
+    }
+
+    #[test]
+    fn match_parent_accepts_wildcards_and_keeps_the_structural_check() {
+        let pattern = Pattern::parse("shippers/{shipper}").unwrap();
+        // A concrete parent and a wildcard parent both match.
+        for parent in ["shippers/acme", "shippers/-"] {
+            let parsed = pattern.match_parent(parent).expect("a valid parent");
+            assert_eq!(parsed.as_str(), parent);
+        }
+        // The wildcard parent reports the wildcard; the concrete one does not.
+        assert!(pattern
+            .match_parent("shippers/-")
+            .unwrap()
+            .contains_wildcard());
+        assert!(!pattern
+            .match_parent("shippers/acme")
+            .unwrap()
+            .contains_wildcard());
+        // Structure is still enforced: wrong collection, too many/few segments,
+        // and an embedded variable are all non-matches.
+        for bad in [
+            "warehouses/-",
+            "shippers/acme/sites/oslo",
+            "shippers",
+            "shippers/{shipper}",
+        ] {
+            assert!(
+                pattern.match_parent(bad).is_none(),
+                "{bad:?} must not match the shipper parent"
+            );
+        }
+    }
+
+    #[test]
+    fn parent_name_segments_report_wildcards_per_position() {
+        let pattern = Pattern::parse("shippers/{shipper}/sites/{site}").unwrap();
+        // A partial wildcard: concrete shipper, wildcard site.
+        let parsed = pattern
+            .match_parent("shippers/acme/sites/-")
+            .expect("a valid partial-wildcard parent");
+        let wildcards: Vec<bool> = parsed.segments().map(|s| s.is_wildcard()).collect();
+        assert_eq!(wildcards, [false, false, false, true]);
+        assert!(parsed.contains_wildcard());
     }
 
     #[test]

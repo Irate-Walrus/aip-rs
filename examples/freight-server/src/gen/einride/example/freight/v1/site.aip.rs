@@ -85,14 +85,34 @@ impl SiteResourceName {
         Ok(Self::from_parts(shipper, site))
     }
 
-    /// Parse `value` from request field `field`, wrapping any error with
-    /// the field path so `?` produces an AIP-193 `BadRequest` violation.
+    /// Parse `value` from request field `field` as a concrete resource
+    /// name, wrapping any error with the field path so `?` produces an
+    /// AIP-193 `BadRequest` violation. Rejects a `-` wildcard segment;
+    /// use `parse_parent_field` for a `List` parent that may carry one.
     pub fn parse_field(field: &str, value: &str) -> Result<Self, ::aip::resourcename::FieldError> {
         let wrap = |source| {
             ::aip::resourcename::FieldError { field: field.to_owned(), source }
         };
-        ::aip::resourcename::validate(value).map_err(wrap)?;
+        ::aip::resourcename::validate_strict(value).map_err(wrap)?;
         Self::parse(value).map_err(wrap)
+    }
+
+    /// Parse `value` from request field `field` as a `List` parent that may
+    /// carry `-` wildcard segments (AIP-159), wrapping any error with the
+    /// field path for an AIP-193 `BadRequest`. A wildcard is accepted in any
+    /// resource-id position; the collection-id segments must match this
+    /// pattern. Returns a borrowed `ParentName` view.
+    pub fn parse_parent_field<'a>(
+        field: &str,
+        value: &'a str,
+    ) -> Result<::aip::resourcename::ParentName<'a>, ::aip::resourcename::FieldError> {
+        let wrap = |source| {
+            ::aip::resourcename::FieldError { field: field.to_owned(), source }
+        };
+        ::aip::resourcename::validate(value).map_err(wrap)?;
+        SITE_RESOURCE_NAME_PATTERN.match_parent(value).ok_or_else(|| {
+            wrap(::aip::resourcename::Error::PatternMismatch { pattern: Self::PATTERN.to_owned() })
+        })
     }
 
     /// The parent resource name, `shippers/{shipper}`.

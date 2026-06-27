@@ -556,6 +556,24 @@ fn scope_to_parent_matches_metacharacters_literally() {
 }
 
 #[test]
+fn scope_to_parent_fans_out_a_wildcard_segment() {
+    // An AIP-159 `-` segment in the parent is the wildcard: it renders as an
+    // unescaped `%`, so the scope fans out across that position (every child of
+    // every shipper) while the collection-id segments stay literal.
+    let (sql, binds) = Sqlite.render(&Predicate::scope_to_parent("name", "shippers/-"));
+    assert_eq!(sql, r"name LIKE ?1 ESCAPE '\'");
+    assert_eq!(binds, vec![Value::Text("shippers/%/%".to_string())]);
+
+    // A partial wildcard keeps the concrete segment constrained: only acme's
+    // sub-collections fan out, not every shipper's.
+    let (_, binds) = Sqlite.render(&Predicate::scope_to_parent("name", "shippers/acme/sites/-"));
+    assert_eq!(
+        binds,
+        vec![Value::Text("shippers/acme/sites/%/%".to_string())]
+    );
+}
+
+#[test]
 fn is_null_renders_a_null_test() {
     // The soft-delete predicate a server composes with a user filter; it binds
     // nothing.

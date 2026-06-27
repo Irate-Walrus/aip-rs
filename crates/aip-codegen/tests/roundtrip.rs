@@ -234,6 +234,51 @@ fn parse_field_rejects_pattern_mismatch_with_the_field_path() {
     ));
 }
 
+/// `parse_field` now rejects a `-` wildcard segment (AIP-159): a `Get` name
+/// must address one concrete resource, so the wildcard is `INVALID_ARGUMENT`
+/// here, not a fall-through to `NOT_FOUND`.
+#[test]
+fn parse_field_rejects_a_wildcard_segment() {
+    let err = ShipperResourceName::parse_field("name", "shippers/-")
+        .expect_err("a wildcard Get name is rejected");
+    assert_eq!(err.field, "name");
+    assert!(matches!(
+        err.source,
+        aip_resourcename::Error::WildcardInName { .. }
+    ));
+}
+
+/// `parse_parent_field` is the AIP-159 `List`-parent counterpart: it accepts a
+/// `-` wildcard in a resource-id position and returns a borrowed `ParentName`.
+#[test]
+fn parse_parent_field_accepts_a_wildcard_parent() {
+    let parent = ShipperResourceName::parse_parent_field("parent", "shippers/-")
+        .expect("a wildcard parent is valid");
+    assert_eq!(parent.as_str(), "shippers/-");
+    assert!(parent.contains_wildcard());
+    // Its single resource-id position reports the wildcard.
+    let wildcards: Vec<bool> = parent.segments().map(|s| s.is_wildcard()).collect();
+    assert_eq!(wildcards, [false, true]);
+
+    // A concrete parent goes through the same method without a wildcard.
+    let concrete = ShipperResourceName::parse_parent_field("parent", "shippers/acme")
+        .expect("a concrete parent is valid");
+    assert!(!concrete.contains_wildcard());
+}
+
+/// `parse_parent_field` still enforces structure: a wrong collection or segment
+/// count is a `PatternMismatch`, the same as `parse_field`.
+#[test]
+fn parse_parent_field_rejects_a_structural_mismatch() {
+    let err = ShipperResourceName::parse_parent_field("parent", "shippers/acme/sites/oslo")
+        .expect_err("a site name is not a shipper parent");
+    assert_eq!(err.field, "parent");
+    assert!(matches!(
+        err.source,
+        aip_resourcename::Error::PatternMismatch { .. }
+    ));
+}
+
 #[test]
 fn mint_returns_a_valid_shipper_name() {
     let a = ShipperResourceName::mint();

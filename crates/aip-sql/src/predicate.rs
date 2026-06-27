@@ -161,7 +161,10 @@ pub enum Predicate {
     /// match keeping the rows under a parent. The bound pattern escapes the
     /// parent's `LIKE` metacharacters (`%` / `_` / `\`) and appends the child
     /// wildcard, so a parent containing `%` or `_` matches literally and is never
-    /// interpolated. Built with [`scope_to_parent`](Predicate::scope_to_parent).
+    /// interpolated. A bare `-` segment is the exception: it is the AIP-159
+    /// wildcard, rendered as an unescaped `%` so the scope fans out across that
+    /// position (`-` is never a valid resource ID, so this is unambiguous). Built
+    /// with [`scope_to_parent`](Predicate::scope_to_parent).
     Scope {
         /// The resource-name column to scope (e.g. `name`).
         column: String,
@@ -216,6 +219,15 @@ impl Predicate {
     /// metacharacters are escaped and the whole pattern is bound, so a parent
     /// containing `%` or `_` matches literally and is never interpolated
     /// (ADR-0008).
+    ///
+    /// A `-` segment in `parent` is treated as the AIP-159 wildcard (matches any
+    /// id in that position), so this is the right builder for a `List` whose
+    /// parent may fan out — but `-` is special to *every* caller of this shared
+    /// primitive, so pass a `parent` that was validated/authorized as a wildcard
+    /// (e.g. via the generated `parse_parent_field`), never raw untrusted input.
+    /// `parent` must be a relative resource name, and a `-` is single-segment only
+    /// in the terminal position — see the rendering notes in `dialect`'s
+    /// `scope_pattern` (ADR-0008 amendment, AIP-159).
     pub fn scope_to_parent(column: impl Into<String>, parent: impl Into<String>) -> Self {
         Predicate::Scope {
             column: column.into(),

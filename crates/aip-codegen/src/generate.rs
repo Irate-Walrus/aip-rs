@@ -720,13 +720,19 @@ fn write_resource_name(
     ));
     line("    }");
 
-    // `parse_field` — validates the value as a resource name then matches the
-    // pattern, wrapping every error with the request field path as a
-    // `FieldError`. Handlers parse once and propagate via `?` to get the right
-    // AIP-193 `BadRequest` field violation.
+    // `parse_field` — validates the value as a *concrete* resource name (no `-`
+    // wildcard, via `validate_strict`) then matches the pattern, wrapping every
+    // error with the request field path as a `FieldError`. A `Get`/mutation name
+    // must address one resource, so a wildcard is rejected here as
+    // `INVALID_ARGUMENT` rather than falling through to `NOT_FOUND` (AIP-159);
+    // the `List`-parent counterpart that *accepts* `-` is `parse_parent_field`.
+    // Handlers parse once and propagate via `?` to get the right AIP-193
+    // `BadRequest` field violation.
     line("");
-    line("    /// Parse `value` from request field `field`, wrapping any error with");
-    line("    /// the field path so `?` produces an AIP-193 `BadRequest` violation.");
+    line("    /// Parse `value` from request field `field` as a concrete resource");
+    line("    /// name, wrapping any error with the field path so `?` produces an");
+    line("    /// AIP-193 `BadRequest` violation. Rejects a `-` wildcard segment;");
+    line("    /// use `parse_parent_field` for a `List` parent that may carry one.");
     line(&format!(
         "    pub fn parse_field(field: &str, value: &str) -> Result<Self, {rn}::FieldError> {{"
     ));
@@ -735,8 +741,46 @@ fn write_resource_name(
         "            {rn}::FieldError {{ field: field.to_owned(), source }}"
     ));
     line("        };");
-    line(&format!("        {rn}::validate(value).map_err(wrap)?;"));
+    line(&format!(
+        "        {rn}::validate_strict(value).map_err(wrap)?;"
+    ));
     line("        Self::parse(value).map_err(wrap)");
+    line("    }");
+
+    // `parse_parent_field` — the AIP-159 `List`-parent counterpart to
+    // `parse_field`: it accepts a `-` wildcard in any resource-id position
+    // (`shippers/-` to list across every shipper) while the collection-id
+    // segments must still match this pattern. It returns a borrowed
+    // `ParentName` — a view that may carry wildcards, never a concrete
+    // `<Type>ResourceName` — so the wildcard can't masquerade as a real
+    // resource; the handler feeds `as_str()` to the SQL parent scope and walks
+    // `segments()` to authorize any wildcard position. The same `FieldError`
+    // wrapping as `parse_field`, so a bare `?` yields the right AIP-193 violation.
+    line("");
+    line("    /// Parse `value` from request field `field` as a `List` parent that may");
+    line("    /// carry `-` wildcard segments (AIP-159), wrapping any error with the");
+    line("    /// field path for an AIP-193 `BadRequest`. A wildcard is accepted in any");
+    line("    /// resource-id position; the collection-id segments must match this");
+    line("    /// pattern. Returns a borrowed `ParentName` view.");
+    line("    pub fn parse_parent_field<'a>(");
+    line("        field: &str,");
+    line("        value: &'a str,");
+    line(&format!(
+        "    ) -> Result<{rn}::ParentName<'a>, {rn}::FieldError> {{"
+    ));
+    line("        let wrap = |source| {");
+    line(&format!(
+        "            {rn}::FieldError {{ field: field.to_owned(), source }}"
+    ));
+    line("        };");
+    line(&format!("        {rn}::validate(value).map_err(wrap)?;"));
+    line(&format!(
+        "        {pattern_const}.match_parent(value).ok_or_else(|| {{"
+    ));
+    line(&format!(
+        "            wrap({rn}::Error::PatternMismatch {{ pattern: Self::PATTERN.to_owned() }})"
+    ));
+    line("        })");
     line("    }");
 
     // `mint` — infallible constructor for single-variable (no parent) wrappers
