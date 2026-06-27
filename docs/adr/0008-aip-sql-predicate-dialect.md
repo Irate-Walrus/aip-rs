@@ -237,12 +237,14 @@ hard requirement — descending and mixed-direction `order_by` must page correct
 overrides that rejection.
 
 **Decision.** Add `Predicate::keyset_seek(items)`, taking decoupled
-`(column, desc, value)` triples (no coupling to the ordering type). All-ascending
-collapses to `tuple_gt` — the efficient row-value form is unchanged, so the only
-queries that pay for the expansion are the ones that need it. With any descending
-column it expands to the lexicographic OR-of-ANDs: one branch per column, equality
-on every earlier column and a strict comparison on this one — `>` ascending, `<`
-descending. It composes the existing `Compare` / `All` / `Any` arms, so no
+`(column, Direction, value)` triples (no coupling to the ordering type), where
+`Direction` is the crate's own `Asc` / `Desc` enum rather than a bare flag.
+All-ascending collapses to `tuple_gt` — the efficient row-value form is unchanged,
+so the only queries that pay for the expansion are the ones that need it. With any
+descending column it expands to the lexicographic OR-of-ANDs: one branch per
+column, equality on every earlier column and a strict comparison on this one —
+`>` ascending, `<` descending. It composes the existing `Compare` / `All` / `Any`
+arms, so no
 **Dialect** arm changes; `AND` binds tighter than `OR`, so the branches render
 without parens and the whole seek is parenthesized by the renderer when it sits
 under a server's scope conjunction.

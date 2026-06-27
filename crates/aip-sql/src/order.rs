@@ -14,7 +14,7 @@ use aip_filtering::Type;
 use aip_ordering::OrderBy;
 
 use crate::schema::Schema;
-use crate::Error;
+use crate::{Direction, Error};
 
 /// The ordered cursor seek columns: each a SQL column paired with its declared
 /// [`Type`], in `ORDER BY` clause order with the key tie-break last. Built once by
@@ -51,6 +51,15 @@ impl Order {
         Self {
             column: column.into(),
             desc: true,
+        }
+    }
+
+    /// This order's sort [`Direction`].
+    pub fn direction(&self) -> Direction {
+        if self.desc {
+            Direction::Desc
+        } else {
+            Direction::Asc
         }
     }
 }

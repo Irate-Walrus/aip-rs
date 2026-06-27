@@ -10,7 +10,8 @@
 use aip_filtering::{function, Declarations, Overload, Type};
 use aip_ordering::OrderBy;
 use aip_sql::{
-    transpile_filter, transpile_order_by, Dialect, Order, Predicate, Query, Schema, Sqlite, Value,
+    transpile_filter, transpile_order_by, Dialect, Direction, Order, Predicate, Query, Schema,
+    Sqlite, Value,
 };
 
 /// The enum type both the `category` field and its bare value names share.
@@ -517,8 +518,12 @@ fn keyset_seek_all_ascending_collapses_to_a_row_value_comparison() {
     // No descending column, so the seek is the efficient row-value form — the same
     // SQL `tuple_gt` renders, one bind per column in order.
     let seek = Predicate::keyset_seek([
-        ("display_name", false, Value::Text("Oslo Dock".to_owned())),
-        ("site", false, Value::Text("dock-1".to_owned())),
+        (
+            "display_name",
+            Direction::Asc,
+            Value::Text("Oslo Dock".to_owned()),
+        ),
+        ("site", Direction::Asc, Value::Text("dock-1".to_owned())),
     ]);
     let (sql, binds) = Sqlite.render(&seek);
     assert_eq!(sql, "(display_name, site) > (?1, ?2)");
@@ -537,8 +542,12 @@ fn keyset_seek_one_descending_expands_to_an_or_of_ands() {
     // less on the descending column, or equal there and strictly greater on the
     // ascending tie-break. AND binds tighter than OR, so the branches need no parens.
     let seek = Predicate::keyset_seek([
-        ("display_name", true, Value::Text("Oslo Dock".to_owned())),
-        ("site", false, Value::Text("dock-1".to_owned())),
+        (
+            "display_name",
+            Direction::Desc,
+            Value::Text("Oslo Dock".to_owned()),
+        ),
+        ("site", Direction::Asc, Value::Text("dock-1".to_owned())),
     ]);
     let (sql, binds) = Sqlite.render(&seek);
     assert_eq!(sql, "display_name < ?1 OR display_name = ?2 AND site > ?3",);
@@ -557,8 +566,12 @@ fn keyset_seek_mixed_directions_compares_each_column_by_its_own_direction() {
     // Ascending lead, descending tie-break: greater on the first, or equal there and
     // less on the second. Each column is compared in its own sort direction.
     let seek = Predicate::keyset_seek([
-        ("latitude", false, Value::Double(30.5)),
-        ("display_name", true, Value::Text("Oslo Dock".to_owned())),
+        ("latitude", Direction::Asc, Value::Double(30.5)),
+        (
+            "display_name",
+            Direction::Desc,
+            Value::Text("Oslo Dock".to_owned()),
+        ),
     ]);
     let (sql, binds) = Sqlite.render(&seek);
     assert_eq!(sql, "latitude > ?1 OR latitude = ?2 AND display_name < ?3",);
@@ -579,8 +592,12 @@ fn keyset_seek_disjunction_is_parenthesized_under_a_scope_conjunction() {
     let predicate = Predicate::all([
         Predicate::eq("shipper", Value::Text("acme".to_owned())),
         Predicate::keyset_seek([
-            ("display_name", true, Value::Text("Oslo Dock".to_owned())),
-            ("site", false, Value::Text("dock-1".to_owned())),
+            (
+                "display_name",
+                Direction::Desc,
+                Value::Text("Oslo Dock".to_owned()),
+            ),
+            ("site", Direction::Asc, Value::Text("dock-1".to_owned())),
         ]),
     ]);
     let (sql, binds) = Sqlite.render(&predicate);

@@ -70,7 +70,7 @@ mod transpile;
 
 pub use dialect::{Dialect, Sqlite};
 pub use order::{transpile_order_by, CursorColumns, Order};
-pub use predicate::{CmpOp, Column, HasTest, Predicate, Value};
+pub use predicate::{CmpOp, Column, Direction, HasTest, Predicate, Value};
 pub use query::Query;
 pub use schema::{Schema, SchemaBuilder};
 pub use timestamp::format_timestamp;

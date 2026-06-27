@@ -921,7 +921,7 @@ fn cursor_seek(
         }
         items.push((
             column.clone(),
-            order.desc,
+            order.direction(),
             cursor_value_to_sql(&entry.value),
         ));
     }

@@ -69,6 +69,24 @@ impl CmpOp {
     }
 }
 
+/// A sort direction for a keyset seek column — ascending or descending. Mirrors
+/// the `ASC` / `DESC` an `ORDER BY` renders, so a seek pages in the same order the
+/// query sorts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    /// Ascending order.
+    Asc,
+    /// Descending order.
+    Desc,
+}
+
+impl Direction {
+    /// Whether this is the descending direction.
+    pub fn is_descending(self) -> bool {
+        matches!(self, Direction::Desc)
+    }
+}
+
 /// The left side of a comparison: a plain column, or a value selected from a
 /// stored JSON `map` column by key (the AIP-160 member access `labels.env`).
 #[derive(Debug, Clone, PartialEq)]
@@ -223,7 +241,7 @@ impl Predicate {
 
     /// A direction-aware keyset cursor seek: the comparison selecting the rows
     /// strictly after the cursor under a multi-column ordering. Each item is a seek
-    /// column, its descending flag, and the cursor value, in `ORDER BY` priority
+    /// column, its sort [`Direction`], and the cursor value, in `ORDER BY` priority
     /// order.
     ///
     /// All-ascending collapses to the efficient row-value comparison
@@ -231,15 +249,17 @@ impl Predicate {
     /// the lexicographic OR-of-ANDs — each column `>` when ascending and `<` when
     /// descending, under equality on the columns before it — so paging is correct in
     /// either direction. Empty `items` is the always-true empty conjunction.
-    pub fn keyset_seek(items: impl IntoIterator<Item = (impl Into<String>, bool, Value)>) -> Self {
-        let items: Vec<(String, bool, Value)> = items
+    pub fn keyset_seek(
+        items: impl IntoIterator<Item = (impl Into<String>, Direction, Value)>,
+    ) -> Self {
+        let items: Vec<(String, Direction, Value)> = items
             .into_iter()
-            .map(|(column, desc, value)| (column.into(), desc, value))
+            .map(|(column, dir, value)| (column.into(), dir, value))
             .collect();
         if items.is_empty() {
             return Predicate::all([]);
         }
-        if items.iter().all(|(_, desc, _)| !desc) {
+        if items.iter().all(|(_, dir, _)| !dir.is_descending()) {
             let (columns, values): (Vec<String>, Vec<Value>) = items
                 .into_iter()
                 .map(|(column, _, value)| (column, value))
@@ -253,8 +273,12 @@ impl Predicate {
                 .iter()
                 .map(|(column, _, value)| Predicate::eq(column.clone(), value.clone()))
                 .collect();
-            let (column, desc, value) = &items[i];
-            let op = if *desc { CmpOp::Lt } else { CmpOp::Gt };
+            let (column, dir, value) = &items[i];
+            let op = if dir.is_descending() {
+                CmpOp::Lt
+            } else {
+                CmpOp::Gt
+            };
             conjuncts.push(Predicate::Compare {
                 column: Column::Plain(column.clone()),
                 op,
