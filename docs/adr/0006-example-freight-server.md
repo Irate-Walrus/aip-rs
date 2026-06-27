@@ -54,3 +54,44 @@ the unimplemented methods return `Unimplemented`.
   naive placeholder (counter IDs, full-replacement update) behind the
   `TODO(aip #N)` marker rather than calling a not-yet-implemented, panicking
   API.
+
+## Amendment (ADR-0016): the Site and Shipment stores become typed-key tables
+
+The typed-key store (ADR-0016) lands in freight, the proving ground for every
+primitive. The Site/Shipment stores stay in-memory SQLite (the #39 engine choice
+is unchanged); only the *row layout* and the *scoping/paging* mechanics change.
+
+**Decision:** rework the `sites` and `shipments` schemas around the typed key
+tuple.
+
+- **Typed key columns, `name` dropped.** Each table's primary key is the
+  resource's **Variables** as columns in **Pattern** order (`sites` keyed on
+  `(shipper, site)`, `shipments` on `(shipper, shipment)`); the `name TEXT PRIMARY
+  KEY` column is removed. The `name` field is reconstructed on read from the key
+  columns through the generated wrapper's `Display` (ADR-0011 amendment),
+  decomposed back into binds on write.
+- **Column-per-field, no BLOB.** Each scalar field is its own typed column; small
+  repeated/map fields (`tags`, `annotations`) are JSON columns. The ADR records
+  normalized side tables as the production-correct layout for high cardinality.
+- **Foreign key with cascade; `PRAGMA foreign_keys = ON`.** Each child table
+  declares `FOREIGN KEY (parent key columns) REFERENCES parent (…) ON DELETE
+  CASCADE`, and the SQLite pool turns foreign keys on per connection (a
+  SQLite-only step; Postgres enforces them by default). The cascade is
+  hard-delete only — soft delete stays a handler policy, so soft-deleting a
+  **Shipper** leaves its **Sites**/**Shipments** visible-state untouched.
+- **Scope by omission; cursor paging.** `ListSites`/`ListShipments` scope by
+  composing `Predicate::eq` per concrete parent **Variable** and omitting per
+  **Wildcard** (ADR-0008 amendment, fed by `Pattern::match_with_wildcards`,
+  ADR-0002 amendment), and page with a **Cursor page token** over the key tuple
+  (ADR-0004 amendment). `sites` gets one covering index, `(shipper, display_name,
+  site)`.
+- **`BatchGetSites` implemented.** It graduates from `Unimplemented` to `N` typed
+  `get_site` primary-key lookups with the AIP-231 whole-batch-`NOT_FOUND` default.
+
+**Consequences.** `cargo run -p freight-server` and every affected RPC keep
+working; the README status table moves `BatchGetSites` to *wired* and the
+`ListSites`/`ListShipments` rows note cursor paging, and the `grpcurl` flows are
+refreshed. freight tests that hard-delete a **Shipper** without first clearing its
+**Sites** now rely on the cascade rather than asserting orphans. As freight is the
+sole consumer of the superseded scoping/paging surfaces, the old offset paging and
+`scope_to_parent` usage are deleted here, not kept behind a flag.

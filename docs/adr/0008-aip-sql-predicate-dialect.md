@@ -171,3 +171,58 @@ the two drift-guard tests — redundant by construction now that the schema *is*
 derivation — are removed. `Schema::builder()` survives for descriptor-less
 consumers; its hand-built columns default to filterable + sortable, since with no
 declared types there is nothing to drive the sortable rule.
+
+## Amendment (ADR-0016): scope by equality, seek by tuple, order by key
+
+The typed-key store (ADR-0016) decomposes a **Resource name** into typed key
+columns. That changes three things `aip-sql` owns — how a list is scoped to its
+parent, how it seeks the next page, and how its order is made total — while
+keeping the crate name-agnostic (it still never depends on `aip-resourcename`).
+
+**Decision.**
+
+- **Remove `scope_to_parent`.** The opaque-string parent scope — `LIKE …/%` over a
+  flat `name` column — is deleted, builder and `LIKE … ESCAPE` rendering alike.
+  Its `%` spans `/`, so a non-terminal **Wildcard** over-matches across **Segment**
+  boundaries; there is no portable single-segment `LIKE` wildcard. Scoping moves to
+  the handler, which already holds the parsed parent: it composes
+  `Predicate::eq(column, value)` per concrete **Variable** and *omits* the
+  predicate per **Wildcard** (the `None` bindings from `Pattern::match_with_wildcards`,
+  ADR-0002 amendment). An omitted equality is the structurally correct
+  single-segment **Wildcard** — no string, no `%`, portable to Postgres unchanged.
+  `Predicate::eq` already exists, so no scope-specific surface is added. The
+  AIP-159 SQL-side wildcard stopgap (rendering `-` as `%`, explored in PR #196) is
+  superseded before it lands; freight being the only consumer, the builder is
+  deleted, not deprecated.
+- **Add `Predicate::tuple_gt`.** A new name-agnostic variant emitting the row-value
+  comparison `(col_a, col_b, …) > (?, ?, …)`, one renderer arm per **Dialect** —
+  both SQLite and Postgres support row-value comparison natively. This is the
+  cursor seek; it is reusable for any composite-key cursor paging, not specific to
+  resource names. Rejected: expanding it to a lexicographic OR-of-ANDs (verbose,
+  bind-heavy, worse optimizer plans) and a raw-SQL escape hatch (breaks
+  parameterize-never-interpolate).
+- **Broaden `transpile_order_by`.** It returns the resolved ordered column list —
+  each as `(column, Type)` — alongside the order spec, so a handler feeds the one
+  list to both cursor-build and cursor-validate (ADR-0004 amendment) without
+  re-deriving it. And the always-on tie-break flips: instead of appending a literal
+  `name ASC` (the #156 amendment above), it appends the resource's **key columns**
+  ASC, passed in by the caller so the crate learns nothing about resource names.
+  For a keyed resource the tie-break is the primary key, which makes the order
+  total over exactly the cursor's seek columns; the #156 `name ASC` default applied
+  only while `name` was the identity column and is superseded by the key-column
+  tie-break here.
+- **Add `Schema::column_type(name) -> Option<&Type>`.** The page-token decoder
+  cross-checks each cursor value's variant against its column's declared
+  `aip_filtering::Type`. The **Schema** already carries that per column (the #156
+  amendment derives it from the **Declarations**); this is a read accessor, not new
+  state. Key columns are uniformly `Text` by AIP-122, so no codegen type metadata
+  is needed for them.
+
+**Consequences.** The `scope_to_parent` golden/unit tests are removed with the
+builder; new goldens pin `tuple_gt` rendering across both dialects and the
+key-column tie-break. `CursorValue` lives in `aip-pagination` (ADR-0004 amendment)
+and is converted to `aip_sql::Value` at the freight handler boundary, the one site
+that depends on both crates — `aip-sql` gains no dependency on `aip-pagination`.
+The parameterize-never-interpolate and executor-agnostic invariants hold
+throughout: every change is either a bound comparison or an allowlisted-column
+order term.

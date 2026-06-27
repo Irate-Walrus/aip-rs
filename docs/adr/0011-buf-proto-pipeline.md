@@ -80,3 +80,41 @@ vendored-proto duplication ADR-0006 flagged.
   message embedding an `aip-proto` `Policy`, each crate's pool carrying its own
   copy of the imported `google.*` descriptors) and extension-byte preservation
   in the plugin's emitted `file_descriptor_set`.
+
+## Amendment (ADR-0016): the generated wrapper is the key
+
+The typed-key store (ADR-0016) keys its tables on the **Resource name**'s
+**Variables**. Spanner has no separate key concept from the name, so the plugin
+emits no second `*Key` struct: the generated `*ResourceName` wrapper *is* the key,
+and gains the surface the store reads.
+
+**Decision.**
+
+- **Flip `Ord`.** The wrapper sorts lexicographically over its **Variable**-field
+  tuple — the key columns — not over the cached canonical-name string. This sorts
+  `shippers/a` before `shippers/a-b`, the key-tuple order, reversing the
+  string order (where `-` at `0x2D` sorts before `/` at `0x2F`, issue #169). The
+  test `ord_follows_string_order_not_the_variable_tuple` is renamed and inverted to
+  lock the new contract.
+- **Emit the key surface as inherent items.** `KEY_COLUMNS: &'static [&'static str]`
+  (the **Variable** names, verbatim, in **Pattern** order), `key_values(&self) ->
+  [&str; N]`, and `pattern() -> &'static Pattern`. The store builds key binds and
+  scope predicates from these, and reconstructs the `name` through the wrapper.
+- **Keep the cached `name: String`**, reframed as memoization of `Display`. It
+  preserves O(1) `as_str()` / `AsRef<str>` / `Display` / `From<Self> for String`;
+  construction still pays the one `format!`. Dropping it would re-derive the string
+  on every read, the path the store now takes to reconstruct `name`.
+- **Inherent items only — no `ResourceKey` trait.** There are zero generic, key-
+  agnostic consumers today; the freight handlers name the concrete wrapper types
+  directly. A trait would be a marker with no caller. `Serialize`/`Deserialize`,
+  `PARENT_KEY_COLUMNS`, and `KEY_COLUMN_TYPES` are likewise not emitted — the
+  cursor payload carries its own typing (ADR-0004 amendment) and key columns are
+  uniformly `Text` (ADR-0008 amendment), so none of them earns its place yet.
+
+**Consequences.** The `protoc-gen-prost-aip` golden fixtures are re-blessed for the
+new wrapper surface and the flipped `Ord`
+(`BLESS=1 cargo test -p aip-codegen --test golden`). The proto annotation stays the
+single source of truth — the key columns are the pattern's **Variables**, read from
+`google.api.resource`, not a second hand-maintained list. If a generic consumer
+ever appears, the `ResourceKey` trait and the deferred consts are an additive
+emission away.
