@@ -28,7 +28,7 @@
 //! ```
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Errors produced when parsing, validating, or matching resource names.
 #[derive(Debug, thiserror::Error)]
@@ -189,6 +189,67 @@ impl Pattern {
             }
         }
         Some(Captures { vars })
+    }
+
+    /// Match a parent name, tolerating a `-` [`Wildcard`](WILDCARD) in any
+    /// variable slot.
+    ///
+    /// Concrete segment binds `Some(id)`, a `-` binds `None`; literal segments
+    /// must still match exact. Wrong shape or literal is
+    /// [`Error::PatternMismatch`].
+    pub fn match_with_wildcards<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> Result<HashMap<&'a str, Option<&'a str>>, Error> {
+        let segments = name_segments(name);
+        if segments.len() != self.segments.len() {
+            return Err(self.mismatch());
+        }
+        let mut vars = HashMap::new();
+        for (pattern, segment) in self.segments.iter().zip(segments) {
+            // Concrete name must not carry `{variable}` segments.
+            if variable_name(segment).is_some() {
+                return Err(self.mismatch());
+            }
+            match pattern {
+                PatternSegment::Literal(literal) => {
+                    if literal != segment {
+                        return Err(self.mismatch());
+                    }
+                }
+                PatternSegment::Variable(var) => {
+                    if segment == WILDCARD {
+                        vars.insert(var.as_str(), None);
+                    } else if segment.is_empty() {
+                        return Err(self.mismatch());
+                    } else {
+                        vars.insert(var.as_str(), Some(segment));
+                    }
+                }
+            }
+        }
+        Ok(vars)
+    }
+
+    /// Render the pattern back to its `{variable}` string form.
+    ///
+    /// Used to name the pattern in [`Error::PatternMismatch`].
+    fn render(&self) -> String {
+        self.segments
+            .iter()
+            .map(|s| match s {
+                PatternSegment::Literal(literal) => literal.clone(),
+                PatternSegment::Variable(var) => format!("{{{var}}}"),
+            })
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    /// Build a [`Error::PatternMismatch`] naming this pattern.
+    fn mismatch(&self) -> Error {
+        Error::PatternMismatch {
+            pattern: self.render(),
+        }
     }
 
     /// Format a resource name from `(variable, value)` pairs.
@@ -979,6 +1040,57 @@ mod tests {
         assert!(pattern.match_name("publishers/foo").is_none());
         // Literal segment mismatch.
         assert!(pattern.match_name("shippers/foo/books/bar").is_none());
+    }
+
+    #[test]
+    fn match_with_wildcards_binds_concrete_and_wildcard() {
+        let pattern = Pattern::parse("shippers/{shipper}/sites/{site}").unwrap();
+
+        // Both concrete: each variable binds Some.
+        let binds = pattern
+            .match_with_wildcards("shippers/acme/sites/oslo")
+            .unwrap();
+        assert_eq!(binds.get("shipper"), Some(&Some("acme")));
+        assert_eq!(binds.get("site"), Some(&Some("oslo")));
+
+        // Terminal wildcard: the trailing variable binds None.
+        let binds = pattern
+            .match_with_wildcards("shippers/acme/sites/-")
+            .unwrap();
+        assert_eq!(binds.get("shipper"), Some(&Some("acme")));
+        assert_eq!(binds.get("site"), Some(&None));
+
+        // Non-terminal wildcard: the interior variable binds None, no over-match.
+        let binds = pattern
+            .match_with_wildcards("shippers/-/sites/oslo")
+            .unwrap();
+        assert_eq!(binds.get("shipper"), Some(&None));
+        assert_eq!(binds.get("site"), Some(&Some("oslo")));
+
+        // All wildcard.
+        let binds = pattern.match_with_wildcards("shippers/-/sites/-").unwrap();
+        assert_eq!(binds.get("shipper"), Some(&None));
+        assert_eq!(binds.get("site"), Some(&None));
+    }
+
+    #[test]
+    fn match_with_wildcards_rejects_shape_and_literal_mismatch() {
+        let pattern = Pattern::parse("shippers/{shipper}/sites/{site}").unwrap();
+        // Wrong literal collection segment.
+        assert!(matches!(
+            pattern.match_with_wildcards("shippers/acme/teams/oslo"),
+            Err(Error::PatternMismatch { .. })
+        ));
+        // Too few segments.
+        assert!(matches!(
+            pattern.match_with_wildcards("shippers/acme"),
+            Err(Error::PatternMismatch { .. })
+        ));
+        // Too many segments.
+        assert!(matches!(
+            pattern.match_with_wildcards("shippers/acme/sites/oslo/zones/x"),
+            Err(Error::PatternMismatch { .. })
+        ));
     }
 
     #[test]
